@@ -183,7 +183,25 @@ if (userCount === 0) {
   `).run(adminUser, adminName, hashPassword(adminPass));
   console.log(`🔐 Usuário inicial criado: ${adminUser}`);
 }
+const seedUsers = [
+  { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password: 'Nayara@2026Tc' },
+  { username: 'rubens.gerente', nome: 'Rubens', role: 'gerente', password: 'Rubens@2026Tc' },
+  { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password: 'Estoque@2026Tc' },
+];
 
+const insertSeedUser = db.prepare(`
+  INSERT OR IGNORE INTO users (username, nome, role, password_hash, active, created_at, updated_at)
+  VALUES (?, ?, ?, ?, 1, datetime('now','localtime'), datetime('now','localtime'))
+`);
+
+for (const u of seedUsers) {
+  insertSeedUser.run(
+    u.username,
+    u.nome,
+    u.role,
+    hashPassword(u.password)
+  );
+}
 const count = db.prepare('SELECT COUNT(*) as n FROM produtos').get();
 if (count.n === 0) {
   const seedPath = path.join(__dirname, 'produtos_seed.json');
