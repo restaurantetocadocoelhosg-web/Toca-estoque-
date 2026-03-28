@@ -1042,23 +1042,26 @@ async function loadHist() {
       el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Nenhum lançamento encontrado.</div></div>';
       return;
     }
-    let dataHora = '';
-if (m.created_at) {
-  const bruto = String(m.created_at).trim();
-  const data = new Date(bruto.replace(' ', 'T'));
-
-  if (!isNaN(data.getTime())) {
-    dataHora = new Intl.DateTimeFormat('pt-BR', {
-      timeZone: 'America/Sao_Paulo',
-      day: '2-digit',
-      month: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(data);
-  } else {
-    dataHora = bruto;
-  }
-}
+    el.innerHTML = items.map(m => {
+      const tClass = { Entrada: 'ok', 'Saída': 'saida', Perda: 'perda', Ajuste: 'ajuste' }[m.tipo] || '';
+      const sinal = m.tipo === 'Entrada' ? '+' : m.tipo === 'Ajuste' ? '=' : '-';
+      let dataHora = '';
+      if (m.created_at) {
+        const bruto = String(m.created_at).trim();
+        const data = new Date(bruto.replace(' ', 'T'));
+        if (!isNaN(data.getTime())) {
+          dataHora = new Intl.DateTimeFormat('pt-BR', {
+            timeZone: 'America/Sao_Paulo',
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+          }).format(data);
+        } else {
+          dataHora = bruto;
+        }
+      }
+      return `<div class="hist-item">
         <div class="hist-top">
           <div class="hist-nome">${escapeHtml(m.produto_nome)}</div>
           <span class="hist-tipo ${tClass}">${m.tipo}</span>
@@ -1067,7 +1070,7 @@ if (m.created_at) {
           <span>${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade || '')}</span>
           ${m.motivo ? `<span>${escapeHtml(m.motivo)}</span>` : ''}
           ${m.responsavel ? `<span>👤 ${escapeHtml(m.responsavel)}</span>` : ''}
-        <span>🕐 ${escapeHtml(dataHora)}</span>
+          <span>🕐 ${escapeHtml(dataHora)}</span>
         </div>
       </div>`;
     }).join('');
