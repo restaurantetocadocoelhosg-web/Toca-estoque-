@@ -103,8 +103,29 @@ main {
   border-radius: 12px;
   padding: 14px;
 }
+.card.card-click {
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.card.card-click:active { background: var(--s2); }
 .card-label { font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 4px; }
 .card-val { font-size: 26px; font-weight: 800; line-height: 1; }
+.card-hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
+
+/* Alert banner */
+.alert-banner {
+  margin: 10px 14px 0;
+  background: rgba(239,71,111,0.1);
+  border: 1px solid rgba(239,71,111,0.4);
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--red);
+  display: none;
+  cursor: pointer;
+}
+.alert-banner.show { display: block; }
 .green { color: var(--green); }
 .red { color: var(--red); }
 .yellow { color: var(--yellow); }
@@ -411,7 +432,40 @@ select.big-input { font-size: 14px; }
 .tipo-saida { background: rgba(255,107,53,0.15); color: var(--accent); }
 .tipo-perda { background: rgba(239,71,111,0.15); color: var(--red); }
 .tipo-ajuste { background: rgba(76,201,240,0.15); color: var(--blue); }
-.hist-bottom { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+.hist-bottom { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+/* Date filter row */
+.date-filter {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 10px;
+  align-items: center;
+}
+.date-filter input[type="date"] {
+  flex: 1;
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 8px 10px;
+  outline: none;
+  -webkit-appearance: none;
+  color-scheme: dark;
+}
+.date-filter label { font-size: 11px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.btn-clear-date {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
 
 /* ====== TOAST ====== */
 #toast {
@@ -527,6 +581,7 @@ select.big-input { font-size: 14px; }
   <!-- ====== LANÇAMENTO ====== -->
   <div id="p-lancar" class="page active">
     <div class="cards" id="dash-cards"></div>
+    <div id="alert-banner" class="alert-banner" onclick="irEstoque('zerado')"></div>
 
     <div class="lancamento-wrap">
 
@@ -634,6 +689,13 @@ select.big-input { font-size: 14px; }
         <option value="Ajuste">🔄 Ajuste</option>
       </select>
     </div>
+    <div class="date-filter">
+      <label>De</label>
+      <input type="date" id="hist-data-ini" onchange="loadHist()">
+      <label>Até</label>
+      <input type="date" id="hist-data-fim" onchange="loadHist()">
+      <button class="btn-clear-date" onclick="limparDatas()">✕ Limpar</button>
+    </div>
     <div class="hist-list" id="hist-list"><div class="loading">Carregando...</div></div>
   </div>
 
@@ -642,22 +704,22 @@ select.big-input { font-size: 14px; }
     <div class="export-list">
       <div class="export-card">
         <div class="export-title">📦 Posição atual do estoque</div>
-        <div class="export-desc">Todos os 259 produtos com quantidade, status e valor. Abre direto no Excel.</div>
-        <button class="btn-export btn-primary" onclick="exportar('estoque')">⬇️ Baixar CSV — Estoque</button>
+        <div class="export-desc">Todos os produtos com quantidade atual, mínimo, custo unitário, valor total e status (OK / Atenção / Crítico / Zerado). Abre direto no Excel.</div>
+        <button class="btn-export btn-primary" onclick="exportar('estoque')">⬇️ Baixar CSV — Estoque completo</button>
       </div>
       <div class="export-card">
         <div class="export-title">📋 Histórico de movimentações</div>
-        <div class="export-desc">Todas as entradas, saídas, perdas e ajustes registrados.</div>
+        <div class="export-desc">Todas as entradas, saídas, perdas e ajustes com data/hora, responsável, motivo e valor movimentado.</div>
         <button class="btn-export btn-primary" onclick="exportar('movimentacoes')">⬇️ Baixar CSV — Movimentações</button>
       </div>
       <div class="export-card">
         <div class="export-title">🛒 Lista de compras</div>
-        <div class="export-desc">Apenas os itens zerados e críticos, com quantidade sugerida de compra.</div>
-        <button class="btn-export btn-success" onclick="exportar('compras')">⬇️ Baixar CSV — Compras</button>
+        <div class="export-desc">Somente itens zerados e críticos (≤50% do mínimo), com quantidade sugerida de reposição. Ideal para enviar ao fornecedor.</div>
+        <button class="btn-export btn-success" onclick="exportar('compras')">⬇️ Baixar CSV — Lista de compras</button>
       </div>
       <div class="export-card" style="border-color: rgba(239,71,111,0.3)">
         <div class="export-title" style="color:var(--red)">⚠️ Resetar estoque</div>
-        <div class="export-desc">Restaura todas as quantidades para os valores originais da planilha. Histórico é mantido.</div>
+        <div class="export-desc">Restaura todas as quantidades para os valores originais da planilha de cadastro. O histórico de movimentações é mantido.</div>
         <button id="btn-reset" class="btn-export btn-danger" onclick="resetar()">🔄 Restaurar quantidades originais</button>
       </div>
     </div>
@@ -819,13 +881,40 @@ async function loadDash() {
   try {
     const d = await api('/api/dashboard');
     document.getElementById('dash-cards').innerHTML = `
-      <div class="card"><div class="card-label">Hoje</div><div class="card-val accent">${d.lancHoje}</div></div>
-      <div class="card"><div class="card-label">🔴 Zerados</div><div class="card-val red">${d.zerados}</div></div>
-      <div class="card"><div class="card-label">🟡 Críticos</div><div class="card-val yellow">${d.criticos}</div></div>
-      <div class="card"><div class="card-label">Valor R$</div><div class="card-val green">${fmtMoneyCompact(d.valorTotal)}</div></div>
+      <div class="card"><div class="card-label">📅 Hoje</div><div class="card-val accent">${d.lancHoje}</div><div class="card-hint">lançamentos</div></div>
+      <div class="card card-click" onclick="irEstoque('zerado')" title="Ver zerados">
+        <div class="card-label">🔴 Zerados</div>
+        <div class="card-val red">${d.zerados}</div>
+        <div class="card-hint">toque para ver →</div>
+      </div>
+      <div class="card card-click" onclick="irEstoque('critico')" title="Ver críticos">
+        <div class="card-label">🟡 Críticos</div>
+        <div class="card-val yellow">${d.criticos}</div>
+        <div class="card-hint">toque para ver →</div>
+      </div>
+      <div class="card"><div class="card-label">💰 Valor R$</div><div class="card-val green">${fmtMoneyCompact(d.valorTotal)}</div><div class="card-hint">em estoque</div></div>
     `;
+    // Alerta banner
+    const banner = document.getElementById('alert-banner');
+    const total = d.zerados + d.criticos;
+    if (total > 0) {
+      banner.textContent = `⚠️ ${total} item${total > 1 ? 'ns precisam' : ' precisa'} de atenção — ${d.zerados} zerado${d.zerados !== 1 ? 's' : ''}, ${d.criticos} crítico${d.criticos !== 1 ? 's' : ''}. Toque para ver.`;
+      banner.classList.add('show');
+    } else {
+      banner.classList.remove('show');
+    }
     renderUltimos(d.ultimos);
   } catch(e) { handleApiError(e); }
+}
+
+function irEstoque(status) {
+  const navBtns = document.querySelectorAll('.nav-btn');
+  goPage('estoque', navBtns[1]);
+  document.querySelectorAll('.pill').forEach(p => {
+    p.classList.toggle('active', p.dataset.st === status);
+  });
+  estStatus = status;
+  loadEstoque();
 }
 
 function renderUltimos(items) {
@@ -1031,9 +1120,13 @@ function selStatus(el) {
 async function loadHist() {
   const q = document.getElementById('hist-search').value;
   const tipo = document.getElementById('hist-tipo').value;
-  const params = new URLSearchParams({ limit: 100 });
+  const dataIni = document.getElementById('hist-data-ini').value;
+  const dataFim = document.getElementById('hist-data-fim').value;
+  const params = new URLSearchParams({ limit: 200 });
   if (q) params.set('q', q);
   if (tipo) params.set('tipo', tipo);
+  if (dataIni) params.set('data_inicio', dataIni);
+  if (dataFim) params.set('data_fim', dataFim);
 
   try {
     const items = await api('/api/movimentacoes?' + params);
@@ -1043,7 +1136,7 @@ async function loadHist() {
       return;
     }
     el.innerHTML = items.map(m => {
-      const tClass = { Entrada: 'ok', 'Saída': 'saida', Perda: 'perda', Ajuste: 'ajuste' }[m.tipo] || '';
+      const tClass = { Entrada: 'tipo-entrada', 'Saída': 'tipo-saida', Perda: 'tipo-perda', Ajuste: 'tipo-ajuste' }[m.tipo] || '';
       const sinal = m.tipo === 'Entrada' ? '+' : m.tipo === 'Ajuste' ? '=' : '-';
       let dataHora = '';
       if (m.created_at) {
@@ -1075,6 +1168,12 @@ async function loadHist() {
       </div>`;
     }).join('');
   } catch(e) { handleApiError(e, false); }
+}
+
+function limparDatas() {
+  document.getElementById('hist-data-ini').value = '';
+  document.getElementById('hist-data-fim').value = '';
+  loadHist();
 }
 
 async function exportar(tipo) {
