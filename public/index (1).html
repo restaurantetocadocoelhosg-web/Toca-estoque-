@@ -1,0 +1,1183 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#0f0f0f">
+<title>🐰 Toca — Estoque</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+:root {
+  --bg: #0f0f0f;
+  --s1: #1a1a1a;
+  --s2: #242424;
+  --border: #2e2e2e;
+  --accent: #ff6b35;
+  --green: #06d6a0;
+  --red: #ef476f;
+  --yellow: #ffd166;
+  --blue: #4cc9f0;
+  --text: #f0f0f0;
+  --muted: #777;
+  --font: 'Inter', sans-serif;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ====== HEADER ====== */
+header {
+  background: var(--s1);
+  border-bottom: 1px solid var(--border);
+  padding: 14px 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+}
+.logo { font-size: 17px; font-weight: 800; letter-spacing: -0.5px; }
+.logo span { color: var(--accent); }
+#clock { font-size: 12px; color: var(--muted); }
+
+/* ====== NAV BOTTOM ====== */
+nav {
+  order: 999;
+  background: var(--s1);
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-shrink: 0;
+  padding-bottom: var(--safe-bottom);
+}
+.nav-btn {
+  flex: 1;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 10px 4px 8px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  transition: color 0.15s;
+}
+.nav-btn .icon { font-size: 20px; }
+.nav-btn.active { color: var(--accent); }
+
+/* ====== MAIN ====== */
+main {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.page { display: none; padding: 0; }
+.page.active { display: block; }
+
+/* ====== CARDS ====== */
+.cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  padding: 14px 14px 0;
+}
+.card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px;
+}
+.card-label { font-size: 11px; color: var(--muted); font-weight: 500; margin-bottom: 4px; }
+.card-val { font-size: 26px; font-weight: 800; line-height: 1; }
+.green { color: var(--green); }
+.red { color: var(--red); }
+.yellow { color: var(--yellow); }
+.accent { color: var(--accent); }
+
+/* ====== SEÇÃO LANÇAMENTO ====== */
+.lancamento-wrap { padding: 14px; }
+
+/* Tipo seletor grande */
+.tipo-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.tipo-card {
+  background: var(--s1);
+  border: 2px solid var(--border);
+  border-radius: 14px;
+  padding: 14px 10px;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+.tipo-card .tipo-icon { font-size: 24px; display: block; margin-bottom: 4px; }
+.tipo-card .tipo-label { font-size: 13px; font-weight: 700; color: var(--muted); }
+.tipo-card.sel-entrada { border-color: var(--green); background: rgba(6,214,160,0.08); }
+.tipo-card.sel-entrada .tipo-label { color: var(--green); }
+.tipo-card.sel-saida { border-color: var(--accent); background: rgba(255,107,53,0.08); }
+.tipo-card.sel-saida .tipo-label { color: var(--accent); }
+.tipo-card.sel-perda { border-color: var(--red); background: rgba(239,71,111,0.08); }
+.tipo-card.sel-perda .tipo-label { color: var(--red); }
+.tipo-card.sel-ajuste { border-color: var(--blue); background: rgba(76,201,240,0.08); }
+.tipo-card.sel-ajuste .tipo-label { color: var(--blue); }
+
+/* Campo de busca grande */
+.field-group { margin-bottom: 10px; }
+.field-label { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+
+.search-wrap { position: relative; }
+.big-input {
+  width: 100%;
+  background: var(--s1);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;
+  font-weight: 500;
+  padding: 14px 16px;
+  outline: none;
+  transition: border-color 0.15s;
+  -webkit-appearance: none;
+}
+.big-input:focus { border-color: var(--accent); }
+.big-input.has-value { border-color: var(--s2); background: var(--s2); }
+
+.ac-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0; right: 0;
+  background: #1e1e1e;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  z-index: 50;
+  display: none;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  max-height: 260px;
+  overflow-y: auto;
+}
+.ac-list.open { display: block; }
+.ac-item {
+  padding: 12px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+.ac-item:last-child { border-bottom: none; }
+.ac-item:active { background: var(--s2); }
+.ac-nome { font-size: 14px; font-weight: 600; }
+.ac-info { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ac-qtd-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 100px;
+  white-space: nowrap;
+}
+.badge-ok { background: rgba(6,214,160,0.15); color: var(--green); }
+.badge-low { background: rgba(239,71,111,0.15); color: var(--red); }
+.badge-warn { background: rgba(255,209,102,0.15); color: var(--yellow); }
+
+/* Produto selecionado */
+.prod-selected {
+  background: var(--s2);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+  display: none;
+  margin-bottom: 10px;
+  justify-content: space-between;
+  align-items: center;
+}
+.prod-selected.show { display: flex; }
+.prod-nome { font-size: 15px; font-weight: 700; }
+.prod-info { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.btn-clear { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; padding: 4px; }
+
+/* Row qtd + motivo */
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+
+/* Input qtd grande */
+.qtd-input {
+  width: 100%;
+  background: var(--s1);
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 22px;
+  font-weight: 800;
+  padding: 14px 16px;
+  outline: none;
+  text-align: center;
+  -webkit-appearance: none;
+  transition: border-color 0.15s;
+}
+.qtd-input:focus { border-color: var(--accent); }
+
+select.big-input { font-size: 14px; }
+
+/* Resp field */
+.resp-row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: end; }
+
+/* Botão lançar grande */
+.btn-lancar {
+  width: 100%;
+  padding: 17px;
+  font-size: 17px;
+  font-weight: 800;
+  border: none;
+  border-radius: 14px;
+  cursor: pointer;
+  font-family: var(--font);
+  letter-spacing: 0.3px;
+  transition: all 0.15s;
+  background: var(--accent);
+  color: #fff;
+  margin-top: 4px;
+}
+.btn-lancar:active { transform: scale(0.97); opacity: 0.9; }
+.btn-lancar.entrada { background: var(--green); color: #000; }
+.btn-lancar.saida { background: var(--accent); }
+.btn-lancar.perda { background: var(--red); }
+.btn-lancar.ajuste { background: var(--blue); color: #000; }
+
+/* Ultimos lançamentos */
+.section-header {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 16px 14px 8px;
+}
+
+.mov-list { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.mov-item {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.mov-left { flex: 1; min-width: 0; }
+.mov-nome { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mov-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.mov-right { text-align: right; flex-shrink: 0; }
+.mov-qtd { font-size: 16px; font-weight: 800; }
+.mov-hora { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+.tipo-dot {
+  display: inline-block;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  margin-right: 5px;
+  flex-shrink: 0;
+}
+.dot-entrada { background: var(--green); }
+.dot-saida { background: var(--accent); }
+.dot-perda { background: var(--red); }
+.dot-ajuste { background: var(--blue); }
+
+/* ====== ESTOQUE PAGE ====== */
+.search-bar {
+  padding: 12px 14px;
+  display: flex;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 10;
+  border-bottom: 1px solid var(--border);
+}
+.search-bar input {
+  flex: 1;
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  padding: 10px 14px;
+  outline: none;
+  -webkit-appearance: none;
+}
+.search-bar select {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 13px;
+  padding: 10px 10px;
+  outline: none;
+  max-width: 120px;
+}
+
+.prod-list { padding: 8px 14px 80px; display: flex; flex-direction: column; gap: 6px; }
+.prod-row {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+.prod-row:active { background: var(--s2); }
+.prod-row-left { flex: 1; min-width: 0; }
+.prod-row-nome { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.prod-row-cat { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.prod-row-right { text-align: right; flex-shrink: 0; }
+.prod-row-qtd { font-size: 17px; font-weight: 800; }
+.prod-row-qtd.zerado { color: var(--red); }
+.prod-row-qtd.critico { color: var(--yellow); }
+.prod-row-qtd.atencao { color: var(--accent); }
+.prod-row-qtd.ok { color: var(--green); }
+.prod-row-unid { font-size: 11px; color: var(--muted); }
+
+/* Status filter pills */
+.status-pills {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.status-pills::-webkit-scrollbar { display: none; }
+.pill {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  color: var(--muted);
+  font-family: var(--font);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 6px 14px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  border: 1.5px solid var(--border);
+}
+.pill.active { border-color: var(--accent); color: var(--accent); background: rgba(255,107,53,0.1); }
+
+/* ====== HISTORICO ====== */
+.hist-list { padding: 8px 14px 80px; display: flex; flex-direction: column; gap: 8px; }
+.hist-item {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.hist-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.hist-nome { font-size: 14px; font-weight: 700; }
+.hist-tipo {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 3px 10px;
+  border-radius: 100px;
+}
+.tipo-entrada { background: rgba(6,214,160,0.15); color: var(--green); }
+.tipo-saida { background: rgba(255,107,53,0.15); color: var(--accent); }
+.tipo-perda { background: rgba(239,71,111,0.15); color: var(--red); }
+.tipo-ajuste { background: rgba(76,201,240,0.15); color: var(--blue); }
+.hist-bottom { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ====== TOAST ====== */
+#toast {
+  position: fixed;
+  bottom: calc(70px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--s2);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  padding: 12px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  z-index: 999;
+  opacity: 0;
+  transition: all 0.25s;
+  white-space: nowrap;
+  max-width: 90vw;
+  text-align: center;
+}
+#toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+#toast.ok { border-color: var(--green); color: var(--green); }
+#toast.err { border-color: var(--red); color: var(--red); }
+
+/* ====== LOADING ====== */
+.loading { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
+
+/* ====== EXPORTAR PAGE ====== */
+.export-list { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.export-card {
+  background: var(--s1);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 18px;
+}
+.export-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; }
+.export-desc { font-size: 13px; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
+.btn-export {
+  width: 100%;
+  padding: 14px;
+  font-size: 15px;
+  font-weight: 700;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-family: var(--font);
+  transition: all 0.15s;
+}
+.btn-export:active { transform: scale(0.97); }
+.btn-primary { background: var(--accent); color: #fff; }
+.btn-success { background: var(--green); color: #000; }
+.btn-danger { background: rgba(239,71,111,0.1); color: var(--red); border: 1.5px solid var(--red) !important; }
+
+/* Empty state */
+.empty { text-align: center; padding: 48px 24px; color: var(--muted); }
+.empty-icon { font-size: 36px; margin-bottom: 10px; }
+.empty-text { font-size: 14px; }
+
+.auth-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.78); backdrop-filter: blur(6px);
+  z-index: 120; display: none; align-items: center; justify-content: center; padding: 18px;
+}
+.auth-overlay.show { display: flex; }
+.auth-card {
+  width: 100%; max-width: 420px; background: #151515; border: 1px solid var(--border); border-radius: 18px;
+  padding: 20px; box-shadow: 0 20px 50px rgba(0,0,0,0.4);
+}
+.auth-title { font-size: 22px; font-weight: 800; margin-bottom: 6px; }
+.auth-sub { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 16px; }
+.auth-actions { display:flex; gap:10px; margin-top:14px; }
+.auth-actions button { flex:1; }
+.userbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.user-pill { font-size: 11px; color: var(--muted); background: var(--s2); padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); }
+.link-btn { background:none; border:none; color: var(--accent); font-weight:700; font-size:12px; cursor:pointer; padding:0; }
+.small-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
+.hidden { display:none !important; }
+
+</style>
+</head>
+<body>
+
+<div id="auth-overlay" class="auth-overlay show">
+  <div class="auth-card">
+    <div class="auth-title">🔐 Entrar no estoque</div>
+    <div class="auth-sub">Use seu usuário e senha para acessar. Usuário inicial: <b>admin</b> · Senha inicial: <b>Toca123!</b></div>
+    <div class="field-group">
+      <div class="field-label">Usuário</div>
+      <input class="big-input" id="login-user" type="text" autocomplete="username" placeholder="Digite o usuário">
+    </div>
+    <div class="field-group">
+      <div class="field-label">Senha</div>
+      <input class="big-input" id="login-pass" type="password" autocomplete="current-password" placeholder="Digite a senha">
+    </div>
+    <div class="auth-actions">
+      <button class="btn-export btn-primary" onclick="doLogin()">Entrar</button>
+    </div>
+    <div class="small-note">Troque a senha inicial assim que entrar.</div>
+  </div>
+</div>
+
+<header>
+  <div class="logo">🐰 <span>Toca</span> do Coelho</div>
+  <div class="userbar">
+    <div id="user-badge" class="user-pill">Não autenticado</div>
+    <button id="btn-change-pass" class="link-btn hidden" onclick="trocarSenha()">Trocar senha</button>
+    <button id="btn-logout" class="link-btn hidden" onclick="logout()">Sair</button>
+    <div id="clock"></div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ====== LANÇAMENTO ====== -->
+  <div id="p-lancar" class="page active">
+    <div class="cards" id="dash-cards"></div>
+
+    <div class="lancamento-wrap">
+
+      <!-- Tipo -->
+      <div class="tipo-grid">
+        <div class="tipo-card sel-entrada" data-tipo="Entrada" onclick="selTipo(this)">
+          <span class="tipo-icon">⬆️</span>
+          <span class="tipo-label">Entrada</span>
+        </div>
+        <div class="tipo-card" data-tipo="Saída" onclick="selTipo(this)">
+          <span class="tipo-icon">⬇️</span>
+          <span class="tipo-label">Saída</span>
+        </div>
+        <div class="tipo-card" data-tipo="Perda" onclick="selTipo(this)">
+          <span class="tipo-icon">❌</span>
+          <span class="tipo-label">Perda</span>
+        </div>
+        <div class="tipo-card" data-tipo="Ajuste" onclick="selTipo(this)">
+          <span class="tipo-icon">🔄</span>
+          <span class="tipo-label">Ajuste</span>
+        </div>
+      </div>
+
+      <!-- Produto selecionado -->
+      <div id="prod-sel" class="prod-selected">
+        <div>
+          <div class="prod-nome" id="sel-nome"></div>
+          <div class="prod-info" id="sel-info"></div>
+        </div>
+        <button class="btn-clear" onclick="clearProd()">✕</button>
+      </div>
+
+      <!-- Busca produto -->
+      <div id="busca-wrap" class="field-group">
+        <div class="field-label">Produto</div>
+        <div class="search-wrap">
+          <input class="big-input" id="f-busca" type="text" placeholder="Digite o nome..." autocomplete="off"
+            oninput="buscaProd(this.value)" onblur="setTimeout(closeAc, 200)">
+          <div class="ac-list" id="ac-list"></div>
+        </div>
+      </div>
+
+      <!-- Qtd + Motivo -->
+      <div class="row2">
+        <div class="field-group" style="margin:0">
+          <div class="field-label">Quantidade</div>
+          <input class="qtd-input" id="f-qtd" type="number" placeholder="0" step="0.001" min="0" inputmode="decimal">
+        </div>
+        <div class="field-group" style="margin:0">
+          <div class="field-label">Motivo</div>
+          <select class="big-input" id="f-motivo" style="padding:14px 10px">
+            <option value="Compra">Compra</option>
+            <option value="Produção">Produção</option>
+            <option value="Perda/Vencimento">Perda/Vencto</option>
+            <option value="Inventário">Inventário</option>
+            <option value="Transferência">Transfer.</option>
+            <option value="Devolução">Devolução</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Responsável -->
+      <div class="field-group">
+        <div class="field-label">Responsável</div>
+        <input class="big-input" id="f-resp" type="text" placeholder="Responsável" style="font-size:15px;padding:12px 16px" disabled>
+      </div>
+
+      <!-- Botão lançar -->
+      <button id="btn-lancar" class="btn-lancar entrada" onclick="lancar()">
+        ⬆️ LANÇAR ENTRADA
+      </button>
+    </div>
+
+    <div class="section-header">Últimos lançamentos</div>
+    <div class="mov-list" id="ultimos-list"></div>
+  </div>
+
+  <!-- ====== ESTOQUE ====== -->
+  <div id="p-estoque" class="page">
+    <div class="search-bar">
+      <input type="text" placeholder="🔍 Buscar produto..." id="est-search" oninput="loadEstoque()">
+      <select id="est-cat" onchange="loadEstoque()">
+        <option value="">Todas</option>
+      </select>
+    </div>
+    <div class="status-pills">
+      <div class="pill active" data-st="" onclick="selStatus(this)">Todos</div>
+      <div class="pill" data-st="zerado" onclick="selStatus(this)">🔴 Zerado</div>
+      <div class="pill" data-st="critico" onclick="selStatus(this)">🟡 Crítico</div>
+      <div class="pill" data-st="atencao" onclick="selStatus(this)">🟠 Atenção</div>
+      <div class="pill" data-st="ok" onclick="selStatus(this)">🟢 OK</div>
+    </div>
+    <div class="prod-list" id="prod-list"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- ====== HISTÓRICO ====== -->
+  <div id="p-hist" class="page">
+    <div class="search-bar">
+      <input type="text" placeholder="🔍 Buscar..." id="hist-search" oninput="loadHist()">
+      <select id="hist-tipo" onchange="loadHist()">
+        <option value="">Todos</option>
+        <option value="Entrada">⬆️ Entrada</option>
+        <option value="Saída">⬇️ Saída</option>
+        <option value="Perda">❌ Perda</option>
+        <option value="Ajuste">🔄 Ajuste</option>
+      </select>
+    </div>
+    <div class="hist-list" id="hist-list"><div class="loading">Carregando...</div></div>
+  </div>
+
+  <!-- ====== EXPORTAR ====== -->
+  <div id="p-export" class="page">
+    <div class="export-list">
+      <div class="export-card">
+        <div class="export-title">📦 Posição atual do estoque</div>
+        <div class="export-desc">Todos os 259 produtos com quantidade, status e valor. Abre direto no Excel.</div>
+        <button class="btn-export btn-primary" onclick="exportar('estoque')">⬇️ Baixar CSV — Estoque</button>
+      </div>
+      <div class="export-card">
+        <div class="export-title">📋 Histórico de movimentações</div>
+        <div class="export-desc">Todas as entradas, saídas, perdas e ajustes registrados.</div>
+        <button class="btn-export btn-primary" onclick="exportar('movimentacoes')">⬇️ Baixar CSV — Movimentações</button>
+      </div>
+      <div class="export-card">
+        <div class="export-title">🛒 Lista de compras</div>
+        <div class="export-desc">Apenas os itens zerados e críticos, com quantidade sugerida de compra.</div>
+        <button class="btn-export btn-success" onclick="exportar('compras')">⬇️ Baixar CSV — Compras</button>
+      </div>
+      <div class="export-card" style="border-color: rgba(239,71,111,0.3)">
+        <div class="export-title" style="color:var(--red)">⚠️ Resetar estoque</div>
+        <div class="export-desc">Restaura todas as quantidades para os valores originais da planilha. Histórico é mantido.</div>
+        <button id="btn-reset" class="btn-export btn-danger" onclick="resetar()">🔄 Restaurar quantidades originais</button>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<nav>
+  <button class="nav-btn active" onclick="goPage('lancar', this)">
+    <span class="icon">📝</span>Lançar
+  </button>
+  <button class="nav-btn" onclick="goPage('estoque', this)">
+    <span class="icon">📦</span>Estoque
+  </button>
+  <button class="nav-btn" onclick="goPage('hist', this)">
+    <span class="icon">📋</span>Histórico
+  </button>
+  <button class="nav-btn" onclick="goPage('export', this)">
+    <span class="icon">⬇️</span>Exportar
+  </button>
+</nav>
+
+<div id="toast"></div>
+
+
+<script>
+const API = '';
+let authToken = localStorage.getItem('toca_token') || '';
+let currentUser = null;
+let permissions = {};
+let tipoAtual = 'Entrada';
+let prodAtual = null;
+let estStatus = '';
+
+async function init() {
+  clock();
+  setInterval(clock, 1000);
+  bindAuthEnter();
+  if (authToken) {
+    try {
+      await loadSession();
+      await afterLogin();
+      return;
+    } catch (e) {
+      localStorage.removeItem('toca_token');
+      authToken = '';
+    }
+  }
+  showLogin(true);
+}
+
+function bindAuthEnter() {
+  ['login-user','login-pass'].forEach(id => {
+    document.getElementById(id).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') doLogin();
+    });
+  });
+}
+
+function clock() {
+  document.getElementById('clock').textContent = new Date().toLocaleString('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    day: '2-digit',
+    month: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function showLogin(show) {
+  document.getElementById('auth-overlay').classList.toggle('show', show);
+}
+
+async function doLogin() {
+  const username = document.getElementById('login-user').value.trim();
+  const password = document.getElementById('login-pass').value;
+  if (!username || !password) {
+    toast('Informe usuário e senha', 'err');
+    return;
+  }
+  try {
+    const res = await fetch(API + '/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.erro || 'Erro no login');
+    authToken = data.token;
+    localStorage.setItem('toca_token', authToken);
+    await loadSession();
+    showLogin(false);
+    document.getElementById('login-pass').value = '';
+    toast(`Bem-vindo, ${currentUser.nome}`, 'ok');
+    await afterLogin();
+  } catch (e) {
+    toast(e.message || 'Falha ao entrar', 'err');
+  }
+}
+
+async function loadSession() {
+  const data = await api('/api/me');
+  currentUser = data.user;
+  permissions = data.permissions || {};
+  document.getElementById('user-badge').textContent = `${currentUser.nome} · ${labelRole(currentUser.role)}`;
+  document.getElementById('btn-change-pass').classList.remove('hidden');
+  document.getElementById('btn-logout').classList.remove('hidden');
+  const resp = document.getElementById('f-resp');
+  resp.value = currentUser.nome;
+  document.getElementById('btn-reset').classList.toggle('hidden', !permissions.pode_resetar);
+}
+
+async function afterLogin() {
+  showLogin(false);
+  await loadDash();
+  await loadCats();
+}
+
+function labelRole(role) {
+  return ({ admin:'Administrador', gerente:'Gerente', operador:'Operador' }[role] || role || 'Usuário');
+}
+
+async function logout() {
+  try { await apiPost('/api/logout', {}); } catch(e) {}
+  authToken = '';
+  currentUser = null;
+  permissions = {};
+  localStorage.removeItem('toca_token');
+  document.getElementById('user-badge').textContent = 'Não autenticado';
+  document.getElementById('btn-change-pass').classList.add('hidden');
+  document.getElementById('btn-logout').classList.add('hidden');
+  document.getElementById('btn-reset').classList.add('hidden');
+  showLogin(true);
+}
+
+async function trocarSenha() {
+  const current_password = prompt('Digite sua senha atual:');
+  if (current_password === null) return;
+  const new_password = prompt('Digite a nova senha (mínimo 6 caracteres):');
+  if (new_password === null) return;
+  try {
+    await apiPost('/api/change-password', { current_password, new_password });
+    toast('Senha alterada com sucesso', 'ok');
+  } catch (e) {
+    toast(e.message || 'Erro ao trocar senha', 'err');
+  }
+}
+
+function goPage(id, btn) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('p-' + id).classList.add('active');
+  btn.classList.add('active');
+  if (id === 'estoque') loadEstoque();
+  if (id === 'hist') loadHist();
+}
+
+async function loadDash() {
+  try {
+    const d = await api('/api/dashboard');
+    document.getElementById('dash-cards').innerHTML = `
+      <div class="card"><div class="card-label">Hoje</div><div class="card-val accent">${d.lancHoje}</div></div>
+      <div class="card"><div class="card-label">🔴 Zerados</div><div class="card-val red">${d.zerados}</div></div>
+      <div class="card"><div class="card-label">🟡 Críticos</div><div class="card-val yellow">${d.criticos}</div></div>
+      <div class="card"><div class="card-label">Valor R$</div><div class="card-val green">${fmtMoneyCompact(d.valorTotal)}</div></div>
+    `;
+    renderUltimos(d.ultimos);
+  } catch(e) { handleApiError(e); }
+}
+
+function renderUltimos(items) {
+  const el = document.getElementById('ultimos-list');
+  if (!items || !items.length) {
+    el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Nenhum lançamento ainda.</div></div>';
+    return;
+  }
+  el.innerHTML = items.map(m => {
+    const dotClass = { Entrada:'dot-entrada', Saída:'dot-saida', Perda:'dot-perda', Ajuste:'dot-ajuste' }[m.tipo] || '';
+    const qtdColor = m.tipo === 'Entrada' ? 'green' : m.tipo === 'Saída' ? 'accent' : m.tipo === 'Perda' ? 'red' : 'blue';
+    const sinal = m.tipo === 'Entrada' ? '+' : m.tipo === 'Ajuste' ? '=' : '-';
+  let hora = '';
+if (m.created_at) {
+  const bruto = String(m.created_at).trim();
+  const data = new Date(bruto.replace(' ', 'T'));
+
+  if (!isNaN(data.getTime())) {
+    hora = new Intl.DateTimeFormat('pt-BR', {
+      timeZone: 'America/Sao_Paulo',
+      hour: '2-digit',
+      minute: '2-digit'
+    }).format(data);
+  } else {
+    hora = bruto.includes(' ') ? bruto.split(' ')[1].substring(0, 5) : '';
+  }
+}
+    return `<div class="mov-item">
+      <div class="mov-left">
+        <div class="mov-nome"><span class="tipo-dot ${dotClass}"></span>${escapeHtml(m.produto_nome)}</div>
+        <div class="mov-meta">${escapeHtml(m.motivo || '')}${m.responsavel ? ' · ' + escapeHtml(m.responsavel) : ''}</div>
+      </div>
+      <div class="mov-right">
+        <div class="mov-qtd ${qtdColor}">${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade || '')}</div>
+        <div class="mov-hora">${hora}</div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function selTipo(el) {
+  tipoAtual = el.dataset.tipo;
+  document.querySelectorAll('.tipo-card').forEach(c => c.className = 'tipo-card');
+  const map = { Entrada: 'sel-entrada', 'Saída': 'sel-saida', Perda: 'sel-perda', Ajuste: 'sel-ajuste' };
+  el.classList.add(map[tipoAtual]);
+
+  const motivo = document.getElementById('f-motivo');
+  const btn = document.getElementById('btn-lancar');
+  if (tipoAtual === 'Entrada') { motivo.value = 'Compra'; btn.className = 'btn-lancar entrada'; btn.textContent = '⬆️ LANÇAR ENTRADA'; }
+  if (tipoAtual === 'Saída') { motivo.value = 'Produção'; btn.className = 'btn-lancar saida'; btn.textContent = '⬇️ LANÇAR SAÍDA'; }
+  if (tipoAtual === 'Perda') { motivo.value = 'Perda/Vencimento'; btn.className = 'btn-lancar perda'; btn.textContent = '❌ REGISTRAR PERDA'; }
+  if (tipoAtual === 'Ajuste') { motivo.value = 'Inventário'; btn.className = 'btn-lancar ajuste'; btn.textContent = '🔄 LANÇAR AJUSTE'; }
+}
+
+async function buscaProd(q) {
+  if (!q || q.length < 2) { closeAc(); return; }
+  try {
+    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    const list = document.getElementById('ac-list');
+    if (!items.length) { list.classList.remove('open'); return; }
+    list.innerHTML = items.map(p => {
+      let st = p.qtd === 0 ? 'badge-low' : p.qtd <= p.minimo * 0.5 ? 'badge-low' : p.qtd < p.minimo ? 'badge-warn' : 'badge-ok';
+      return `<div class="ac-item" onmousedown='selProd(${JSON.stringify(JSON.stringify(p))})'>
+        <div>
+          <div class="ac-nome">${escapeHtml(p.nome)}</div>
+          <div class="ac-info">${escapeHtml(p.categoria)} · ${escapeHtml(p.unidade)}</div>
+        </div>
+        <span class="ac-qtd-badge ${st}">${fmt(p.qtd)} ${escapeHtml(p.unidade)}</span>
+      </div>`;
+    }).join('');
+    list.classList.add('open');
+  } catch(e) { handleApiError(e, false); }
+}
+
+function selProd(jsonStr) {
+  const p = JSON.parse(jsonStr);
+  prodAtual = p;
+  document.getElementById('busca-wrap').style.display = 'none';
+  const sel = document.getElementById('prod-sel');
+  sel.classList.add('show');
+  document.getElementById('sel-nome').textContent = p.nome;
+  document.getElementById('sel-info').textContent = `${p.categoria} · Estoque: ${fmt(p.qtd)} ${p.unidade} · Custo: R$ ${Number(p.custo || 0).toFixed(2)}`;
+  closeAc();
+  document.getElementById('f-qtd').focus();
+}
+
+function clearProd() {
+  prodAtual = null;
+  document.getElementById('prod-sel').classList.remove('show');
+  document.getElementById('busca-wrap').style.display = 'block';
+  const inp = document.getElementById('f-busca');
+  inp.value = '';
+  inp.focus();
+}
+
+function closeAc() {
+  document.getElementById('ac-list').classList.remove('open');
+}
+
+async function lancar() {
+  if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
+  const qtd = parseFloat(document.getElementById('f-qtd').value);
+  if ((!qtd && qtd !== 0) || qtd < 0 || (tipoAtual !== 'Ajuste' && qtd <= 0)) {
+    toast(tipoAtual === 'Ajuste' ? 'Informe um ajuste válido' : 'Informe uma quantidade maior que zero', 'err');
+    return;
+  }
+
+  const btn = document.getElementById('btn-lancar');
+  btn.disabled = true;
+  btn.textContent = '⏳ Salvando...';
+
+  try {
+    await apiPost('/api/movimentacoes', {
+      produto_nome: prodAtual.nome,
+      tipo: tipoAtual,
+      qtd,
+      custo: prodAtual.custo,
+      motivo: document.getElementById('f-motivo').value,
+      obs: ''
+    });
+
+    const sinal = tipoAtual === 'Entrada' ? '+' : tipoAtual === 'Ajuste' ? '=' : '-';
+    toast(`✓ ${sinal}${fmt(qtd)} ${prodAtual.unidade} de ${prodAtual.nome}`, 'ok');
+    document.getElementById('f-qtd').value = '';
+    clearProd();
+    await loadDash();
+    if (document.getElementById('p-estoque').classList.contains('active')) await loadEstoque();
+    if (document.getElementById('p-hist').classList.contains('active')) await loadHist();
+  } catch(e) {
+    handleApiError(e);
+  } finally {
+    btn.disabled = false;
+    selTipo(document.querySelector(`.tipo-card[data-tipo="${tipoAtual}"]`));
+  }
+}
+
+async function loadCats() {
+  try {
+    const cats = await api('/api/categorias');
+    const sel = document.getElementById('est-cat');
+    sel.innerHTML = '<option value="">Todas</option>';
+    cats.forEach(c => sel.innerHTML += `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`);
+  } catch(e) { handleApiError(e, false); }
+}
+
+async function loadEstoque() {
+  const q = document.getElementById('est-search').value;
+  const cat = document.getElementById('est-cat').value;
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (cat) params.set('cat', cat);
+  if (estStatus) params.set('status', estStatus);
+
+  try {
+    const items = await api('/api/produtos?' + params);
+    const el = document.getElementById('prod-list');
+    if (!items.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📦</div><div class="empty-text">Nenhum produto encontrado.</div></div>';
+      return;
+    }
+    el.innerHTML = items.map(p => {
+      const st = p.qtd === 0 ? 'zerado' : p.qtd <= p.minimo * 0.5 ? 'critico' : p.qtd < p.minimo ? 'atencao' : 'ok';
+      return `<div class="prod-row" onclick='quickLanc(${JSON.stringify(JSON.stringify(p))})'>
+        <div class="prod-row-left">
+          <div class="prod-row-nome">${escapeHtml(p.nome)}</div>
+          <div class="prod-row-cat">${escapeHtml(p.categoria)} · mín ${fmt(p.minimo)}</div>
+        </div>
+        <div class="prod-row-right">
+          <div class="prod-row-qtd ${st}">${fmt(p.qtd)}</div>
+          <div class="prod-row-unid">${escapeHtml(p.unidade)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { handleApiError(e, false); }
+}
+
+function quickLanc(jsonStr) {
+  const p = JSON.parse(jsonStr);
+  goPage('lancar', document.querySelector('.nav-btn'));
+  document.querySelectorAll('.nav-btn')[0].classList.add('active');
+  document.querySelectorAll('.nav-btn').forEach((b,i) => { if(i>0) b.classList.remove('active'); });
+  setTimeout(() => selProdDireto(p), 100);
+}
+
+function selProdDireto(p) {
+  prodAtual = p;
+  document.getElementById('busca-wrap').style.display = 'none';
+  const sel = document.getElementById('prod-sel');
+  sel.classList.add('show');
+  document.getElementById('sel-nome').textContent = p.nome;
+  document.getElementById('sel-info').textContent = `${p.categoria} · Estoque: ${fmt(p.qtd)} ${p.unidade} · Custo: R$ ${Number(p.custo || 0).toFixed(2)}`;
+  document.getElementById('f-qtd').focus();
+  document.querySelector('main').scrollTo(0, 0);
+}
+
+function selStatus(el) {
+  document.querySelectorAll('.pill').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  estStatus = el.dataset.st;
+  loadEstoque();
+}
+
+async function loadHist() {
+  const q = document.getElementById('hist-search').value;
+  const tipo = document.getElementById('hist-tipo').value;
+  const params = new URLSearchParams({ limit: 100 });
+  if (q) params.set('q', q);
+  if (tipo) params.set('tipo', tipo);
+
+  try {
+    const items = await api('/api/movimentacoes?' + params);
+    const el = document.getElementById('hist-list');
+    if (!items.length) {
+      el.innerHTML = '<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Nenhum lançamento encontrado.</div></div>';
+      return;
+    }
+    el.innerHTML = items.map(m => {
+      const tClass = { Entrada: 'ok', 'Saída': 'saida', Perda: 'perda', Ajuste: 'ajuste' }[m.tipo] || '';
+      const sinal = m.tipo === 'Entrada' ? '+' : m.tipo === 'Ajuste' ? '=' : '-';
+      let dataHora = '';
+      if (m.created_at) {
+        const bruto = String(m.created_at).trim();
+        const data = new Date(bruto.replace(' ', 'T'));
+        if (!isNaN(data.getTime())) {
+          dataHora = new Intl.DateTimeFormat('pt-BR', {
+            timeZone: 'America/Sao_Paulo',
+            day: '2-digit',
+            month: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit'
+          }).format(data);
+        } else {
+          dataHora = bruto;
+        }
+      }
+      return `<div class="hist-item">
+        <div class="hist-top">
+          <div class="hist-nome">${escapeHtml(m.produto_nome)}</div>
+          <span class="hist-tipo ${tClass}">${m.tipo}</span>
+        </div>
+        <div class="hist-bottom">
+          <span>${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade || '')}</span>
+          ${m.motivo ? `<span>${escapeHtml(m.motivo)}</span>` : ''}
+          ${m.responsavel ? `<span>👤 ${escapeHtml(m.responsavel)}</span>` : ''}
+          <span>🕐 ${escapeHtml(dataHora)}</span>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { handleApiError(e, false); }
+}
+
+async function exportar(tipo) {
+  try {
+    const res = await fetch(API + `/api/exportar/${tipo}`, {
+      headers: authHeaders()
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      let msg = 'Erro ao exportar';
+      try { msg = JSON.parse(text).erro || msg; } catch(_) {}
+      throw new Error(msg);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = tipo === 'estoque' ? 'estoque_toca_coelho.csv' : tipo === 'movimentacoes' ? 'movimentacoes_toca_coelho.csv' : 'lista_compras_toca_coelho.csv';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    handleApiError(e);
+  }
+}
+
+async function resetar() {
+  if (!permissions.pode_resetar) {
+    toast('Somente administrador pode resetar', 'err');
+    return;
+  }
+  const confirmacao = prompt('Atenção: isso vai restaurar as quantidades originais. Digite RESTAURAR para confirmar.');
+  if (confirmacao === null) return;
+  try {
+    await apiPost('/api/resetar', { confirmacao });
+    toast('Estoque restaurado com sucesso', 'ok');
+    await loadDash();
+    await loadEstoque();
+  } catch(e) {
+    handleApiError(e);
+  }
+}
+
+async function api(url) {
+  const res = await fetch(API + url, { headers: authHeaders() });
+  if (res.status === 401) throw new Error('Sessão expirada. Faça login novamente.');
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.erro || 'Erro');
+  return data;
+}
+
+async function apiPost(url, body, method = 'POST') {
+  const res = await fetch(API + url, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body)
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.erro || 'Erro');
+  return data;
+}
+
+function authHeaders() {
+  return authToken ? { 'Authorization': `Bearer ${authToken}` } : {};
+}
+
+function fmt(n) {
+  if (n === null || n === undefined) return '0';
+  const num = Number(n);
+  return num % 1 === 0 ? String(num) : num.toFixed(3).replace(/\.?0+$/, '');
+}
+
+function fmtMoneyCompact(n) {
+  const num = Number(n || 0);
+  if (num >= 1000) return `${(num/1000).toFixed(1).replace('.0','')}k`;
+  return num.toFixed(0);
+}
+
+function toast(msg, type = 'ok') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show ' + type;
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => el.className = '', 2800);
+}
+
+function handleApiError(e, noisy = true) {
+  if (String(e.message || '').includes('Sessão expirada')) {
+    toast('Sessão expirada. Entre novamente.', 'err');
+    logout();
+    return;
+  }
+  if (noisy) toast(e.message || 'Erro inesperado', 'err');
+  console.error(e);
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>'"]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+init();
+</script>
+
+</body>
+</html>
