@@ -12,7 +12,7 @@ const db = new Database(DB_PATH);
 const sessions = new Map();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 function nowIso() {
@@ -36,14 +36,6 @@ function nowSP() {
 }
 function sha(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
-}
-
-function normalizeSearch(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
 }
 
 function hashPassword(password) {
@@ -147,7 +139,6 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS produtos (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     nome TEXT NOT NULL UNIQUE,
-    nome_search TEXT,
     categoria TEXT NOT NULL,
     unidade TEXT NOT NULL,
     qtd REAL DEFAULT 0,
@@ -196,13 +187,6 @@ db.exec(`
   );
 `);
 
-// Migração: adiciona coluna nome_search se não existir
-try { db.exec(`ALTER TABLE produtos ADD COLUMN nome_search TEXT`); } catch(e) {}
-// Popula nome_search em registros existentes que ainda não têm
-const semNorm = db.prepare(`SELECT id, nome FROM produtos WHERE nome_search IS NULL`).all();
-const updateNorm = db.prepare(`UPDATE produtos SET nome_search = ? WHERE id = ?`);
-for (const p of semNorm) updateNorm.run(normalizeSearch(p.nome), p.id);
-
 const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
 if (userCount === 0) {
   const adminUser = sanitizeText(process.env.ADMIN_USER || 'admin', 40) || 'admin';
@@ -239,11 +223,11 @@ if (count.n === 0) {
   if (fs.existsSync(seedPath)) {
     const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
     const insert = db.prepare(`
-      INSERT OR IGNORE INTO produtos (nome, nome_search, categoria, unidade, qtd, minimo, custo)
-      VALUES (@nome, @nome_search, @categoria, @unidade, @qtd, @minimo, @custo)
+      INSERT OR IGNORE INTO produtos (nome, categoria, unidade, qtd, minimo, custo)
+      VALUES (@nome, @categoria, @unidade, @qtd, @minimo, @custo)
     `);
     const insertMany = db.transaction((prods) => {
-      for (const p of prods) insert.run({ ...p, nome_search: normalizeSearch(p.nome) });
+      for (const p of prods) insert.run(p);
     });
     insertMany(produtos);
     console.log(`✅ ${produtos.length} produtos carregados no banco.`);
@@ -320,7 +304,7 @@ app.get('/api/produtos', auth, (req, res) => {
   const { cat, status, q } = req.query;
   let sql = 'SELECT * FROM produtos WHERE 1=1';
   const params = [];
-  if (q) { sql += ' AND nome_search LIKE ?'; params.push(`%${normalizeSearch(sanitizeText(q, 100))}%`); }
+  if (q) { sql += ' AND nome LIKE ?'; params.push(`%${sanitizeText(q, 100)}%`); }
   if (cat) { sql += ' AND categoria = ?'; params.push(sanitizeText(cat, 80)); }
   sql += calcStatusClause(status);
   sql += ' ORDER BY categoria, nome';
@@ -331,11 +315,10 @@ app.get('/api/produtos', auth, (req, res) => {
 app.get('/api/produtos/buscar', auth, (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
-  const qNorm = normalizeSearch(q);
   const rows = db.prepare(`
     SELECT id, nome, categoria, unidade, qtd, minimo, custo
-    FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 15
-  `).all(`%${qNorm}%`);
+    FROM produtos WHERE nome LIKE ? ORDER BY nome LIMIT 15
+  `).all(`%${q}%`);
   res.json(rows);
 });
 
@@ -469,8 +452,6 @@ app.post('/api/movimentacoes', auth, (req, res) => {
 app.get('/api/movimentacoes', auth, (req, res) => {
   const tipo = sanitizeText(req.query?.tipo, 20);
   const q = sanitizeText(req.query?.q, 100);
-  const dataInicio = sanitizeText(req.query?.data_inicio, 10);
-  const dataFim = sanitizeText(req.query?.data_fim, 10);
   const limit = Math.min(Math.max(parseInt(req.query?.limit || '200', 10), 1), 500);
   let sql = 'SELECT * FROM movimentacoes WHERE 1=1';
   const params = [];
@@ -479,8 +460,6 @@ app.get('/api/movimentacoes', auth, (req, res) => {
     sql += ' AND (produto_nome LIKE ? OR motivo LIKE ? OR obs LIKE ? OR responsavel LIKE ?)';
     params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
-  if (dataInicio) { sql += ' AND substr(created_at, 1, 10) >= ?'; params.push(dataInicio); }
-  if (dataFim) { sql += ' AND substr(created_at, 1, 10) <= ?'; params.push(dataFim); }
   sql += ' ORDER BY id DESC LIMIT ?';
   params.push(limit);
   res.json(db.prepare(sql).all(...params));
@@ -558,6 +537,91 @@ app.post('/api/resetar', auth, requireRole('admin'), (req, res) => {
   });
   tx();
   res.json({ ok: true });
+});
+
+// ==================== LER CUPOM (IA) ====================
+app.post('/api/ler-cupom', auth, async (req, res) => {
+  const { imagem, mediaType } = req.body;
+  if (!imagem) return res.status(400).json({ erro: 'Imagem não enviada.' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ erro: 'ANTHROPIC_API_KEY não configurada no servidor.' });
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        messages: [{
+          role: 'user',
+          content: [
+            {
+              type: 'image',
+              source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem }
+            },
+            {
+              type: 'text',
+              text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.
+Extraia TODOS os itens comprados com nome do produto e quantidade.
+Responda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:
+{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}
+Use unidade KG para peso, UN para unidade, L para litro, CX para caixa.
+Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
+            }
+          ]
+        }]
+      })
+    });
+
+    if (!response.ok) {
+      const err = await response.text();
+      return res.status(502).json({ erro: 'Erro na API de IA: ' + err });
+    }
+
+    const data = await response.json();
+    const text = (data.content || []).map(b => b.text || '').join('');
+    const clean = text.replace(/```json|```/g, '').trim();
+
+    let parsed;
+    try { parsed = JSON.parse(clean); } catch(e) {
+      return res.status(422).json({ erro: 'IA não retornou JSON válido.', raw: text });
+    }
+
+    if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
+
+    // Tenta cruzar cada item com os produtos cadastrados
+    const itens = (parsed.itens || []).map(item => {
+      const qNorm = normalizeSearch(item.nome);
+      const candidatos = db.prepare(`
+        SELECT id, nome, categoria, unidade, qtd, minimo, custo
+        FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3
+      `).all(`%${qNorm}%`);
+      return {
+        nome_cupom: item.nome,
+        qtd: Number(item.qtd) || 1,
+        unidade_cupom: item.unidade || 'UN',
+        candidatos,
+        produto: candidatos[0] || null
+      };
+    });
+
+    db.prepare(`
+      INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
+      VALUES (?, ?, ?, 'ler_cupom', ?, ?, datetime('now','localtime'))
+    `).run(req.user.id, req.user.nome, req.user.role,
+      JSON.stringify({ total_itens: itens.length }), sanitizeText(req.ip, 80));
+
+    res.json({ itens });
+  } catch(e) {
+    console.error('Erro ler-cupom:', e);
+    res.status(500).json({ erro: 'Erro interno ao processar imagem.' });
+  }
 });
 
 app.get('*', (req, res) => {
