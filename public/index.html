@@ -838,12 +838,12 @@ function renderUltimos(items) {
     const dotClass = { Entrada:'dot-entrada', Saída:'dot-saida', Perda:'dot-perda', Ajuste:'dot-ajuste' }[m.tipo] || '';
     const qtdColor = m.tipo === 'Entrada' ? 'green' : m.tipo === 'Saída' ? 'accent' : m.tipo === 'Perda' ? 'red' : 'blue';
     const sinal = m.tipo === 'Entrada' ? '+' : m.tipo === 'Ajuste' ? '=' : '-';
-    const hora = m.created_at
-  ? new Date(m.created_at.replace(' ', 'T')).toLocaleTimeString('pt-BR', {
+   const hora = m.created_at
+  ? new Intl.DateTimeFormat('pt-BR', {
       timeZone: 'America/Sao_Paulo',
       hour: '2-digit',
       minute: '2-digit'
-    })
+    }).format(new Date(m.created_at.replace(' ', 'T') + '-03:00'))
   : '';
     return `<div class="mov-item">
       <div class="mov-left">
