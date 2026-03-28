@@ -185,7 +185,7 @@ if (userCount === 0) {
 }
 const seedUsers = [
   { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password: 'Nayara@2026Tc' },
-  { username: 'rubens.gerente', nome: 'Rubens', role: 'gerente', password: 'Rubens@2026Tc' },
+  { username: 'Simone.gerente', nome: 'Simone', role: 'gerente', password: 'Simone@2026Tc' },
   { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password: 'Estoque@2026Tc' },
 ];
 
