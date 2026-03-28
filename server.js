@@ -18,7 +18,22 @@ app.use(express.static(path.join(__dirname, 'public')));
 function nowIso() {
   return new Date().toISOString();
 }
+function nowSP() {
+  const partes = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  }).formatToParts(new Date());
 
+  const get = (type) => partes.find(p => p.type === type)?.value || '';
+
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+}
 function sha(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
 }
@@ -396,21 +411,25 @@ app.post('/api/movimentacoes', auth, (req, res) => {
     }
 
     db.prepare(`
-      INSERT INTO movimentacoes (produto_id, produto_nome, categoria, tipo, qtd, unidade, custo, valor, motivo, responsavel, obs)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      prod.id,
-      prod.nome,
-      prod.categoria,
-      tipo,
-      tipo === 'Ajuste' ? novaQtd : qtd,
-      prod.unidade,
-      custoUnit,
-      valor,
-      motivo,
-      req.user.nome,
-      obs
-    );
+  INSERT INTO movimentacoes (
+    produto_id, produto_nome, categoria, tipo, qtd, unidade,
+    custo, valor, motivo, responsavel, obs, created_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`).run(
+  prod.id,
+  prod.nome,
+  prod.categoria,
+  tipo,
+  tipo === 'Ajuste' ? novaQtd : qtd,
+  prod.unidade,
+  custoUnit,
+  valor,
+  motivo,
+  req.user.nome,
+  obs,
+  nowSP()
+);
 
     db.prepare(`
       INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
@@ -452,7 +471,12 @@ app.get('/api/dashboard', auth, (req, res) => {
   const criticos = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5').get().n;
   const atencao = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo').get().n;
   const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
-  const lancHoje = db.prepare(`SELECT COUNT(*) as n FROM movimentacoes WHERE date(created_at) = date('now','localtime')`).get().n;
+  const hojeSP = nowSP().slice(0, 10);
+const lancHoje = db.prepare(`
+  SELECT COUNT(*) as n
+  FROM movimentacoes
+  WHERE substr(created_at, 1, 10) = ?
+`).get(hojeSP).n;
   const ultimos = db.prepare('SELECT * FROM movimentacoes ORDER BY id DESC LIMIT 8').all();
   res.json({ zerados, criticos, atencao, valorTotal, lancHoje, ultimos });
 });
