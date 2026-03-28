@@ -493,12 +493,11 @@ app.get('/api/dashboard', auth, (req, res) => {
   const atencao = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo').get().n;
   const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
   const hojeSP = nowSP().slice(0, 10);
-const hojeSP = nowSP().slice(0, 10);
-const lancHoje = db.prepare(`
-  SELECT COUNT(*) as n
-  FROM movimentacoes
-  WHERE substr(created_at, 1, 10) = ?
-`).get(hojeSP).n;
+  const lancHoje = db.prepare(`
+    SELECT COUNT(*) as n
+    FROM movimentacoes
+    WHERE substr(created_at, 1, 10) = ?
+  `).get(hojeSP).n;
   const ultimos = db.prepare('SELECT * FROM movimentacoes ORDER BY id DESC LIMIT 8').all();
   res.json({ zerados, criticos, atencao, valorTotal, lancHoje, ultimos });
 });
