@@ -257,6 +257,18 @@ select.big-input { font-size: 14px; }
 .sin-arrow { color: var(--accent); margin: 0 6px; }
 .sin-prod { flex: 1; font-weight: 600; }
 
+/* Modal cadastro produto pelo cupom */
+.prod-modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 300; display: none; align-items: flex-end; justify-content: center; }
+.prod-modal-overlay.show { display: flex; }
+.prod-modal { background: var(--s1); border: 1px solid var(--border); border-radius: 20px 20px 0 0; width: 100%; max-width: 500px; padding: 20px; padding-bottom: calc(20px + var(--safe-bottom)); max-height: 85vh; overflow-y: auto; }
+.prod-modal-title { font-size: 16px; font-weight: 800; margin-bottom: 4px; }
+.prod-modal-sub { font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+.prod-modal-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.prod-modal-tab { flex: 1; padding: 10px; font-size: 13px; font-weight: 700; border-radius: 10px; border: 1.5px solid var(--border); background: var(--s2); color: var(--muted); cursor: pointer; text-align: center; }
+.prod-modal-tab.active { border-color: var(--accent); color: var(--accent); background: rgba(255,107,53,0.1); }
+.prod-modal-section { display: none; }
+.prod-modal-section.active { display: block; }
+
 .hidden { display:none !important; }
 </style>
 </head>
@@ -515,6 +527,66 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
+<!-- Modal: vincular ou cadastrar produto do cupom -->
+<div id="prod-modal-overlay" class="prod-modal-overlay" onclick="fecharProdModal(event)">
+  <div class="prod-modal" onclick="event.stopPropagation()">
+    <div class="prod-modal-title" id="prod-modal-title">Produto não encontrado</div>
+    <div class="prod-modal-sub" id="prod-modal-sub"></div>
+    <div class="prod-modal-tabs">
+      <div class="prod-modal-tab active" onclick="switchModalTab('buscar', this)">🔍 Já existe</div>
+      <div class="prod-modal-tab" onclick="switchModalTab('cadastrar', this)">➕ Cadastrar novo</div>
+    </div>
+
+    <!-- ABA BUSCAR -->
+    <div id="modal-tab-buscar" class="prod-modal-section active">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:10px">Busque o produto correto no estoque:</div>
+      <div style="position:relative">
+        <input class="small-input" id="modal-busca-input" placeholder="Digite o nome..." oninput="modalBuscaProd(this.value)" autocomplete="off">
+        <div id="modal-busca-ac" class="ac-list"></div>
+      </div>
+      <div id="modal-busca-sel" style="display:none;margin-top:10px">
+        <div style="font-size:13px;color:var(--muted);margin-bottom:6px">Produto selecionado:</div>
+        <div id="modal-busca-nome" style="font-size:15px;font-weight:700;color:var(--green)"></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
+            <input type="checkbox" id="modal-memorizar" checked> Memorizar vínculo
+          </label>
+        </div>
+        <button class="btn-export btn-primary" style="padding:12px;margin-top:12px" onclick="confirmarVinculo()">Confirmar vínculo</button>
+      </div>
+    </div>
+
+    <!-- ABA CADASTRAR -->
+    <div id="modal-tab-cadastrar" class="prod-modal-section">
+      <div style="font-size:13px;color:var(--muted);margin-bottom:10px">Preencha os dados do novo produto:</div>
+      <div class="form-row">
+        <input class="small-input" id="modal-nome" placeholder="Nome do produto">
+        <div style="position:relative">
+          <input class="small-input" id="modal-cat" placeholder="Categoria" oninput="modalBuscaCat(this.value)" autocomplete="off">
+          <div id="modal-cat-ac" class="ac-list"></div>
+        </div>
+        <select class="small-input" id="modal-unidade">
+          <option value="KG">KG — Quilograma</option>
+          <option value="G">G — Grama</option>
+          <option value="L">L — Litro</option>
+          <option value="ML">ML — Mililitro</option>
+          <option value="UN" selected>UN — Unidade</option>
+          <option value="CX">CX — Caixa</option>
+          <option value="PCT">PCT — Pacote</option>
+          <option value="FD">FD — Fardo</option>
+        </select>
+        <input class="small-input" id="modal-minimo" type="number" placeholder="Estoque mínimo (ex: 1)" min="0" step="0.1">
+        <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
+          <input type="checkbox" id="modal-sin" checked> Memorizar sinônimo automaticamente
+        </label>
+        <button class="btn-export btn-success" style="padding:12px" onclick="confirmarCadastro()">Cadastrar e vincular</button>
+      </div>
+    </div>
+
+    <button class="btn-sm" style="width:100%;margin-top:12px;text-align:center" onclick="fecharProdModal()">Cancelar</button>
+  </div>
+</div>
+
 <div id="toast"></div>
 
 <script>
@@ -764,7 +836,11 @@ function renderCupomItens() {
           <button class="ci-ignore${ignorado?' active':''}" onclick="toggleIgnorar(${idx})">Ignorar</button>
         </div>
         ${item.via_sinonimo ? `<div style="font-size:11px;color:var(--green);margin-top:4px">✓ Reconhecido por sinônimo salvo</div>`
-          : item.produto ? `<div style="margin-top:6px"><button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar vínculo</button></div>` : ''}
+          : item.produto ? `<div style="margin-top:6px"><button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar vínculo</button></div>`
+          : `<div style="display:flex;gap:8px;margin-top:8px">
+              <button class="btn-sm success" onclick="abrirProdModal(${idx}, 'buscar')">🔍 Já existe</button>
+              <button class="btn-sm" onclick="abrirProdModal(${idx}, 'cadastrar')">➕ Cadastrar novo</button>
+            </div>`}
       ` : `<div class="ci-row"><button class="ci-ignore active" onclick="toggleIgnorar(${idx})">Desfazer</button></div>`}
     </div>`;
   }).join('');
@@ -1177,6 +1253,109 @@ async function salvarSinonimoCupom(nomeCupom, nomeProd) {
     await apiPost('/api/sinonimos', { termo: nomeCupom, produto_nome: nomeProd });
     toast(`✓ "${nomeCupom}" → ${nomeProd} memorizado!`, 'ok');
   } catch(e) {}
+}
+
+// ==================== MODAL PRODUTO CUPOM ====================
+let modalIdx = null;
+let modalProdSel = null;
+
+function abrirProdModal(idx, aba) {
+  modalIdx = idx;
+  modalProdSel = null;
+  const item = cupomItens[idx];
+  document.getElementById('prod-modal-title').textContent = 'Cupom: ' + item.nome_cupom;
+  document.getElementById('prod-modal-sub').textContent = 'Quantidade: ' + item.qtd + ' ' + (item.unidade_cupom || 'UN');
+  // Pré-preenche nome no cadastro
+  document.getElementById('modal-nome').value = item.nome_cupom;
+  document.getElementById('modal-busca-input').value = '';
+  document.getElementById('modal-busca-ac').classList.remove('open');
+  document.getElementById('modal-busca-sel').style.display = 'none';
+  document.getElementById('modal-minimo').value = '1';
+  // Ativa aba correta
+  switchModalTab(aba, document.querySelector(`.prod-modal-tab:${aba === 'buscar' ? 'first-child' : 'last-child'}`));
+  document.getElementById('prod-modal-overlay').classList.add('show');
+}
+
+function fecharProdModal(e) {
+  if (e && e.target !== document.getElementById('prod-modal-overlay')) return;
+  document.getElementById('prod-modal-overlay').classList.remove('show');
+  modalIdx = null; modalProdSel = null;
+}
+
+function switchModalTab(tab, el) {
+  document.querySelectorAll('.prod-modal-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.prod-modal-section').forEach(s => s.classList.remove('active'));
+  if (el) el.classList.add('active');
+  document.getElementById('modal-tab-' + tab).classList.add('active');
+}
+
+async function modalBuscaProd(q) {
+  if (!q || q.length < 2) { document.getElementById('modal-busca-ac').classList.remove('open'); return; }
+  try {
+    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    const ac = document.getElementById('modal-busca-ac');
+    if (!items.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = items.map(p =>
+      `<div class="ac-item" onmousedown="modalSelProd(${JSON.stringify(JSON.stringify(p))})">
+        <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${escapeHtml(p.categoria)} · ${fmt(p.qtd)} ${escapeHtml(p.unidade)}</div></div>
+      </div>`
+    ).join('');
+    ac.classList.add('open');
+  } catch(e) {}
+}
+
+function modalSelProd(jsonStr) {
+  modalProdSel = JSON.parse(jsonStr);
+  document.getElementById('modal-busca-ac').classList.remove('open');
+  document.getElementById('modal-busca-input').value = modalProdSel.nome;
+  document.getElementById('modal-busca-nome').textContent = modalProdSel.nome;
+  document.getElementById('modal-busca-sel').style.display = 'block';
+}
+
+async function confirmarVinculo() {
+  if (!modalProdSel || modalIdx === null) return;
+  cupomItens[modalIdx].produto = modalProdSel;
+  cupomItens[modalIdx].candidatos = [modalProdSel];
+  if (document.getElementById('modal-memorizar').checked) {
+    await salvarSinonimoCupom(cupomItens[modalIdx].nome_cupom, modalProdSel.nome);
+  }
+  document.getElementById('prod-modal-overlay').classList.remove('show');
+  renderCupomItens();
+}
+
+async function modalBuscaCat(q) {
+  if (!q || q.length < 1) { document.getElementById('modal-cat-ac').classList.remove('open'); return; }
+  try {
+    const cats = await api('/api/categorias');
+    const filtradas = cats.filter(c => c.toLowerCase().includes(q.toLowerCase()));
+    const ac = document.getElementById('modal-cat-ac');
+    if (!filtradas.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = filtradas.map(c =>
+      `<div class="ac-item" onmousedown="document.getElementById('modal-cat').value='${escapeHtml(c)}';document.getElementById('modal-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
+    ).join('');
+    ac.classList.add('open');
+  } catch(e) {}
+}
+
+async function confirmarCadastro() {
+  if (modalIdx === null) return;
+  const nome = document.getElementById('modal-nome').value.trim();
+  const categoria = document.getElementById('modal-cat').value.trim();
+  const unidade = document.getElementById('modal-unidade').value;
+  const minimo = parseFloat(document.getElementById('modal-minimo').value) || 1;
+  if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
+  try {
+    const result = await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo: 0, qtd: 0 });
+    cupomItens[modalIdx].produto = result.produto;
+    cupomItens[modalIdx].candidatos = [result.produto];
+    if (document.getElementById('modal-sin').checked) {
+      await salvarSinonimoCupom(cupomItens[modalIdx].nome_cupom, result.produto.nome);
+    }
+    toast(`✅ "${nome}" cadastrado!`, 'ok');
+    document.getElementById('prod-modal-overlay').classList.remove('show');
+    await loadCats(); // Atualiza categorias
+    renderCupomItens();
+  } catch(e) { toast(e.message, 'err'); }
 }
 
 if ('serviceWorker' in navigator) {
