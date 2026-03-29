@@ -195,6 +195,13 @@ db.exec(`
     ip TEXT,
     created_at TEXT DEFAULT (datetime('now','localtime'))
   );
+
+  CREATE TABLE IF NOT EXISTS sinonimos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    termo TEXT NOT NULL UNIQUE,
+    produto_nome TEXT NOT NULL,
+    created_at TEXT DEFAULT (datetime('now','localtime'))
+  );
 `);
 
 const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
@@ -534,6 +541,12 @@ app.post('/api/resetar', auth, requireRole('admin'), (req, res) => {
   if (confirmacao !== 'RESTAURAR') {
     return res.status(400).json({ erro: 'Confirmação inválida. Digite RESTAURAR para continuar.' });
   }
+  // Verifica senha do admin como segunda confirmação
+  const senhaAdmin = String(req.body?.senha_admin || '');
+  const userDb = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+  if (!verifyPassword(senhaAdmin, userDb.password_hash)) {
+    return res.status(401).json({ erro: 'Senha de administrador incorreta.' });
+  }
   const seedPath = path.join(__dirname, 'produtos_seed.json');
   if (!fs.existsSync(seedPath)) return res.status(404).json({ erro: 'Seed não encontrado.' });
   const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
@@ -608,16 +621,24 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
 
     const itens = (parsed.itens || []).map(item => {
       const qNorm = normalizeSearch(item.nome);
-      const candidatos = db.prepare(`
-        SELECT id, nome, categoria, unidade, qtd, minimo, custo
-        FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3
-      `).all(`%${qNorm}%`);
+      // Primeiro tenta sinônimo exato
+      const sinonimo = db.prepare(`SELECT produto_nome FROM sinonimos WHERE termo = ?`).get(qNorm);
+      let candidatos = [];
+      let produtoExato = null;
+      if (sinonimo) {
+        const p = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome = ? COLLATE NOCASE`).get(sinonimo.produto_nome);
+        if (p) { produtoExato = p; candidatos = [p]; }
+      }
+      if (!produtoExato) {
+        candidatos = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3`).all(`%${qNorm}%`);
+      }
       return {
         nome_cupom: item.nome,
         qtd: Number(item.qtd) || 1,
         unidade_cupom: item.unidade || 'UN',
         candidatos,
-        produto: candidatos[0] || null
+        produto: candidatos[0] || null,
+        via_sinonimo: !!produtoExato
       };
     });
 
@@ -700,6 +721,99 @@ ${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).to
     console.error('Erro chat:', e.message);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
+});
+
+// ==================== GERENCIAR USUÁRIOS (admin) ====================
+app.get('/api/users', auth, requireRole('admin'), (req, res) => {
+  const users = db.prepare(`SELECT id, username, nome, role, active, created_at FROM users ORDER BY role, nome`).all();
+  res.json(users);
+});
+
+app.post('/api/users', auth, requireRole('admin'), (req, res) => {
+  const username = sanitizeText(req.body?.username, 40).toLowerCase();
+  const nome = sanitizeText(req.body?.nome, 60);
+  const role = sanitizeText(req.body?.role, 20);
+  const password = String(req.body?.password || '');
+  if (!username || !nome || !password) return res.status(400).json({ erro: 'Preencha todos os campos.' });
+  if (!['admin','gerente','operador'].includes(role)) return res.status(400).json({ erro: 'Perfil inválido.' });
+  if (password.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
+  try {
+    db.prepare(`INSERT INTO users (username, nome, role, password_hash, active) VALUES (?,?,?,?,1)`)
+      .run(username, nome, role, hashPassword(password));
+    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'criar_usuario',?,?,datetime('now','localtime'))`)
+      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ novo: username, role }), sanitizeText(req.ip, 80));
+    res.json({ ok: true });
+  } catch(e) {
+    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Usuário já existe.' });
+    res.status(500).json({ erro: 'Erro ao criar usuário.' });
+  }
+});
+
+app.put('/api/users/:id', auth, requireRole('admin'), (req, res) => {
+  const { id } = req.params;
+  const active = req.body?.active !== undefined ? (req.body.active ? 1 : 0) : null;
+  const nova_senha = String(req.body?.nova_senha || '');
+  const role = sanitizeText(req.body?.role, 20);
+
+  if (Number(id) === req.user.id && active === 0) return res.status(400).json({ erro: 'Você não pode desativar sua própria conta.' });
+
+  if (active !== null) {
+    db.prepare(`UPDATE users SET active=?, updated_at=datetime('now','localtime') WHERE id=?`).run(active, id);
+  }
+  if (role && ['admin','gerente','operador'].includes(role)) {
+    db.prepare(`UPDATE users SET role=?, updated_at=datetime('now','localtime') WHERE id=?`).run(role, id);
+  }
+  if (nova_senha) {
+    if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
+    db.prepare(`UPDATE users SET password_hash=?, updated_at=datetime('now','localtime') WHERE id=?`).run(hashPassword(nova_senha), id);
+  }
+  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'editar_usuario',?,?,datetime('now','localtime'))`)
+    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ id, active, role }), sanitizeText(req.ip, 80));
+  res.json({ ok: true });
+});
+
+// ==================== SINÔNIMOS ====================
+app.get('/api/sinonimos', auth, (req, res) => {
+  res.json(db.prepare(`SELECT * FROM sinonimos ORDER BY termo`).all());
+});
+
+app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), (req, res) => {
+  const termo = sanitizeText(req.body?.termo, 120);
+  const produto_nome = sanitizeText(req.body?.produto_nome, 120);
+  if (!termo || !produto_nome) return res.status(400).json({ erro: 'Termo e produto são obrigatórios.' });
+  const prod = db.prepare(`SELECT nome FROM produtos WHERE nome = ? COLLATE NOCASE`).get(produto_nome);
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
+  try {
+    db.prepare(`INSERT INTO sinonimos (termo, produto_nome) VALUES (?,?) ON CONFLICT(termo) DO UPDATE SET produto_nome=excluded.produto_nome`)
+      .run(normalizeSearch(termo), prod.nome);
+    res.json({ ok: true });
+  } catch(e) {
+    res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
+  }
+});
+
+app.post('/api/sinonimos/importar', auth, requireRole('admin'), (req, res) => {
+  const lista = req.body?.lista;
+  if (!Array.isArray(lista) || !lista.length) return res.status(400).json({ erro: 'Lista inválida.' });
+  let ok = 0, erros = [];
+  const upsert = db.prepare(`INSERT OR REPLACE INTO sinonimos (termo, produto_nome) VALUES (?,?)`);
+  const tx = db.transaction(() => {
+    for (const s of lista) {
+      try {
+        const termo = normalizeSearch(String(s.termo || ''));
+        const prod = db.prepare(`SELECT nome FROM produtos WHERE nome = ? COLLATE NOCASE`).get(s.produto_nome);
+        if (!termo || !prod) { erros.push(s.termo); continue; }
+        upsert.run(termo, prod.nome); ok++;
+      } catch(e) { erros.push(s.termo); }
+    }
+  });
+  tx();
+  res.json({ ok, erros });
+});
+
+app.delete('/api/sinonimos/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
+  db.prepare(`DELETE FROM sinonimos WHERE id=?`).run(req.params.id);
+  res.json({ ok: true });
 });
 
 app.get('*', (req, res) => {
