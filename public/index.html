@@ -230,6 +230,33 @@ select.big-input { font-size: 14px; }
 .chat-boas-vindas .bv-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
 .chat-boas-vindas .bv-sub { font-size: 13px; line-height: 1.5; }
 
+/* ====== ADMIN PAGE ====== */
+.admin-section { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.admin-card { background: var(--s1); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+.admin-card-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; }
+.user-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 8px; }
+.user-row:last-child { border-bottom: none; padding-bottom: 0; }
+.user-info { flex: 1; min-width: 0; }
+.user-name { font-size: 14px; font-weight: 600; }
+.user-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.user-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.btn-sm { font-size: 12px; font-weight: 600; padding: 5px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--s2); color: var(--text); cursor: pointer; }
+.btn-sm.danger { color: var(--red); border-color: rgba(239,71,111,0.4); }
+.btn-sm.success { color: var(--green); border-color: rgba(6,214,160,0.4); }
+.role-badge { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 100px; }
+.role-admin { background: rgba(255,107,53,0.15); color: var(--accent); }
+.role-gerente { background: rgba(76,201,240,0.15); color: var(--blue); }
+.role-operador { background: rgba(6,214,160,0.15); color: var(--green); }
+.inactive-user { opacity: 0.45; }
+.form-row { display: flex; flex-direction: column; gap: 8px; }
+.small-input { width: 100%; background: var(--s2); border: 1px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 14px; padding: 10px 12px; outline: none; -webkit-appearance: none; }
+.small-input:focus { border-color: var(--accent); }
+.sin-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--border); gap: 8px; font-size: 13px; }
+.sin-row:last-child { border-bottom: none; }
+.sin-termo { color: var(--muted); font-weight: 600; flex: 1; }
+.sin-arrow { color: var(--accent); margin: 0 6px; }
+.sin-prod { flex: 1; font-weight: 600; }
+
 .hidden { display:none !important; }
 </style>
 </head>
@@ -437,6 +464,47 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- ADMIN -->
+  <div id="p-admin" class="page">
+    <div class="admin-section">
+      <div class="admin-card">
+        <div class="admin-card-title">➕ Novo usuário</div>
+        <div class="form-row">
+          <input class="small-input" id="nu-nome" placeholder="Nome completo">
+          <input class="small-input" id="nu-user" placeholder="Usuário (sem espaços)" autocomplete="off">
+          <input class="small-input" id="nu-senha" type="password" placeholder="Senha (mín. 6 caracteres)" autocomplete="new-password">
+          <select class="small-input" id="nu-role">
+            <option value="operador">Operador</option>
+            <option value="gerente">Gerente</option>
+            <option value="admin">Administrador</option>
+          </select>
+          <button class="btn-export btn-primary" style="padding:11px" onclick="criarUsuario()">Criar usuário</button>
+        </div>
+      </div>
+      <div class="admin-card">
+        <div class="admin-card-title">👥 Usuários <button class="btn-sm" onclick="loadUsers()">↻</button></div>
+        <div id="users-list"><div class="loading">Carregando...</div></div>
+      </div>
+      <div class="admin-card">
+        <div class="admin-card-title">🔤 Sinônimos do cupom</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Ensine o sistema a reconhecer nomes do fornecedor. Ex: "LIMAO 500ML" → Limão Tahiti</div>
+        <div style="margin-bottom:10px">
+          <input type="file" id="sin-import-file" accept=".json" style="display:none" onchange="importarSinonimos(this)">
+          <button class="btn-sm" onclick="document.getElementById('sin-import-file').click()">📥 Importar JSON</button>
+        </div>
+        <div class="form-row" style="margin-bottom:10px">
+          <input class="small-input" id="sin-termo" placeholder="Nome no cupom (ex: LIMAO 500ML)">
+          <div style="position:relative">
+            <input class="small-input" id="sin-prod" placeholder="Produto no estoque" oninput="buscaSinProd(this.value)" autocomplete="off">
+            <div id="sin-ac" class="ac-list"></div>
+          </div>
+          <button class="btn-export btn-success" style="padding:11px" onclick="salvarSinonimo()">Salvar sinônimo</button>
+        </div>
+        <div id="sin-list"></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <nav>
@@ -445,6 +513,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
+  <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <div id="toast"></div>
 
@@ -508,6 +577,8 @@ async function loadSession() {
   document.getElementById('btn-logout').classList.remove('hidden');
   document.getElementById('f-resp').value = currentUser.nome;
   document.getElementById('btn-reset').classList.toggle('hidden', !permissions.pode_resetar);
+  const navAdmin = document.getElementById('nav-admin');
+  if (navAdmin) navAdmin.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
   // Cupom só para admin e gerente
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !['admin','gerente'].includes(currentUser.role));
@@ -542,6 +613,7 @@ function goPage(id, btn) {
   btn.classList.add('active');
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
+  if (id === 'admin') { loadUsers(); loadSinonimos(); }
 }
 
 async function loadDash() {
@@ -691,6 +763,8 @@ function renderCupomItens() {
           <input class="ci-qtd" type="number" value="${item.qtd}" min="0.001" step="0.001" onchange="trocarQtd(${idx}, this.value)">
           <button class="ci-ignore${ignorado?' active':''}" onclick="toggleIgnorar(${idx})">Ignorar</button>
         </div>
+        ${item.via_sinonimo ? `<div style="font-size:11px;color:var(--green);margin-top:4px">✓ Reconhecido por sinônimo salvo</div>`
+          : item.produto ? `<div style="margin-top:6px"><button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar vínculo</button></div>` : ''}
       ` : `<div class="ci-row"><button class="ci-ignore active" onclick="toggleIgnorar(${idx})">Desfazer</button></div>`}
     </div>`;
   }).join('');
@@ -921,11 +995,16 @@ async function exportar(tipo) {
 }
 
 async function resetar() {
-  if (!permissions.pode_resetar) { toast('Somente administrador pode resetar','err'); return; }
-  const confirmacao = prompt('Atenção: isso vai restaurar as quantidades originais. Digite RESTAURAR para confirmar.');
+  if (!permissions.pode_resetar) { toast('Somente administrador pode resetar', 'err'); return; }
+  const senhaAdmin = prompt('Digite sua senha de administrador para confirmar:');
+  if (!senhaAdmin) return;
+  const confirmacao = prompt('Digite RESTAURAR para confirmar o reset do estoque:');
   if (!confirmacao) return;
-  try { await apiPost('/api/resetar', {confirmacao}); toast('Estoque restaurado com sucesso','ok'); await loadDash(); await loadEstoque(); }
-  catch(e) { handleApiError(e); }
+  try {
+    await apiPost('/api/resetar', { confirmacao, senha_admin: senhaAdmin });
+    toast('Estoque restaurado com sucesso', 'ok');
+    await loadDash(); await loadEstoque();
+  } catch(e) { handleApiError(e); }
 }
 
 async function api(url) {
@@ -969,6 +1048,135 @@ function handleApiError(e, noisy=true) {
 
 function escapeHtml(value) {
   return String(value??'').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+// ==================== ADMIN: USUÁRIOS ====================
+async function importarSinonimos(input) {
+  const file = input.files[0];
+  if (!file) return;
+  try {
+    const text = await file.text();
+    const lista = JSON.parse(text);
+    const result = await apiPost('/api/sinonimos/importar', { lista });
+    toast(`✅ ${result.ok} sinônimos importados!${result.erros.length ? ` ${result.erros.length} erros.` : ''}`, 'ok');
+    await loadSinonimos();
+  } catch(e) { toast('Erro ao importar: ' + e.message, 'err'); }
+  input.value = '';
+}
+
+async function loadUsers() {
+  try {
+    const users = await api('/api/users');
+    const el = document.getElementById('users-list');
+    if (!users.length) { el.innerHTML = '<div style="color:var(--muted);font-size:13px">Nenhum usuário encontrado.</div>'; return; }
+    const roleLabel = { admin: 'Admin', gerente: 'Gerente', operador: 'Operador' };
+    const roleCls = { admin: 'role-admin', gerente: 'role-gerente', operador: 'role-operador' };
+    el.innerHTML = users.map(u => `
+      <div class="user-row ${!u.active ? 'inactive-user' : ''}">
+        <div class="user-info">
+          <div class="user-name">${escapeHtml(u.nome)} <span class="role-badge ${roleCls[u.role]||''}">${roleLabel[u.role]||u.role}</span></div>
+          <div class="user-meta">@${escapeHtml(u.username)} · ${u.active ? 'Ativo' : 'Inativo'}</div>
+        </div>
+        <div class="user-actions">
+          <button class="btn-sm" onclick="resetSenha(${u.id}, '${escapeHtml(u.username)}')">🔑</button>
+          <button class="btn-sm ${u.active ? 'danger' : 'success'}" onclick="toggleUser(${u.id}, ${u.active})">${u.active ? 'Desativar' : 'Ativar'}</button>
+        </div>
+      </div>`).join('');
+  } catch(e) { handleApiError(e, false); }
+}
+
+async function criarUsuario() {
+  const nome = document.getElementById('nu-nome').value.trim();
+  const username = document.getElementById('nu-user').value.trim();
+  const password = document.getElementById('nu-senha').value;
+  const role = document.getElementById('nu-role').value;
+  if (!nome || !username || !password) { toast('Preencha todos os campos', 'err'); return; }
+  try {
+    await apiPost('/api/users', { nome, username, password, role });
+    toast(`Usuário ${username} criado!`, 'ok');
+    document.getElementById('nu-nome').value = '';
+    document.getElementById('nu-user').value = '';
+    document.getElementById('nu-senha').value = '';
+    await loadUsers();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function toggleUser(id, active) {
+  if (!confirm(active ? 'Desativar este usuário?' : 'Ativar este usuário?')) return;
+  try { await apiPost(`/api/users/${id}`, { active: !active }, 'PUT'); await loadUsers(); toast('Usuário atualizado', 'ok'); }
+  catch(e) { toast(e.message, 'err'); }
+}
+
+async function resetSenha(id, username) {
+  const nova = prompt(`Nova senha para @${username} (mín. 6 caracteres):`);
+  if (!nova) return;
+  try { await apiPost(`/api/users/${id}`, { nova_senha: nova }, 'PUT'); toast('Senha alterada!', 'ok'); }
+  catch(e) { toast(e.message, 'err'); }
+}
+
+// ==================== SINÔNIMOS ====================
+let sinProdSel = '';
+
+async function buscaSinProd(q) {
+  if (!q || q.length < 2) { document.getElementById('sin-ac').classList.remove('open'); return; }
+  try {
+    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    const ac = document.getElementById('sin-ac');
+    if (!items.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="selSinProd('${escapeHtml(p.nome)}')">${escapeHtml(p.nome)}</div>`).join('');
+    ac.classList.add('open');
+  } catch(e) {}
+}
+
+function selSinProd(nome) {
+  sinProdSel = nome;
+  document.getElementById('sin-prod').value = nome;
+  document.getElementById('sin-ac').classList.remove('open');
+}
+
+async function salvarSinonimo() {
+  const termo = document.getElementById('sin-termo').value.trim();
+  const produto_nome = sinProdSel || document.getElementById('sin-prod').value.trim();
+  if (!termo || !produto_nome) { toast('Preencha o termo e selecione o produto', 'err'); return; }
+  try {
+    await apiPost('/api/sinonimos', { termo, produto_nome });
+    toast('Sinônimo salvo!', 'ok');
+    document.getElementById('sin-termo').value = '';
+    document.getElementById('sin-prod').value = '';
+    sinProdSel = '';
+    await loadSinonimos();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function loadSinonimos() {
+  try {
+    const itens = await api('/api/sinonimos');
+    const el = document.getElementById('sin-list');
+    if (!itens.length) { el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nenhum sinônimo cadastrado ainda.</div>'; return; }
+    el.innerHTML = itens.map(s => `
+      <div class="sin-row">
+        <span class="sin-termo">${escapeHtml(s.termo)}</span>
+        <span class="sin-arrow">→</span>
+        <span class="sin-prod">${escapeHtml(s.produto_nome)}</span>
+        <button class="btn-sm danger" onclick="deleteSinonimo(${s.id})">✕</button>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+async function deleteSinonimo(id) {
+  try {
+    const res = await fetch(API + `/api/sinonimos/${id}`, { method: 'DELETE', headers: authHeaders() });
+    if (!res.ok) throw new Error('Erro');
+    await loadSinonimos(); toast('Sinônimo removido', 'ok');
+  } catch(e) { toast('Erro ao remover', 'err'); }
+}
+
+// Salvar sinônimo direto do cupom
+async function salvarSinonimoCupom(nomeCupom, nomeProd) {
+  try {
+    await apiPost('/api/sinonimos', { termo: nomeCupom, produto_nome: nomeProd });
+    toast(`✓ "${nomeCupom}" → ${nomeProd} memorizado!`, 'ok');
+  } catch(e) {}
 }
 
 if ('serviceWorker' in navigator) {
