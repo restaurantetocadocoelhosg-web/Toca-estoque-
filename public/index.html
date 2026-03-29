@@ -5,6 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0f0f0f">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Toca Estoque">
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
 <title>🐰 Toca — Estoque</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
@@ -232,8 +237,8 @@ select.big-input { font-size: 14px; }
 
 <div id="auth-overlay" class="auth-overlay show">
   <div class="auth-card">
-    <div class="auth-title">🔐 Entrar no estoque</div>
-    <div class="auth-sub">Use seu usuário e senha para acessar. Usuário inicial: <b>admin</b> · Senha inicial: <b>Toca123!</b></div>
+    <div class="auth-title">🐰 Toca do Coelho</div>
+    <div class="auth-sub">Sistema de gestão de estoque.<br>Entre com seu usuário e senha.</div>
     <div class="field-group">
       <div class="field-label">Usuário</div>
       <input class="big-input" id="login-user" type="text" autocomplete="username" placeholder="Digite o usuário">
@@ -245,7 +250,7 @@ select.big-input { font-size: 14px; }
     <div class="auth-actions">
       <button class="btn-export btn-primary" onclick="doLogin()">Entrar</button>
     </div>
-    <div class="small-note">Troque a senha inicial assim que entrar.</div>
+    <div class="small-note">Problemas de acesso? Fale com o administrador.</div>
   </div>
 </div>
 
@@ -886,10 +891,10 @@ async function loadHist() {
       }
       return `<div class="hist-item">
         <div class="hist-top"><div class="hist-nome">${escapeHtml(m.produto_nome)}</div><span class="hist-tipo ${tClass}">${m.tipo}</span></div>
+        ${m.responsavel ? `<div style="font-size:12px;color:var(--accent);font-weight:600;margin-bottom:4px">👤 ${escapeHtml(m.responsavel)}</div>` : ''}
         <div class="hist-bottom">
           <span>${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade||'')}</span>
           ${m.motivo?`<span>${escapeHtml(m.motivo)}</span>`:''}
-          ${m.responsavel?`<span>👤 ${escapeHtml(m.responsavel)}</span>`:''}
           <span>🕐 ${escapeHtml(dataHora)}</span>
         </div>
       </div>`;
@@ -964,6 +969,10 @@ function handleApiError(e, noisy=true) {
 
 function escapeHtml(value) {
   return String(value??'').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+}
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
 }
 
 init();
