@@ -1,3 +1,5 @@
+process.env.TZ = 'America/Sao_Paulo';
+
 const express = require('express');
 const Database = require('better-sqlite3');
 const cors = require('cors');
@@ -36,6 +38,14 @@ function nowSP() {
 }
 function sha(input) {
   return crypto.createHash('sha256').update(String(input)).digest('hex');
+}
+
+function normalizeSearch(str) {
+  return String(str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
 }
 
 function hashPassword(password) {
@@ -540,7 +550,7 @@ app.post('/api/resetar', auth, requireRole('admin'), (req, res) => {
 });
 
 // ==================== LER CUPOM (IA) ====================
-app.post('/api/ler-cupom', auth, async (req, res) => {
+app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const { imagem, mediaType } = req.body;
   if (!imagem) return res.status(400).json({ erro: 'Imagem não enviada.' });
 
@@ -620,6 +630,74 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
     res.json({ itens });
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
+    res.status(500).json({ erro: 'Erro interno: ' + e.message });
+  }
+});
+
+// ==================== ASSISTENTE IA ====================
+app.post('/api/chat', auth, async (req, res) => {
+  const pergunta = sanitizeText(req.body?.pergunta, 500);
+  const historico = Array.isArray(req.body?.historico) ? req.body.historico.slice(-8) : [];
+  if (!pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return res.status(500).json({ erro: 'API não configurada.' });
+
+  const totalProd = db.prepare('SELECT COUNT(*) as n FROM produtos').get().n;
+  const zerados = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd = 0').get().n;
+  const criticos = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5').get().n;
+  const atencao = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo').get().n;
+  const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
+  const hojeSP = nowSP().slice(0, 10);
+  const lancHoje = db.prepare(`SELECT COUNT(*) as n FROM movimentacoes WHERE substr(created_at,1,10)=?`).get(hojeSP).n;
+  const prodZerados = db.prepare(`SELECT nome, categoria FROM produtos WHERE qtd = 0 ORDER BY categoria, nome LIMIT 20`).all();
+  const prodCriticos = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5 ORDER BY categoria LIMIT 20`).all();
+  const ultimosMov = db.prepare(`SELECT produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at FROM movimentacoes ORDER BY id DESC LIMIT 15`).all();
+  const maisConsumidos = db.prepare(`SELECT produto_nome, SUM(qtd) as total, unidade FROM movimentacoes WHERE tipo IN ('Saída','Perda') AND substr(created_at,1,10) >= date(?) GROUP BY produto_nome ORDER BY total DESC LIMIT 10`).all(new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10));
+  const cats = db.prepare(`SELECT categoria, COUNT(*) as n, SUM(qtd*custo) as valor FROM produtos GROUP BY categoria ORDER BY valor DESC`).all();
+
+  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.
+Responda sempre em português brasileiro, de forma direta e objetiva. Use emojis com moderação.
+Hoje é ${hojeSP}.
+
+RESUMO DO ESTOQUE:
+- Total de produtos: ${totalProd}
+- Zerados: ${zerados} | Críticos (≤50% do mínimo): ${criticos} | Atenção: ${atencao}
+- Valor total em estoque: R$ ${Number(valorTotal).toFixed(2)}
+- Lançamentos hoje: ${lancHoje}
+
+PRODUTOS ZERADOS (${prodZerados.length}):
+${prodZerados.map(p => `• ${p.nome} (${p.categoria})`).join('\n') || 'Nenhum'}
+
+PRODUTOS CRÍTICOS (${prodCriticos.length}):
+${prodCriticos.map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum'}
+
+MAIS CONSUMIDOS (últimos 30 dias):
+${maisConsumidos.map(p => `• ${p.produto_nome}: ${Number(p.total).toFixed(2)} ${p.unidade}`).join('\n') || 'Sem dados'}
+
+ÚLTIMAS MOVIMENTAÇÕES:
+${ultimosMov.map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}
+
+ESTOQUE POR CATEGORIA:
+${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).toFixed(2)}`).join('\n')}`;
+
+  try {
+    const messages = [
+      ...historico.map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: pergunta }
+    ];
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: contexto, messages })
+    });
+    if (!response.ok) return res.status(502).json({ erro: 'Erro na API de IA.' });
+    const data = await response.json();
+    const resposta = (data.content||[]).map(b => b.text||'').join('').trim();
+    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'chat_ia',?,?,datetime('now','localtime'))`).run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ pergunta: pergunta.slice(0,100) }), sanitizeText(req.ip, 80));
+    res.json({ resposta });
+  } catch(e) {
+    console.error('Erro chat:', e.message);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
 });
