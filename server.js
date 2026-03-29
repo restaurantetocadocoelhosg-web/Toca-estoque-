@@ -344,6 +344,29 @@ app.get('/api/categorias', auth, (req, res) => {
   res.json(rows.map(r => r.categoria));
 });
 
+app.post('/api/produtos', auth, requireRole('admin', 'gerente'), (req, res) => {
+  const nome = sanitizeText(req.body?.nome, 120);
+  const categoria = sanitizeText(req.body?.categoria, 80);
+  const unidade = sanitizeText(req.body?.unidade, 20);
+  const minimo = parseNonNegativeNumber(req.body?.minimo ?? 1);
+  const custo = parseNonNegativeNumber(req.body?.custo ?? 0);
+  const qtd = parseNonNegativeNumber(req.body?.qtd ?? 0);
+  if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
+  try {
+    const info = db.prepare(`
+      INSERT INTO produtos (nome, nome_search, categoria, unidade, qtd, minimo, custo)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(nome, normalizeSearch(nome), categoria, unidade, qtd ?? 0, minimo ?? 1, custo ?? 0);
+    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'criar_produto',?,?,datetime('now','localtime'))`)
+      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ nome, categoria, unidade }), sanitizeText(req.ip, 80));
+    const novo = db.prepare('SELECT * FROM produtos WHERE id = ?').get(info.lastInsertRowid);
+    res.json({ ok: true, produto: novo });
+  } catch(e) {
+    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Produto já cadastrado com este nome.' });
+    res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
+  }
+});
+
 app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
   const custo = parseNonNegativeNumber(req.body?.custo);
   const minimo = parseNonNegativeNumber(req.body?.minimo);
