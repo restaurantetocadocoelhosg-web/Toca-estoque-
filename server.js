@@ -556,7 +556,7 @@ app.post('/api/ler-cupom', auth, async (req, res) => {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-haiku-4-5-20251001',
         max_tokens: 1024,
         messages: [{
           role: 'user',
@@ -581,7 +581,8 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
 
     if (!response.ok) {
       const err = await response.text();
-      return res.status(502).json({ erro: 'Erro na API de IA: ' + err });
+      console.error('Anthropic error:', err);
+      return res.status(502).json({ erro: 'Erro na API: ' + err.slice(0, 300) });
     }
 
     const data = await response.json();
@@ -590,12 +591,11 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
 
     let parsed;
     try { parsed = JSON.parse(clean); } catch(e) {
-      return res.status(422).json({ erro: 'IA não retornou JSON válido.', raw: text });
+      return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' });
     }
 
     if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
 
-    // Tenta cruzar cada item com os produtos cadastrados
     const itens = (parsed.itens || []).map(item => {
       const qNorm = normalizeSearch(item.nome);
       const candidatos = db.prepare(`
@@ -619,8 +619,8 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
 
     res.json({ itens });
   } catch(e) {
-    console.error('Erro ler-cupom:', e);
-    res.status(500).json({ erro: 'Erro interno ao processar imagem.' });
+    console.error('Erro ler-cupom:', e.message);
+    res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
 });
 
