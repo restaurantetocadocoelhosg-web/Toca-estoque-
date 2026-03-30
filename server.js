@@ -345,10 +345,11 @@ app.get('/api/produtos', auth, (req, res) => {
 app.get('/api/produtos/buscar', auth, (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
+  const qNorm = normalizeSearch(q);
   const rows = db.prepare(`
     SELECT id, nome, categoria, unidade, qtd, minimo, custo
-    FROM produtos WHERE nome LIKE ? ORDER BY nome LIMIT 15
-  `).all(`%${q}%`);
+    FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 15
+  `).all(`%${qNorm}%`);
   res.json(rows);
 });
 
@@ -748,7 +749,11 @@ ${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).to
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: contexto, messages })
     });
-    if (!response.ok) return res.status(502).json({ erro: 'Erro na API de IA.' });
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Chat API error:', errText);
+      return res.status(502).json({ erro: 'Erro na API: ' + errText.slice(0, 200) });
+    }
     const data = await response.json();
     const resposta = (data.content||[]).map(b => b.text||'').join('').trim();
     db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'chat_ia',?,?,datetime('now','localtime'))`).run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ pergunta: pergunta.slice(0,100) }), sanitizeText(req.ip, 80));
