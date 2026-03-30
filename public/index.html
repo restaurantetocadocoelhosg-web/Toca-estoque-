@@ -33,6 +33,7 @@ nav { order: 999; background: var(--s1); border-top: 1px solid var(--border); di
 main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .page { display: none; padding: 0; }
 .page.active { display: block; }
+#p-chat.active { display: flex; flex-direction: column; height: 100%; }
 .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 14px 14px 0; }
 .card { background: var(--s1); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
 .card.card-click { cursor: pointer; transition: background 0.15s; }
@@ -1253,6 +1254,71 @@ async function salvarSinonimoCupom(nomeCupom, nomeProd) {
     await apiPost('/api/sinonimos', { termo: nomeCupom, produto_nome: nomeProd });
     toast(`✓ "${nomeCupom}" → ${nomeProd} memorizado!`, 'ok');
   } catch(e) {}
+}
+
+// ==================== CHAT IA ====================
+let chatHistorico = [];
+
+function autoResize(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+}
+
+function chatEnter(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarChat(); }
+}
+
+function enviarSugestao(el) {
+  document.getElementById('chat-input').value = el.textContent;
+  enviarChat();
+}
+
+function adicionarBolha(texto, role) {
+  const bv = document.getElementById('chat-boas-vindas');
+  if (bv) bv.style.display = 'none';
+  const sugs = document.getElementById('chat-sugestoes');
+  if (sugs) sugs.style.display = 'none';
+  const msgs = document.getElementById('chat-msgs');
+  const div = document.createElement('div');
+  div.className = `chat-bubble ${role}`;
+  div.textContent = texto;
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+  return div;
+}
+
+async function enviarChat() {
+  const input = document.getElementById('chat-input');
+  const pergunta = input.value.trim();
+  if (!pergunta) return;
+
+  const btn = document.getElementById('btn-send');
+  btn.disabled = true;
+  input.value = '';
+  input.style.height = 'auto';
+
+  adicionarBolha(pergunta, 'user');
+  const loading = adicionarBolha('Pensando...', 'ia loading');
+
+  try {
+    const result = await apiPost('/api/chat', {
+      pergunta,
+      historico: chatHistorico
+    });
+
+    chatHistorico.push({ role: 'user', content: pergunta });
+    chatHistorico.push({ role: 'assistant', content: result.resposta });
+    if (chatHistorico.length > 16) chatHistorico = chatHistorico.slice(-16);
+
+    loading.className = 'chat-bubble ia';
+    loading.textContent = result.resposta;
+  } catch(e) {
+    loading.className = 'chat-bubble ia';
+    loading.textContent = '❌ ' + (e.message || 'Erro ao consultar IA');
+  }
+
+  btn.disabled = false;
+  document.getElementById('chat-msgs').scrollTop = 99999;
 }
 
 // ==================== MODAL PRODUTO CUPOM ====================
