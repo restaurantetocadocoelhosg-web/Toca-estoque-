@@ -204,6 +204,19 @@ db.exec(`
   );
 `);
 
+// Migração: adiciona coluna nome_search se não existir
+try { db.exec(`ALTER TABLE produtos ADD COLUMN nome_search TEXT`); } catch(e) {}
+// Popula nome_search em todos os produtos que ainda não têm
+const semNorm = db.prepare(`SELECT id, nome FROM produtos WHERE nome_search IS NULL OR nome_search = ''`).all();
+if (semNorm.length > 0) {
+  const updateNorm = db.prepare(`UPDATE produtos SET nome_search = ? WHERE id = ?`);
+  const normTx = db.transaction(() => {
+    for (const p of semNorm) updateNorm.run(normalizeSearch(p.nome), p.id);
+  });
+  normTx();
+  console.log(`✅ nome_search populado para ${semNorm.length} produtos`);
+}
+
 const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
 if (userCount === 0) {
   const adminUser = sanitizeText(process.env.ADMIN_USER || 'admin', 40) || 'admin';
