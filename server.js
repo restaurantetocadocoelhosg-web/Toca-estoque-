@@ -852,6 +852,18 @@ app.delete('/api/sinonimos/:id', auth, requireRole('admin', 'gerente'), (req, re
   res.json({ ok: true });
 });
 
+// Rota de manutenção - forçar atualização do nome_search
+app.get('/api/manutencao/normalizar', auth, requireRole('admin'), (req, res) => {
+  const todos = db.prepare(`SELECT id, nome FROM produtos`).all();
+  const update = db.prepare(`UPDATE produtos SET nome_search = ? WHERE id = ?`);
+  const tx = db.transaction(() => {
+    for (const p of todos) update.run(normalizeSearch(p.nome), p.id);
+  });
+  tx();
+  console.log(`✅ nome_search atualizado para ${todos.length} produtos`);
+  res.json({ ok: true, total: todos.length, msg: `${todos.length} produtos normalizados!` });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
