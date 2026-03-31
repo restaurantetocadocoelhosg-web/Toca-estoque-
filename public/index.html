@@ -18,6 +18,7 @@
   --accent: #ff6b35; --green: #06d6a0; --red: #ef476f; --yellow: #ffd166;
   --blue: #4cc9f0; --text: #f0f0f0; --muted: #777;
   --font: 'Inter', sans-serif; --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --emoji-font: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", sans-serif;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 html, body { height: 100%; overflow: hidden; }
@@ -277,6 +278,28 @@ select.big-input { font-size: 14px; }
 
 <div id="auth-overlay" class="auth-overlay show">
   <div class="auth-card">
+    <div style="text-align:center;margin-bottom:10px">
+      <svg width="72" height="72" viewBox="0 0 72 72" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="Coelho">
+        <!-- Orelhas -->
+        <ellipse cx="24" cy="20" rx="7" ry="16" fill="#e8e8e8" stroke="#ccc" stroke-width="1.5"/>
+        <ellipse cx="48" cy="20" rx="7" ry="16" fill="#e8e8e8" stroke="#ccc" stroke-width="1.5"/>
+        <ellipse cx="24" cy="20" rx="4" ry="12" fill="#f4a0b0"/>
+        <ellipse cx="48" cy="20" rx="4" ry="12" fill="#f4a0b0"/>
+        <!-- Cabeça -->
+        <ellipse cx="36" cy="42" rx="18" ry="16" fill="#f0f0f0" stroke="#ccc" stroke-width="1.5"/>
+        <!-- Olhos -->
+        <circle cx="29" cy="39" r="3" fill="#333"/>
+        <circle cx="43" cy="39" r="3" fill="#333"/>
+        <circle cx="30" cy="38" r="1" fill="#fff"/>
+        <circle cx="44" cy="38" r="1" fill="#fff"/>
+        <!-- Nariz e boca -->
+        <ellipse cx="36" cy="46" rx="2.5" ry="2" fill="#f4a0b0"/>
+        <path d="M33.5 48 Q36 50.5 38.5 48" stroke="#aaa" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+        <!-- Bochechas -->
+        <circle cx="27" cy="46" r="4" fill="rgba(244,160,176,0.3)"/>
+        <circle cx="45" cy="46" r="4" fill="rgba(244,160,176,0.3)"/>
+      </svg>
+    </div>
     <div class="auth-title">🐰 Toca do Coelho</div>
     <div class="auth-sub">Sistema de gestão de estoque.<br>Entre com seu usuário e senha.</div>
     <div class="field-group">
@@ -330,9 +353,10 @@ select.big-input { font-size: 14px; }
 </div>
 
 <header>
-  <div class="logo">🐰 <span>Toca</span> do Coelho</div>
+  <div class="logo"><span style="font-family:var(--emoji-font)">🐰</span> <span>Toca</span> do Coelho</div>
   <div class="userbar">
     <div id="user-badge" class="user-pill">Não autenticado</div>
+    <button id="btn-edit-nome" class="link-btn hidden" onclick="editarNome()">✏️ Nome</button>
     <button id="btn-change-pass" class="link-btn hidden" onclick="trocarSenha()">Trocar senha</button>
     <button id="btn-logout" class="link-btn hidden" onclick="logout()">Sair</button>
     <div id="clock"></div>
@@ -455,6 +479,9 @@ select.big-input { font-size: 14px; }
   <!-- CHAT IA -->
   <div id="p-chat" class="page">
     <div class="chat-wrap">
+      <div style="display:flex;justify-content:flex-end;padding:8px 14px 0;flex-shrink:0">
+        <button class="btn-sm" onclick="limparChat()" style="font-size:11px;color:var(--muted)">🗑️ Limpar conversa</button>
+      </div>
       <div class="chat-msgs" id="chat-msgs">
         <div class="chat-boas-vindas" id="chat-boas-vindas">
           <div class="bv-icon">🤖</div>
@@ -525,7 +552,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('estoque', this)"><span class="icon">📦</span>Estoque</button>
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
-  <button class="nav-btn" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
+  <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -647,17 +674,21 @@ async function loadSession() {
   currentUser = data.user; permissions = data.permissions || {};
   document.getElementById('user-badge').textContent = `${currentUser.nome} · ${labelRole(currentUser.role)}`;
   document.getElementById('btn-change-pass').classList.remove('hidden');
+  document.getElementById('btn-edit-nome').classList.remove('hidden');
   document.getElementById('btn-logout').classList.remove('hidden');
   document.getElementById('f-resp').value = currentUser.nome;
   document.getElementById('btn-reset').classList.toggle('hidden', !permissions.pode_resetar);
   const navAdmin = document.getElementById('nav-admin');
   if (navAdmin) navAdmin.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
+  // IA só para admin e gerente (operador não gera custo)
+  const navChat = document.getElementById('nav-chat');
+  if (navChat) navChat.style.display = currentUser.role === 'operador' ? 'none' : 'flex';
   // Cupom só para admin e gerente
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !['admin','gerente'].includes(currentUser.role));
 }
 
-async function afterLogin() { showLogin(false); await loadDash(); await loadCats(); }
+async function afterLogin() { showLogin(false); await loadDash(); await loadCats(); restaurarChatUI(); }
 
 function labelRole(r) { return ({admin:'Administrador',gerente:'Gerente',operador:'Operador'}[r]||r||'Usuário'); }
 
@@ -665,8 +696,10 @@ async function logout() {
   try { await apiPost('/api/logout', {}); } catch(e) {}
   authToken = ''; currentUser = null; permissions = {};
   localStorage.removeItem('toca_token');
+  localStorage.removeItem('toca_chat');
+  chatHistorico = [];
   document.getElementById('user-badge').textContent = 'Não autenticado';
-  ['btn-change-pass','btn-logout','btn-reset'].forEach(id => document.getElementById(id).classList.add('hidden'));
+  ['btn-change-pass','btn-edit-nome','btn-logout','btn-reset'].forEach(id => document.getElementById(id).classList.add('hidden'));
   showLogin(true);
 }
 
@@ -677,6 +710,18 @@ async function trocarSenha() {
   if (!new_password) return;
   try { await apiPost('/api/change-password', {current_password, new_password}); toast('Senha alterada com sucesso', 'ok'); }
   catch(e) { toast(e.message || 'Erro ao trocar senha', 'err'); }
+}
+
+async function editarNome() {
+  const novoNome = prompt('Seu nome de exibição:', currentUser?.nome || '');
+  if (!novoNome || !novoNome.trim()) return;
+  try {
+    await apiPost('/api/me', { nome: novoNome.trim() }, 'PUT');
+    currentUser.nome = novoNome.trim();
+    document.getElementById('user-badge').textContent = `${currentUser.nome} · ${labelRole(currentUser.role)}`;
+    document.getElementById('f-resp').value = currentUser.nome;
+    toast('✓ Nome atualizado', 'ok');
+  } catch(e) { toast(e.message || 'Erro ao atualizar nome', 'err'); }
 }
 
 function goPage(id, btn) {
@@ -1034,14 +1079,29 @@ async function loadHist() {
     el.innerHTML = items.map(m => {
       const tClass = {Entrada:'tipo-entrada','Saída':'tipo-saida',Perda:'tipo-perda',Ajuste:'tipo-ajuste'}[m.tipo]||'';
       const sinal = m.tipo==='Entrada'?'+':m.tipo==='Ajuste'?'=':'-';
+      const podeDeletar = permissions.pode_editar_produto; // admin/gerente
       let dataHora='';
       if (m.created_at) {
         const d = new Date(String(m.created_at).trim().replace(' ','T'));
         if (!isNaN(d.getTime())) dataHora = new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(d);
         else dataHora = m.created_at;
       }
-      return `<div class="hist-item">
-        <div class="hist-top"><div class="hist-nome">${escapeHtml(m.produto_nome)}</div><span class="hist-tipo ${tClass}">${m.tipo}</span></div>
+      return `<div class="hist-item" id="hist-${m.id}">
+        <div class="hist-top">
+          <div class="hist-nome">${escapeHtml(m.produto_nome)}</div>
+          <div style="display:flex;align-items:center;gap:6px">
+            <span class="hist-tipo ${tClass}">${m.tipo}</span>
+            ${podeDeletar && m.tipo !== 'Ajuste' ? `<button class="btn-sm" id="del1-${m.id}" onclick="histDel1(${m.id})" title="Cancelar lançamento" style="font-size:11px;color:var(--muted)">✕</button>` : ''}
+          </div>
+        </div>
+        <div id="hist-confirm-${m.id}" style="display:none;background:rgba(239,71,111,0.08);border:1px solid rgba(239,71,111,0.4);border-radius:10px;padding:10px 12px;margin-top:8px">
+          <div style="font-size:13px;font-weight:600;color:var(--red);margin-bottom:8px">⚠️ Cancelar este lançamento?</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:10px">O estoque será estornado automaticamente.</div>
+          <div style="display:flex;gap:8px">
+            <button class="btn-sm danger" onclick="histDelConfirm(${m.id})" style="flex:1;padding:8px;font-size:13px;font-weight:700">🗑️ Confirmar cancelamento</button>
+            <button class="btn-sm" onclick="histDelCancel(${m.id})" style="padding:8px">Não</button>
+          </div>
+        </div>
         ${m.responsavel ? `<div style="font-size:12px;color:var(--accent);font-weight:600;margin-bottom:4px">👤 ${escapeHtml(m.responsavel)}</div>` : ''}
         <div class="hist-bottom">
           <span>${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade||'')}</span>
@@ -1051,6 +1111,25 @@ async function loadHist() {
       </div>`;
     }).join('');
   } catch(e) { handleApiError(e,false); }
+}
+
+function histDel1(id) {
+  document.getElementById(`hist-confirm-${id}`).style.display = 'block';
+  document.getElementById(`del1-${id}`).style.display = 'none';
+}
+function histDelCancel(id) {
+  document.getElementById(`hist-confirm-${id}`).style.display = 'none';
+  document.getElementById(`del1-${id}`).style.display = '';
+}
+async function histDelConfirm(id) {
+  try {
+    const res = await fetch(API + `/api/movimentacoes/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.erro || 'Erro ao cancelar');
+    document.getElementById(`hist-${id}`)?.remove();
+    toast('✓ Lançamento cancelado e estoque estornado', 'ok');
+    await loadDash();
+  } catch(e) { toast(e.message, 'err'); }
 }
 
 function limparDatas() {
@@ -1257,7 +1336,41 @@ async function salvarSinonimoCupom(nomeCupom, nomeProd) {
 }
 
 // ==================== CHAT IA ====================
-let chatHistorico = [];
+let chatHistorico = JSON.parse(localStorage.getItem('toca_chat') || '[]');
+
+function salvarChatLocal() {
+  localStorage.setItem('toca_chat', JSON.stringify(chatHistorico.slice(-20)));
+}
+
+// Restaura mensagens anteriores na tela ao carregar
+function restaurarChatUI() {
+  if (!chatHistorico.length) return;
+  const bv = document.getElementById('chat-boas-vindas');
+  if (bv) bv.style.display = 'none';
+  const sugs = document.getElementById('chat-sugestoes');
+  if (sugs) sugs.style.display = 'none';
+  const msgs = document.getElementById('chat-msgs');
+  for (let i = 0; i < chatHistorico.length; i++) {
+    const h = chatHistorico[i];
+    const div = document.createElement('div');
+    div.className = `chat-bubble ${h.role === 'user' ? 'user' : 'ia'}`;
+    div.textContent = h.content;
+    msgs.appendChild(div);
+  }
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function limparChat() {
+  chatHistorico = [];
+  salvarChatLocal();
+  const msgs = document.getElementById('chat-msgs');
+  msgs.innerHTML = `<div class="chat-boas-vindas" id="chat-boas-vindas">
+    <div class="bv-icon">🤖</div>
+    <div class="bv-title">Assistente de Estoque</div>
+    <div class="bv-sub">Pergunte qualquer coisa sobre o estoque.<br>Tenho acesso aos dados em tempo real.</div>
+  </div>`;
+  document.getElementById('chat-sugestoes').style.display = 'flex';
+}
 
 function autoResize(el) {
   el.style.height = 'auto';
@@ -1308,7 +1421,8 @@ async function enviarChat() {
 
     chatHistorico.push({ role: 'user', content: pergunta });
     chatHistorico.push({ role: 'assistant', content: result.resposta });
-    if (chatHistorico.length > 16) chatHistorico = chatHistorico.slice(-16);
+    if (chatHistorico.length > 20) chatHistorico = chatHistorico.slice(-20);
+    salvarChatLocal();
 
     loading.className = 'chat-bubble ia';
     loading.textContent = result.resposta;
@@ -1362,7 +1476,7 @@ async function modalBuscaProd(q) {
     const ac = document.getElementById('modal-busca-ac');
     if (!items.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = items.map(p =>
-      `<div class="ac-item" onmousedown="modalSelProd(${JSON.stringify(JSON.stringify(p))})">
+      `<div class="ac-item" onclick="modalSelProd(${JSON.stringify(JSON.stringify(p))})">
         <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${escapeHtml(p.categoria)} · ${fmt(p.qtd)} ${escapeHtml(p.unidade)}</div></div>
       </div>`
     ).join('');
@@ -1379,7 +1493,11 @@ function modalSelProd(jsonStr) {
 }
 
 async function confirmarVinculo() {
-  if (!modalProdSel || modalIdx === null) return;
+  if (modalIdx === null) return;
+  if (!modalProdSel) {
+    toast('Toque no produto da lista para selecioná-lo antes de confirmar', 'err');
+    return;
+  }
   cupomItens[modalIdx].produto = modalProdSel;
   cupomItens[modalIdx].candidatos = [modalProdSel];
   if (document.getElementById('modal-memorizar').checked) {
