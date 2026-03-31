@@ -206,6 +206,9 @@ db.exec(`
 
 // Migração: adiciona coluna nome_search se não existir
 try { db.exec(`ALTER TABLE produtos ADD COLUMN nome_search TEXT`); } catch(e) {}
+// Migração: coluna ativo para arquivamento
+try { db.exec(`ALTER TABLE produtos ADD COLUMN ativo INTEGER NOT NULL DEFAULT 1`); } catch(e) {}
+try { db.exec(`UPDATE produtos SET ativo = 1 WHERE ativo IS NULL`); } catch(e) {}
 // Popula nome_search em todos os produtos que ainda não têm
 const semNorm = db.prepare(`SELECT id, nome FROM produtos WHERE nome_search IS NULL OR nome_search = ''`).all();
 if (semNorm.length > 0) {
@@ -340,9 +343,15 @@ app.post('/api/change-password', auth, (req, res) => {
 
 // ==================== ROTAS PRODUTOS ====================
 app.get('/api/produtos', auth, (req, res) => {
-  const { cat, status, q } = req.query;
+  const { cat, status, q, arquivados } = req.query;
   let sql = 'SELECT * FROM produtos WHERE 1=1';
   const params = [];
+  // Arquivados só visíveis para admin e com flag explícita
+  if (arquivados === '1' && req.user.role === 'admin') {
+    sql += ' AND ativo = 0';
+  } else {
+    sql += ' AND (ativo = 1 OR ativo IS NULL)';
+  }
   if (q) { sql += ' AND nome LIKE ?'; params.push(`%${sanitizeText(q, 100)}%`); }
   if (cat) { sql += ' AND categoria = ?'; params.push(sanitizeText(cat, 80)); }
   sql += calcStatusClause(status);
@@ -357,7 +366,7 @@ app.get('/api/produtos/buscar', auth, (req, res) => {
   const qNorm = normalizeSearch(q);
   const rows = db.prepare(`
     SELECT id, nome, categoria, unidade, qtd, minimo, custo
-    FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 15
+    FROM produtos WHERE nome_search LIKE ? AND (ativo = 1 OR ativo IS NULL) ORDER BY nome LIMIT 15
   `).all(`%${qNorm}%`);
   res.json(rows);
 });
@@ -391,32 +400,46 @@ app.post('/api/produtos', auth, requireRole('admin', 'gerente'), (req, res) => {
 });
 
 app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
-  const custo = parseNonNegativeNumber(req.body?.custo);
-  const minimo = parseNonNegativeNumber(req.body?.minimo);
-  if (custo === null || minimo === null) {
-    return res.status(400).json({ erro: 'Custo e mínimo devem ser números maiores ou iguais a zero.' });
-  }
   const produto = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
   if (!produto) return res.status(404).json({ erro: 'Produto não encontrado.' });
 
-  db.prepare(`
-    UPDATE produtos
-    SET custo = ?, minimo = ?, updated_at = datetime('now','localtime')
-    WHERE id = ?
-  `).run(custo, minimo, req.params.id);
+  const nome     = req.body?.nome     !== undefined ? sanitizeText(req.body.nome, 120)     : produto.nome;
+  const categoria= req.body?.categoria!== undefined ? sanitizeText(req.body.categoria, 80) : produto.categoria;
+  const unidade  = req.body?.unidade  !== undefined ? sanitizeText(req.body.unidade, 20)   : produto.unidade;
+  const custo    = req.body?.custo    !== undefined ? parseNonNegativeNumber(req.body.custo)  : produto.custo;
+  const minimo   = req.body?.minimo   !== undefined ? parseNonNegativeNumber(req.body.minimo) : produto.minimo;
 
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, 'produto_update', ?, ?, datetime('now','localtime'))
-  `).run(
-    req.user.id,
-    req.user.nome,
-    req.user.role,
-    JSON.stringify({ produto_id: produto.id, produto_nome: produto.nome, custo, minimo }),
-    sanitizeText(req.ip, 80)
-  );
+  if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
+  if (custo === null || minimo === null) return res.status(400).json({ erro: 'Custo e mínimo devem ser números válidos.' });
 
-  res.json({ ok: true });
+  try {
+    db.prepare(`UPDATE produtos SET nome=?, nome_search=?, categoria=?, unidade=?, custo=?, minimo=?, updated_at=datetime('now','localtime') WHERE id=?`)
+      .run(nome, normalizeSearch(nome), categoria, unidade, custo, minimo, req.params.id);
+    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'produto_update',?,?,datetime('now','localtime'))`)
+      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ id: produto.id, nome_anterior: produto.nome, nome, categoria, unidade, custo, minimo }), sanitizeText(req.ip, 80));
+    const atualizado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
+    res.json({ ok: true, produto: atualizado });
+  } catch(e) {
+    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Já existe um produto com este nome.' });
+    res.status(500).json({ erro: 'Erro ao atualizar produto.' });
+  }
+});
+
+app.put('/api/produtos/:id/arquivar', auth, requireRole('admin'), (req, res) => {
+  const prod = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  const novoAtivo = prod.ativo === 0 ? 1 : 0;
+  db.prepare(`UPDATE produtos SET ativo=?, updated_at=datetime('now','localtime') WHERE id=?`).run(novoAtivo, req.params.id);
+  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'produto_arquivar',?,?,datetime('now','localtime'))`)
+    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ produto_id: prod.id, nome: prod.nome, ativo: novoAtivo }), sanitizeText(req.ip, 80));
+  res.json({ ok: true, ativo: novoAtivo });
+});
+
+app.get('/api/produtos/:id/historico', auth, (req, res) => {
+  const movs = db.prepare(`SELECT tipo, qtd, unidade, motivo, responsavel, obs, created_at FROM movimentacoes WHERE produto_id = ? ORDER BY id DESC LIMIT 20`).all(req.params.id);
+  const prod = db.prepare('SELECT nome, qtd, unidade, ativo FROM produtos WHERE id = ?').get(req.params.id);
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  res.json({ produto: prod, movimentacoes: movs });
 });
 
 // ==================== ROTAS MOVIMENTAÇÕES ====================
