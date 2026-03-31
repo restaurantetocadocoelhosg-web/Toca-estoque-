@@ -272,6 +272,27 @@ select.big-input { font-size: 14px; }
 .prod-modal-section.active { display: block; }
 
 .hidden { display:none !important; }
+
+/* ===== GESTÃO DE PRODUTOS ===== */
+.pedit-overlay { position: fixed; inset: 0; background: var(--bg); z-index: 250; display: none; flex-direction: column; }
+.pedit-overlay.show { display: flex; }
+.pedit-tabs { display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0; background: var(--s1); }
+.pedit-tab { flex: 1; background: none; border: none; color: var(--muted); font-family: var(--font); font-size: 13px; font-weight: 600; padding: 12px 6px; cursor: pointer; border-bottom: 2px solid transparent; transition: all 0.15s; }
+.pedit-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.pedit-body { flex: 1; overflow-y: auto; padding: 16px; }
+.pedit-section { display: none; }
+.pedit-section.active { display: block; }
+.field-label-sm { font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; margin: 10px 0 5px; }
+.pedit-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.prod-admin-row { background: var(--s2); border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; cursor: pointer; transition: background 0.1s; }
+.prod-admin-row:active { background: var(--border); }
+.prod-admin-row.arquivado { opacity: 0.45; }
+.prod-admin-nome { font-size: 14px; font-weight: 600; }
+.prod-admin-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.prod-admin-qtd { font-size: 15px; font-weight: 800; text-align: right; }
+.hist-mini { background: var(--s2); border-radius: 10px; padding: 10px 12px; margin-bottom: 7px; }
+.hist-mini-top { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+.hist-mini-sub { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -507,6 +528,24 @@ select.big-input { font-size: 14px; }
   <!-- ADMIN -->
   <div id="p-admin" class="page">
     <div class="admin-section">
+
+      <!-- GESTÃO DE PRODUTOS -->
+      <div class="admin-card">
+        <div class="admin-card-title">
+          📦 Gestão de Produtos
+          <div style="display:flex;gap:6px">
+            <button class="btn-sm success" onclick="abrirNovoProduto()">➕ Novo</button>
+            <button class="btn-sm" onclick="loadProdAdmin()">↻</button>
+          </div>
+        </div>
+        <input class="small-input" id="prod-admin-search" placeholder="🔍 Buscar produto..." oninput="loadProdAdmin()" autocomplete="off" style="margin-bottom:10px">
+        <div style="display:flex;gap:6px;margin-bottom:10px">
+          <button class="pill active" id="pill-ativos" onclick="selProdFiltro(this,false)">Ativos</button>
+          <button class="pill" id="pill-arquivados" onclick="selProdFiltro(this,true)">🗄️ Arquivados</button>
+        </div>
+        <div id="prod-admin-list"><div class="loading">Carregando...</div></div>
+      </div>
+
       <div class="admin-card">
         <div class="admin-card-title">➕ Novo usuário</div>
         <div class="form-row">
@@ -612,6 +651,74 @@ select.big-input { font-size: 14px; }
     </div>
 
     <button class="btn-sm" style="width:100%;margin-top:12px;text-align:center" onclick="fecharProdModal()">Cancelar</button>
+  </div>
+</div>
+
+<!-- OVERLAY EDIÇÃO DE PRODUTO -->
+<div id="prod-edit-overlay" class="pedit-overlay">
+  <div class="cupom-header">
+    <div>
+      <div class="cupom-title" id="pedit-title">Produto</div>
+      <div id="pedit-sub" style="font-size:12px;color:var(--muted);margin-top:2px"></div>
+    </div>
+    <button class="btn-fechar" onclick="fecharEditProd()">✕</button>
+  </div>
+  <div class="pedit-tabs">
+    <button class="pedit-tab active" id="ptab-editar" onclick="switchEditTab('editar',this)">✏️ Editar</button>
+    <button class="pedit-tab" id="ptab-ajuste" onclick="switchEditTab('ajuste',this)">🔄 Ajuste</button>
+    <button class="pedit-tab" id="ptab-historico" onclick="switchEditTab('historico',this)">📋 Histórico</button>
+  </div>
+  <div class="pedit-body">
+    <!-- ABA EDITAR -->
+    <div id="pedit-tab-editar" class="pedit-section active">
+      <div class="field-label-sm">Nome do produto</div>
+      <input class="small-input" id="pedit-nome" placeholder="Nome">
+      <div class="field-label-sm">Categoria</div>
+      <div style="position:relative">
+        <input class="small-input" id="pedit-cat" placeholder="Categoria" oninput="peditBuscaCat(this.value)" autocomplete="off">
+        <div id="pedit-cat-ac" class="ac-list"></div>
+      </div>
+      <div class="field-label-sm">Unidade</div>
+      <select class="small-input" id="pedit-unidade">
+        <option value="KG">KG — Quilograma</option>
+        <option value="G">G — Grama</option>
+        <option value="L">L — Litro</option>
+        <option value="ML">ML — Mililitro</option>
+        <option value="UN">UN — Unidade</option>
+        <option value="CX">CX — Caixa</option>
+        <option value="PCT">PCT — Pacote</option>
+        <option value="FD">FD — Fardo</option>
+      </select>
+      <div class="pedit-row2" style="margin-top:10px">
+        <div>
+          <div class="field-label-sm">Estoque mínimo</div>
+          <input class="small-input" id="pedit-minimo" type="number" min="0" step="0.1" placeholder="1">
+        </div>
+        <div>
+          <div class="field-label-sm">Custo unitário (R$)</div>
+          <input class="small-input" id="pedit-custo" type="number" min="0" step="0.01" placeholder="0.00">
+        </div>
+      </div>
+      <button class="btn-export btn-primary" style="width:100%;padding:14px;margin-top:16px" onclick="salvarProduto()">💾 Salvar alterações</button>
+      <button id="pedit-btn-arquivar" class="btn-export btn-danger" style="width:100%;padding:12px;margin-top:8px" onclick="arquivarProduto()">🗄️ Arquivar produto</button>
+    </div>
+    <!-- ABA AJUSTE -->
+    <div id="pedit-tab-ajuste" class="pedit-section">
+      <div style="background:rgba(76,201,240,0.08);border:1px solid rgba(76,201,240,0.3);border-radius:10px;padding:12px 14px;margin-bottom:16px;font-size:13px;color:var(--blue)">
+        Define a quantidade real atual no estoque. O sistema registra a diferença como Ajuste de Inventário.
+      </div>
+      <div class="field-label-sm">Quantidade atual no estoque</div>
+      <div style="display:flex;align-items:center;gap:10px">
+        <input class="qtd-input" id="pedit-ajuste-qtd" type="number" min="0" step="0.001" placeholder="0" style="flex:1" oninput="peditAjustePreview()">
+        <span id="pedit-ajuste-unid" style="font-size:16px;font-weight:700;color:var(--muted)">UN</span>
+      </div>
+      <div id="pedit-ajuste-preview" style="font-size:13px;color:var(--muted);margin:12px 0;min-height:20px"></div>
+      <button class="btn-export btn-primary" style="width:100%;padding:14px;background:var(--blue);color:#000" onclick="ajusteRapido()">🔄 Aplicar ajuste de inventário</button>
+    </div>
+    <!-- ABA HISTÓRICO -->
+    <div id="pedit-tab-historico" class="pedit-section">
+      <div id="pedit-hist-list"><div class="loading">Carregando...</div></div>
+    </div>
   </div>
 </div>
 
@@ -731,7 +838,7 @@ function goPage(id, btn) {
   btn.classList.add('active');
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
-  if (id === 'admin') { loadUsers(); loadSinonimos(); }
+  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); }
 }
 
 async function loadDash() {
@@ -1544,6 +1651,208 @@ async function confirmarCadastro() {
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
+// ==================== GESTÃO DE PRODUTOS (ADMIN) ====================
+let prodEditAtual = null;
+let prodAdminMostrarArquivados = false;
+
+function selProdFiltro(el, arquivados) {
+  document.querySelectorAll('#pill-ativos,#pill-arquivados').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  prodAdminMostrarArquivados = arquivados;
+  loadProdAdmin();
+}
+
+async function loadProdAdmin() {
+  const q = document.getElementById('prod-admin-search')?.value || '';
+  const params = new URLSearchParams();
+  if (q) params.set('q', q);
+  if (prodAdminMostrarArquivados) params.set('arquivados', '1');
+  try {
+    const items = await api('/api/produtos?' + params);
+    const el = document.getElementById('prod-admin-list');
+    if (!items.length) {
+      el.innerHTML = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:20px">Nenhum produto encontrado.</div>';
+      return;
+    }
+    el.innerHTML = items.map(p => {
+      const st = p.qtd === 0 ? 'red' : p.qtd <= p.minimo * 0.5 ? 'yellow' : p.qtd < p.minimo ? 'accent' : 'green';
+      return `<div class="prod-admin-row${p.ativo===0?' arquivado':''}" onclick='abrirEditProd(${JSON.stringify(JSON.stringify(p))})'>
+        <div>
+          <div class="prod-admin-nome">${escapeHtml(p.nome)}</div>
+          <div class="prod-admin-meta">${escapeHtml(p.categoria)} · mín ${fmt(p.minimo)} ${escapeHtml(p.unidade)} · R$ ${Number(p.custo||0).toFixed(2)}</div>
+        </div>
+        <div>
+          <div class="prod-admin-qtd ${st}">${fmt(p.qtd)}</div>
+          <div style="font-size:11px;color:var(--muted);text-align:right">${escapeHtml(p.unidade)}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) { handleApiError(e, false); }
+}
+
+function abrirEditProd(jsonStr) {
+  const p = JSON.parse(jsonStr);
+  prodEditAtual = p;
+  document.getElementById('pedit-title').textContent = p.nome;
+  document.getElementById('pedit-sub').textContent = `${p.categoria} · ${fmt(p.qtd)} ${p.unidade} em estoque`;
+  document.getElementById('pedit-nome').value = p.nome;
+  document.getElementById('pedit-cat').value = p.categoria;
+  document.getElementById('pedit-unidade').value = p.unidade;
+  document.getElementById('pedit-minimo').value = p.minimo;
+  document.getElementById('pedit-custo').value = Number(p.custo || 0).toFixed(2);
+  document.getElementById('pedit-ajuste-qtd').value = fmt(p.qtd);
+  document.getElementById('pedit-ajuste-unid').textContent = p.unidade;
+  document.getElementById('pedit-ajuste-preview').textContent = '';
+  // Botão arquivar
+  const btnArq = document.getElementById('pedit-btn-arquivar');
+  if (currentUser?.role === 'admin') {
+    btnArq.style.display = '';
+    btnArq.textContent = p.ativo === 0 ? '♻️ Reativar produto' : '🗄️ Arquivar produto';
+    btnArq.className = `btn-export ${p.ativo === 0 ? 'btn-success' : 'btn-danger'}`;
+  } else {
+    btnArq.style.display = 'none';
+  }
+  switchEditTab('editar', document.getElementById('ptab-editar'));
+  document.getElementById('prod-edit-overlay').classList.add('show');
+}
+
+function abrirNovoProduto() {
+  prodEditAtual = null;
+  document.getElementById('pedit-title').textContent = 'Novo Produto';
+  document.getElementById('pedit-sub').textContent = 'Preencha os dados do novo insumo';
+  document.getElementById('pedit-nome').value = '';
+  document.getElementById('pedit-cat').value = '';
+  document.getElementById('pedit-unidade').value = 'UN';
+  document.getElementById('pedit-minimo').value = '1';
+  document.getElementById('pedit-custo').value = '0.00';
+  document.getElementById('pedit-btn-arquivar').style.display = 'none';
+  switchEditTab('editar', document.getElementById('ptab-editar'));
+  document.getElementById('prod-edit-overlay').classList.add('show');
+}
+
+function fecharEditProd() {
+  document.getElementById('prod-edit-overlay').classList.remove('show');
+  prodEditAtual = null;
+}
+
+function switchEditTab(tab, el) {
+  document.querySelectorAll('.pedit-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.pedit-section').forEach(s => s.classList.remove('active'));
+  if (el) el.classList.add('active');
+  document.getElementById('pedit-tab-' + tab).classList.add('active');
+  if (tab === 'historico' && prodEditAtual) loadProdHistorico(prodEditAtual.id);
+}
+
+async function salvarProduto() {
+  const nome     = document.getElementById('pedit-nome').value.trim();
+  const categoria= document.getElementById('pedit-cat').value.trim();
+  const unidade  = document.getElementById('pedit-unidade').value;
+  const minimo   = parseFloat(document.getElementById('pedit-minimo').value) || 0;
+  const custo    = parseFloat(document.getElementById('pedit-custo').value) || 0;
+  if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
+  try {
+    if (prodEditAtual) {
+      // Editar existente
+      const res = await apiPost(`/api/produtos/${prodEditAtual.id}`, { nome, categoria, unidade, minimo, custo }, 'PUT');
+      prodEditAtual = res.produto;
+      document.getElementById('pedit-title').textContent = nome;
+      document.getElementById('pedit-sub').textContent = `${categoria} · ${fmt(prodEditAtual.qtd)} ${unidade} em estoque`;
+      toast('✓ Produto atualizado', 'ok');
+    } else {
+      // Novo produto
+      await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo, qtd: 0 });
+      toast(`✓ "${nome}" cadastrado!`, 'ok');
+      fecharEditProd();
+      await loadCats();
+    }
+    await loadProdAdmin();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function arquivarProduto() {
+  if (!prodEditAtual) return;
+  const acao = prodEditAtual.ativo === 0 ? 'reativar' : 'arquivar';
+  if (!confirm(`Tem certeza que deseja ${acao} "${prodEditAtual.nome}"?`)) return;
+  try {
+    const res = await apiPost(`/api/produtos/${prodEditAtual.id}/arquivar`, {}, 'PUT');
+    prodEditAtual.ativo = res.ativo;
+    const btnArq = document.getElementById('pedit-btn-arquivar');
+    btnArq.textContent = res.ativo === 0 ? '♻️ Reativar produto' : '🗄️ Arquivar produto';
+    btnArq.className = `btn-export ${res.ativo === 0 ? 'btn-success' : 'btn-danger'}`;
+    toast(res.ativo === 1 ? '✓ Produto reativado' : '✓ Produto arquivado', 'ok');
+    await loadProdAdmin();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+function peditAjustePreview() {
+  if (!prodEditAtual) return;
+  const nova = parseFloat(document.getElementById('pedit-ajuste-qtd').value);
+  if (isNaN(nova)) { document.getElementById('pedit-ajuste-preview').textContent = ''; return; }
+  const diff = nova - prodEditAtual.qtd;
+  const sinal = diff >= 0 ? '+' : '';
+  document.getElementById('pedit-ajuste-preview').innerHTML =
+    `Atual: <b>${fmt(prodEditAtual.qtd)}</b> → Novo: <b>${fmt(nova)}</b> &nbsp;(${sinal}${fmt(diff)} ${prodEditAtual.unidade})`;
+}
+
+async function ajusteRapido() {
+  if (!prodEditAtual) return;
+  const nova = parseFloat(document.getElementById('pedit-ajuste-qtd').value);
+  if (isNaN(nova) || nova < 0) { toast('Informe uma quantidade válida', 'err'); return; }
+  try {
+    await apiPost('/api/movimentacoes', {
+      produto_nome: prodEditAtual.nome, tipo: 'Ajuste', qtd: nova,
+      motivo: 'Inventário', obs: 'Ajuste rápido via Gestão de Produtos'
+    });
+    prodEditAtual.qtd = nova;
+    document.getElementById('pedit-sub').textContent = `${prodEditAtual.categoria} · ${fmt(nova)} ${prodEditAtual.unidade} em estoque`;
+    document.getElementById('pedit-ajuste-preview').textContent = '';
+    toast(`✓ Estoque ajustado para ${fmt(nova)} ${prodEditAtual.unidade}`, 'ok');
+    await loadProdAdmin(); await loadDash();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function loadProdHistorico(id) {
+  const el = document.getElementById('pedit-hist-list');
+  el.innerHTML = '<div class="loading">Carregando...</div>';
+  try {
+    const data = await api(`/api/produtos/${id}/historico`);
+    if (!data.movimentacoes.length) {
+      el.innerHTML = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:24px">Nenhuma movimentação registrada.</div>';
+      return;
+    }
+    const tClass = {Entrada:'tipo-entrada','Saída':'tipo-saida',Perda:'tipo-perda',Ajuste:'tipo-ajuste'};
+    el.innerHTML = data.movimentacoes.map(m => {
+      const sinal = m.tipo==='Entrada'?'+':m.tipo==='Ajuste'?'=':'-';
+      let dataHora = m.created_at || '';
+      try {
+        const d = new Date(String(m.created_at).replace(' ','T'));
+        if (!isNaN(d.getTime())) dataHora = new Intl.DateTimeFormat('pt-BR',{timeZone:'America/Sao_Paulo',day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'}).format(d);
+      } catch(_) {}
+      return `<div class="hist-mini">
+        <div class="hist-mini-top">
+          <span>${sinal}${fmt(m.qtd)} ${escapeHtml(m.unidade||'')}</span>
+          <span class="hist-tipo ${tClass[m.tipo]||''}" style="font-size:11px">${m.tipo}</span>
+        </div>
+        <div class="hist-mini-sub">${escapeHtml(dataHora)} · ${escapeHtml(m.responsavel||'')} · ${escapeHtml(m.motivo||'')}</div>
+      </div>`;
+    }).join('');
+  } catch(e) { el.innerHTML = '<div style="color:var(--red);font-size:13px;padding:10px">Erro ao carregar histórico.</div>'; }
+}
+
+async function peditBuscaCat(q) {
+  if (!q || q.length < 1) { document.getElementById('pedit-cat-ac').classList.remove('open'); return; }
+  try {
+    const cats = await api('/api/categorias');
+    const filtradas = cats.filter(c => c.toLowerCase().includes(q.toLowerCase()));
+    const ac = document.getElementById('pedit-cat-ac');
+    if (!filtradas.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = filtradas.map(c =>
+      `<div class="ac-item" onclick="document.getElementById('pedit-cat').value='${escapeHtml(c)}';document.getElementById('pedit-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
+    ).join('');
+    ac.classList.add('open');
+  } catch(e) {}
 }
 
 init();
