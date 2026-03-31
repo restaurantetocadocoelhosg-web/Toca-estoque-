@@ -310,6 +310,15 @@ app.get('/api/me', auth, (req, res) => {
   });
 });
 
+app.put('/api/me', auth, (req, res) => {
+  const nome = sanitizeText(req.body?.nome, 60);
+  if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome inválido.' });
+  db.prepare(`UPDATE users SET nome = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(nome, req.user.id);
+  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'editar_perfil',?,?,datetime('now','localtime'))`)
+    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ nome_anterior: req.user.nome, nome_novo: nome }), sanitizeText(req.ip, 80));
+  res.json({ ok: true, nome });
+});
+
 app.post('/api/change-password', auth, (req, res) => {
   const current = String(req.body?.current_password || '');
   const next = String(req.body?.new_password || '');
@@ -503,6 +512,30 @@ app.post('/api/movimentacoes', auth, (req, res) => {
   res.json({ ok: true, produto: prodAtualizado });
 });
 
+app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
+  const mov = db.prepare('SELECT * FROM movimentacoes WHERE id = ?').get(req.params.id);
+  if (!mov) return res.status(404).json({ erro: 'Movimentação não encontrada.' });
+  const prod = db.prepare('SELECT * FROM produtos WHERE id = ?').get(mov.produto_id);
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  let novaQtd = prod.qtd;
+  if (mov.tipo === 'Entrada') {
+    novaQtd = Number((prod.qtd - mov.qtd).toFixed(3));
+    if (novaQtd < 0) return res.status(400).json({ erro: `Não é possível cancelar: estoque ficaria negativo (${prod.qtd} disponível).` });
+  } else if (mov.tipo === 'Saída' || mov.tipo === 'Perda') {
+    novaQtd = Number((prod.qtd + mov.qtd).toFixed(3));
+  } else if (mov.tipo === 'Ajuste') {
+    return res.status(400).json({ erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' });
+  }
+  const tx = db.transaction(() => {
+    db.prepare(`UPDATE produtos SET qtd = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(novaQtd, prod.id);
+    db.prepare(`DELETE FROM movimentacoes WHERE id = ?`).run(mov.id);
+    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'cancelar_movimentacao',?,?,datetime('now','localtime'))`)
+      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }), sanitizeText(req.ip, 80));
+  });
+  tx();
+  res.json({ ok: true, novaQtd });
+});
+
 app.get('/api/movimentacoes', auth, (req, res) => {
   const tipo = sanitizeText(req.query?.tipo, 20);
   const q = sanitizeText(req.query?.q, 100);
@@ -667,7 +700,30 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
         if (p) { produtoExato = p; candidatos = [p]; }
       }
       if (!produtoExato) {
-        candidatos = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3`).all(`%${qNorm}%`);
+        // Busca por palavras individuais — resolve nomes compostos fora de ordem
+        // Ex: "PEITO FRANGO KG" → encontra "Frango Peito"
+        const palavras = qNorm.split(/\s+/).filter(p => p.length > 2);
+        if (palavras.length > 1) {
+          const scoreMap = new Map();
+          for (const palavra of palavras) {
+            const matches = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 10`).all(`%${palavra}%`);
+            for (const m of matches) {
+              const entry = scoreMap.get(m.id) || { produto: m, score: 0 };
+              entry.score++;
+              scoreMap.set(m.id, entry);
+            }
+          }
+          if (scoreMap.size > 0) {
+            candidatos = Array.from(scoreMap.values())
+              .sort((a, b) => b.score - a.score)
+              .slice(0, 3)
+              .map(r => r.produto);
+          }
+        }
+        // Fallback: busca o string completo normalizado
+        if (!candidatos.length) {
+          candidatos = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3`).all(`%${qNorm}%`);
+        }
       }
       return {
         nome_cupom: item.nome,
@@ -708,35 +764,47 @@ app.post('/api/chat', auth, async (req, res) => {
   const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
   const hojeSP = nowSP().slice(0, 10);
   const lancHoje = db.prepare(`SELECT COUNT(*) as n FROM movimentacoes WHERE substr(created_at,1,10)=?`).get(hojeSP).n;
-  const prodZerados = db.prepare(`SELECT nome, categoria FROM produtos WHERE qtd = 0 ORDER BY categoria, nome LIMIT 20`).all();
-  const prodCriticos = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5 ORDER BY categoria LIMIT 20`).all();
+  const prodZerados = db.prepare(`SELECT nome, categoria FROM produtos WHERE qtd = 0 ORDER BY categoria, nome LIMIT 50`).all();
+  const prodCriticos = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5 ORDER BY categoria LIMIT 50`).all();
+  const prodAtencao = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo ORDER BY categoria LIMIT 30`).all();
   const ultimosMov = db.prepare(`SELECT produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at FROM movimentacoes ORDER BY id DESC LIMIT 15`).all();
   const maisConsumidos = db.prepare(`SELECT produto_nome, SUM(qtd) as total, unidade FROM movimentacoes WHERE tipo IN ('Saída','Perda') AND substr(created_at,1,10) >= date(?) GROUP BY produto_nome ORDER BY total DESC LIMIT 10`).all(new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10));
   const cats = db.prepare(`SELECT categoria, COUNT(*) as n, SUM(qtd*custo) as valor FROM produtos GROUP BY categoria ORDER BY valor DESC`).all();
 
   const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.
-Responda sempre em português brasileiro, de forma direta e objetiva. Use emojis com moderação.
+Responda SEMPRE em português brasileiro. Seja direto e preciso.
 Hoje é ${hojeSP}.
 
+REGRAS CRÍTICAS — NUNCA VIOLE:
+1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.
+2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS. Nunca liste itens com status OK como "em falta".
+3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.
+4. Se perguntarem sobre um produto específico não listado, diga que o estoque está OK (não consta nas listas de alerta).
+
 RESUMO DO ESTOQUE:
-- Total de produtos: ${totalProd}
-- Zerados: ${zerados} | Críticos (≤50% do mínimo): ${criticos} | Atenção: ${atencao}
+- Total de produtos cadastrados: ${totalProd}
+- Zerados (qtd = 0): ${zerados} produtos
+- Críticos (qtd ≤ 50% do mínimo): ${criticos} produtos
+- Atenção (qtd entre 50% e 100% do mínimo): ${atencao} produtos
 - Valor total em estoque: R$ ${Number(valorTotal).toFixed(2)}
 - Lançamentos hoje: ${lancHoje}
 
-PRODUTOS ZERADOS (${prodZerados.length}):
-${prodZerados.map(p => `• ${p.nome} (${p.categoria})`).join('\n') || 'Nenhum'}
+=== PRODUTOS ZERADOS — qtd = 0 (${prodZerados.length} total) ===
+${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum produto zerado.'}
 
-PRODUTOS CRÍTICOS (${prodCriticos.length}):
-${prodCriticos.map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum'}
+=== PRODUTOS CRÍTICOS — qtd ≤ 50% do mínimo (${prodCriticos.length} total) ===
+${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade} | ${p.categoria}`).join('\n') || 'Nenhum produto crítico.'}
 
-MAIS CONSUMIDOS (últimos 30 dias):
-${maisConsumidos.map(p => `• ${p.produto_nome}: ${Number(p.total).toFixed(2)} ${p.unidade}`).join('\n') || 'Sem dados'}
+=== PRODUTOS EM ATENÇÃO — qtd entre 50% e 100% do mínimo (${prodAtencao.length} total) ===
+${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}
 
-ÚLTIMAS MOVIMENTAÇÕES:
+=== MAIS CONSUMIDOS (últimos 30 dias) ===
+${maisConsumidos.map(p => `• ${p.produto_nome}: ${Number(p.total).toFixed(2)} ${p.unidade}`).join('\n') || 'Sem dados suficientes.'}
+
+=== ÚLTIMAS MOVIMENTAÇÕES ===
 ${ultimosMov.map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}
 
-ESTOQUE POR CATEGORIA:
+=== ESTOQUE POR CATEGORIA ===
 ${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).toFixed(2)}`).join('\n')}`;
 
   try {
