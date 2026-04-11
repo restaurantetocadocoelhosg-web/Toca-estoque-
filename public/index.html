@@ -2,11 +2,11 @@
 <html lang="pt-BR">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="theme-color" content="#e85d26">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#ffffff">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="Toca Estoque">
 <link rel="manifest" href="/manifest.json">
 <link rel="apple-touch-icon" href="/icon-192.png">
@@ -15,6 +15,251 @@
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=DM+Serif+Display&display=swap');
 
 /* ===== LOADING SCREEN ===== */
+#app-loading {
+  position: fixed; inset: 0; z-index: 9999;
+  background: #fff;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  transition: opacity 0.5s ease, visibility 0.5s ease;
+}
+#app-loading.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+
+.loading-warehouse {
+  width: 280px; height: 200px; margin-bottom: 28px; position: relative;
+}
+.loading-warehouse svg { width: 100%; height: 100%; }
+
+.ld-bar { animation: ldbar 1.4s ease-in-out infinite; transform-origin: bottom; }
+.ld-bar:nth-child(1) { animation-delay: 0s; }
+.ld-bar:nth-child(2) { animation-delay: 0.2s; }
+.ld-bar:nth-child(3) { animation-delay: 0.4s; }
+@keyframes ldbar { 0%,100%{opacity:0.3; transform:scaleY(0.92);} 50%{opacity:1; transform:scaleY(1);} }
+
+.ld-box { animation: ldbox 2s ease-in-out infinite; }
+.ld-box:nth-child(odd) { animation-delay: 0.3s; }
+@keyframes ldbox { 0%,100%{opacity:0.6;} 50%{opacity:1;} }
+
+.ld-person { animation: ldbob 1.8s ease-in-out infinite; transform-origin: bottom center; }
+@keyframes ldbob { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-4px);} }
+
+.loading-logo {
+  font-family: 'DM Serif Display', serif;
+  font-size: 26px; color: #1a1a2e; letter-spacing: -0.5px; margin-bottom: 6px;
+}
+.loading-logo span { color: #e85d26; }
+.loading-sub {
+  font-family: 'DM Sans', sans-serif;
+  font-size: 13px; color: #9ca3af; font-weight: 500; margin-bottom: 28px;
+}
+.loading-dots { display: flex; gap: 6px; }
+.loading-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #e85d26;
+  animation: lddot 1.2s ease-in-out infinite;
+}
+.loading-dot:nth-child(2) { animation-delay: 0.2s; background: #f59e0b; }
+.loading-dot:nth-child(3) { animation-delay: 0.4s; background: #10b981; }
+@keyframes lddot { 0%,100%{transform:scale(0.5); opacity:0.3;} 50%{transform:scale(1); opacity:1;} }
+
+:root {
+  --bg: #f5f6f8; --s1: #ffffff; --s2: #f0f1f4; --border: #e4e6eb;
+  --accent: #e85d26; --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+  --blue: #3b82f6; --text: #1a1a2e; --muted: #6b7280;
+  --shadow: 0 1px 4px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.08), 0 8px 24px rgba(0,0,0,0.06);
+  --font: 'DM Sans', sans-serif; --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --emoji-font: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", "Android Emoji", sans-serif;
+  --radius: 14px;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+html, body { height: 100%; overflow: hidden; }
+body { background: var(--bg); color: var(--text); font-family: var(--font); display: flex; flex-direction: column; }
+header { background: var(--s1); border-bottom: 1px solid var(--border); padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; box-shadow: 0 1px 0 var(--border); }
+.logo { font-family: 'DM Serif Display', serif; font-size: 19px; font-weight: 400; letter-spacing: -0.3px; color: var(--text); }
+.logo span { color: var(--accent); }
+#clock { font-size: 11px; color: var(--muted); font-weight: 500; }
+nav { order: 999; background: var(--s1); border-top: 1px solid var(--border); display: flex; flex-shrink: 0; padding-bottom: var(--safe-bottom); box-shadow: 0 -1px 0 var(--border); }
+.nav-btn { flex: 1; background: none; border: none; color: var(--muted); font-family: var(--font); font-size: 10px; font-weight: 600; padding: 10px 4px 8px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; text-transform: uppercase; letter-spacing: 0.3px; transition: color 0.15s; }
+.nav-btn .icon { font-size: 20px; }
+.nav-btn.active { color: var(--accent); }
+main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.page { display: none; padding: 0; }
+.page.active { display: block; }
+#p-chat.active { display: flex; flex-direction: column; height: 100%; }
+.cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; padding: 14px 14px 0; }
+.card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px; box-shadow: var(--shadow); }
+.card.card-click { cursor: pointer; transition: box-shadow 0.15s, transform 0.15s; }
+.card.card-click:active { box-shadow: var(--shadow-md); transform: scale(0.98); }
+.card-label { font-size: 11px; color: var(--muted); font-weight: 600; margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.4px; }
+.card-val { font-size: 28px; font-weight: 800; line-height: 1; }
+.card-hint { font-size: 10px; color: var(--muted); margin-top: 4px; }
+.alert-banner { margin: 10px 14px 0; background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.25); border-radius: 10px; padding: 10px 14px; font-size: 13px; font-weight: 600; color: var(--red); display: none; cursor: pointer; }
+.alert-banner.show { display: block; }
+.green { color: var(--green); } .red { color: var(--red); } .yellow { color: var(--yellow); } .accent { color: var(--accent); }
+.lancamento-wrap { padding: 14px; }
+.tipo-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 14px; }
+.tipo-card { background: var(--s1); border: 2px solid var(--border); border-radius: var(--radius); padding: 14px 10px; text-align: center; cursor: pointer; transition: all 0.15s; user-select: none; box-shadow: var(--shadow); }
+.tipo-card .tipo-icon { font-size: 24px; display: block; margin-bottom: 4px; }
+.tipo-card .tipo-label { font-size: 13px; font-weight: 700; color: var(--muted); }
+.tipo-card.sel-entrada { border-color: var(--green); background: rgba(16,185,129,0.06); }
+.tipo-card.sel-entrada .tipo-label { color: var(--green); }
+.tipo-card.sel-saida { border-color: var(--accent); background: rgba(232,93,38,0.06); }
+.tipo-card.sel-saida .tipo-label { color: var(--accent); }
+.tipo-card.sel-perda { border-color: var(--red); background: rgba(239,68,68,0.06); }
+.tipo-card.sel-perda .tipo-label { color: var(--red); }
+.tipo-card.sel-ajuste { border-color: var(--blue); background: rgba(59,130,246,0.06); }
+.tipo-card.sel-ajuste .tipo-label { color: var(--blue); }
+.field-group { margin-bottom: 10px; }
+.field-label { font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+.search-wrap { position: relative; }
+.big-input { width: 100%; background: var(--s1); border: 1.5px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: var(--font); font-size: 16px; font-weight: 500; padding: 13px 16px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; -webkit-appearance: none; box-shadow: var(--shadow); }
+.big-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,93,38,0.1); }
+.ac-list { position: absolute; top: calc(100% + 4px); left: 0; right: 0; background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; z-index: 50; display: none; box-shadow: var(--shadow-md); max-height: 260px; overflow-y: auto; }
+.ac-list.open { display: block; }
+.ac-item { padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; border-bottom: 1px solid var(--border); gap: 8px; }
+.ac-item:last-child { border-bottom: none; }
+.ac-item:active { background: var(--s2); }
+.ac-nome { font-size: 14px; font-weight: 600; color: var(--text); }
+.ac-info { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.ac-qtd-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 100px; white-space: nowrap; }
+.badge-ok { background: rgba(16,185,129,0.12); color: var(--green); }
+.badge-low { background: rgba(239,68,68,0.12); color: var(--red); }
+.badge-warn { background: rgba(245,158,11,0.12); color: var(--yellow); }
+.prod-selected { background: var(--s2); border: 1.5px solid var(--border); border-radius: var(--radius); padding: 12px 16px; display: none; margin-bottom: 10px; justify-content: space-between; align-items: center; }
+.prod-selected.show { display: flex; }
+.prod-nome { font-size: 15px; font-weight: 700; color: var(--text); }
+.prod-info { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.btn-clear { background: none; border: none; color: var(--muted); font-size: 20px; cursor: pointer; padding: 4px; }
+.row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px; }
+.qtd-input { width: 100%; background: var(--s1); border: 1.5px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: var(--font); font-size: 22px; font-weight: 800; padding: 13px 16px; outline: none; text-align: center; -webkit-appearance: none; transition: border-color 0.15s, box-shadow 0.15s; box-shadow: var(--shadow); }
+.qtd-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,93,38,0.1); }
+select.big-input { font-size: 14px; }
+.btn-lancar { width: 100%; padding: 16px; font-size: 16px; font-weight: 800; border: none; border-radius: var(--radius); cursor: pointer; font-family: var(--font); letter-spacing: 0.3px; transition: all 0.18s; background: var(--accent); color: #fff; margin-top: 4px; box-shadow: 0 4px 12px rgba(232,93,38,0.3); }
+.btn-lancar:active { transform: scale(0.97); opacity: 0.9; }
+.btn-lancar.entrada { background: var(--green); color: #fff; box-shadow: 0 4px 12px rgba(16,185,129,0.3); }
+.btn-lancar.saida { background: var(--accent); box-shadow: 0 4px 12px rgba(232,93,38,0.3); }
+.btn-lancar.perda { background: var(--red); box-shadow: 0 4px 12px rgba(239,68,68,0.3); }
+.btn-lancar.ajuste { background: var(--blue); color: #fff; box-shadow: 0 4px 12px rgba(59,130,246,0.3); }
+
+/* BOTÃO LER CUPOM */
+.btn-cupom { width: 100%; padding: 13px; font-size: 15px; font-weight: 700; border: 1.5px solid var(--border); border-radius: var(--radius); cursor: pointer; font-family: var(--font); background: var(--s1); color: var(--text); margin-bottom: 10px; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all 0.15s; box-shadow: var(--shadow); }
+.btn-cupom:active { background: var(--s2); }
+
+/* OVERLAY CUPOM */
+.cupom-overlay { position: fixed; inset: 0; background: rgba(15,15,30,0.5); backdrop-filter: blur(8px); z-index: 200; display: none; flex-direction: column; }
+.cupom-overlay.show { display: flex; }
+.cupom-header { background: var(--s1); border-bottom: 1px solid var(--border); padding: 16px; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; }
+.cupom-title { font-size: 17px; font-weight: 800; color: var(--text); }
+.btn-fechar { background: none; border: none; color: var(--muted); font-size: 22px; cursor: pointer; padding: 4px; }
+.cupom-body { flex: 1; overflow-y: auto; padding: 14px; background: var(--bg); }
+.cupom-footer { background: var(--s1); border-top: 1px solid var(--border); padding: 14px; padding-bottom: calc(14px + var(--safe-bottom)); flex-shrink: 0; }
+
+/* Upload area */
+.upload-area { border: 2px dashed var(--border); border-radius: 16px; padding: 40px 20px; text-align: center; cursor: pointer; transition: all 0.15s; margin-bottom: 14px; background: var(--s1); }
+.upload-area:active { border-color: var(--accent); background: rgba(232,93,38,0.04); }
+.upload-icon { font-size: 48px; margin-bottom: 12px; }
+.upload-title { font-size: 16px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+.upload-sub { font-size: 13px; color: var(--muted); }
+
+/* Loading cupom */
+.cupom-loading { text-align: center; padding: 40px 20px; }
+.cupom-loading-icon { font-size: 48px; margin-bottom: 16px; animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+.cupom-loading-text { font-size: 15px; font-weight: 600; color: var(--muted); }
+
+/* Itens do cupom */
+.cupom-item { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 8px; box-shadow: var(--shadow); }
+.cupom-item.matched { border-color: rgba(16,185,129,0.35); }
+.cupom-item.unmatched { border-color: rgba(239,68,68,0.25); }
+.cupom-item.ignored { opacity: 0.4; }
+.ci-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; gap: 8px; }
+.ci-nome-cupom { font-size: 12px; color: var(--muted); font-weight: 500; }
+.ci-badge { font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 100px; }
+.ci-badge.ok { background: rgba(16,185,129,0.12); color: var(--green); }
+.ci-badge.err { background: rgba(239,68,68,0.12); color: var(--red); }
+.ci-badge.ign { background: var(--s2); color: var(--muted); }
+.ci-produto { font-size: 14px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+.ci-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.ci-select { flex: 1; background: var(--s2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: var(--font); font-size: 13px; padding: 7px 10px; outline: none; min-width: 120px; }
+.ci-qtd { width: 80px; background: var(--s2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: var(--font); font-size: 14px; font-weight: 700; padding: 7px 10px; outline: none; text-align: center; -webkit-appearance: none; }
+.ci-ignore { background: none; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 12px; font-weight: 600; padding: 7px 10px; cursor: pointer; }
+.ci-ignore.active { background: rgba(239,68,68,0.08); border-color: var(--red); color: var(--red); }
+.cupom-summary { background: var(--s2); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; font-size: 13px; color: var(--muted); }
+.cupom-summary b { color: var(--text); }
+.btn-lancar-lote { width: 100%; padding: 16px; font-size: 16px; font-weight: 800; border: none; border-radius: var(--radius); cursor: pointer; font-family: var(--font); background: var(--green); color: #fff; transition: all 0.15s; box-shadow: 0 4px 12px rgba(16,185,129,0.3); }
+.btn-lancar-lote:active { transform: scale(0.97); }
+.btn-lancar-lote:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+
+.section-header { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.6px; padding: 16px 14px 8px; }
+.mov-list { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.mov-item { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; gap: 8px; box-shadow: var(--shadow); }
+.mov-left { flex: 1; min-width: 0; }
+.mov-nome { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.mov-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.mov-right { text-align: right; flex-shrink: 0; }
+.mov-qtd { font-size: 16px; font-weight: 800; }
+.mov-hora { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.tipo-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; flex-shrink: 0; }
+.dot-entrada { background: var(--green); } .dot-saida { background: var(--accent); } .dot-perda { background: var(--red); } .dot-ajuste { background: var(--blue); }
+
+.search-bar { padding: 12px 14px; display: flex; gap: 8px; position: sticky; top: 0; background: var(--s1); z-index: 10; border-bottom: 1px solid var(--border); box-shadow: 0 2px 8px rgba(0,0,0,0.04); }
+.search-bar input { flex: 1; background: var(--bg); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 15px; padding: 9px 14px; outline: none; -webkit-appearance: none; transition: border-color 0.15s; }
+.search-bar input:focus { border-color: var(--accent); }
+.search-bar select { background: var(--bg); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 13px; padding: 9px 10px; outline: none; max-width: 120px; }
+.prod-list { padding: 8px 14px calc(80px + var(--safe-bottom)); display: flex; flex-direction: column; gap: 6px; }
+.prod-row { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px; cursor: pointer; transition: box-shadow 0.1s, transform 0.1s; box-shadow: var(--shadow); }
+.prod-row:active { box-shadow: var(--shadow-md); transform: scale(0.99); }
+.prod-row-left { flex: 1; min-width: 0; }
+.prod-row-nome { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.prod-row-cat { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.prod-row-right { text-align: right; flex-shrink: 0; }
+.prod-row-qtd { font-size: 17px; font-weight: 800; }
+.prod-row-qtd.zerado { color: var(--red); } .prod-row-qtd.critico { color: var(--yellow); } .prod-row-qtd.atencao { color: var(--accent); } .prod-row-qtd.ok { color: var(--green); }
+.prod-row-unid { font-size: 11px; color: var(--muted); }
+.status-pills { display: flex; gap: 6px; padding: 10px 14px; overflow-x: auto; scrollbar-width: none; }
+.status-pills::-webkit-scrollbar { display: none; }
+.pill { background: var(--s1); border: 1.5px solid var(--border); border-radius: 100px; color: var(--muted); font-family: var(--font); font-size: 12px; font-weight: 600; padding: 6px 14px; cursor: pointer; white-space: nowrap; flex-shrink: 0; box-shadow: var(--shadow); transition: all 0.15s; }
+.pill.active { border-color: var(--accent); color: var(--accent); background: rgba(232,93,38,0.08); }
+.hist-list { padding: 8px 14px 80px; display: flex; flex-direction: column; gap: 8px; }
+.hist-item { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; box-shadow: var(--shadow); }
+.hist-top { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 6px; }
+.hist-nome { font-size: 14px; font-weight: 700; color: var(--text); }
+.hist-tipo { font-size: 11px; font-weight: 700; padding: 3px 10px; border-radius: 100px; }
+.tipo-entrada { background: rgba(16,185,129,0.12); color: var(--green); }
+.tipo-saida { background: rgba(232,93,38,0.12); color: var(--accent); }
+.tipo-perda { background: rgba(239,68,68,0.12); color: var(--red); }
+.tipo-ajuste { background: rgba(59,130,246,0.12); color: var(--blue); }
+.hist-bottom { font-size: 12px; color: var(--muted); display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.date-filter { display: flex; gap: 6px; padding: 0 14px 10px; align-items: center; }
+.date-filter input[type="date"] { flex: 1; background: var(--s1); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 13px; padding: 8px 10px; outline: none; -webkit-appearance: none; color-scheme: light; }
+.date-filter label { font-size: 11px; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.btn-clear-date { background: var(--s1); border: 1.5px solid var(--border); border-radius: 10px; color: var(--muted); font-size: 12px; font-weight: 600; padding: 8px 10px; cursor: pointer; white-space: nowrap; box-shadow: var(--shadow); }
+#toast { position: fixed; bottom: calc(70px + var(--safe-bottom)); left: 50%; transform: translateX(-50%) translateY(100px); background: var(--s1); border: 1px solid var(--border); border-radius: 100px; padding: 12px 20px; font-size: 14px; font-weight: 600; z-index: 999; opacity: 0; transition: all 0.25s; white-space: nowrap; max-width: 90vw; text-align: center; box-shadow: var(--shadow-md); color: var(--text); }
+#toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+#toast.ok { border-color: var(--green); color: var(--green); }
+#toast.err { border-color: var(--red); color: var(--red); }
+.loading { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
+.export-list { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.export-card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow); }
+.export-title { font-size: 14px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
+.export-desc { font-size: 13px; color: var(--muted); margin-bottom: 14px; line-height: 1.5; }
+.btn-export { width: 100%; padding: 13px; font-size: 15px; font-weight: 700; border: none; border-radius: 10px; cursor: pointer; font-family: var(--font); transition: all 0.15s; }
+.btn-export:active { transform: scale(0.97); }
+.btn-primary { background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(232,93,38,0.25); }
+.btn-success { background: var(--green); color: #fff; box-shadow: 0 2px 8px rgba(16,185,129,0.25); }
+.btn-danger { background: rgba(239,68,68,0.08); color: var(--red); border: 1.5px solid rgba(239,68,68,0.3) !important; }
+.empty { text-align: center; padding: 48px 24px; color: var(--muted); }
+.empty-icon { font-size: 36px; margin-bottom: 10px; }
+.empty-text { font-size: 14px; }
+.auth-overlay { position: fixed; inset: 0; background: rgba(245,246,248,0.95); backdrop-filter: blur(12px); z-index: 120; display: none; align-items: center; justify-content: center; padding: 18px; }
+.auth-overlay.show { display: flex; }
+.auth-card { width: 100%; max-width: 420px; background: var(--s1); border: 1px solid var(--border); border-radius: 20px; padding: 28px 24px; box-shadow: var(--shadow-md); }
+.auth-title { font-family: 'DM Serif Display', serif; font-size: 24px; font-weight: 400; margin-bottom: 6px; color: var(--text); }
+.auth-sub { font-size: 13px; color: var(--muted); line-height: 1.5; margin-bottom: 20px; }
+.auth-actions { display:flex; gap:10px; margin-top:14px; }
+.auth-actions button { flex:1; }
+.userbar { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.user-pill { font-size: 11px; color: var(--muted); background: var(--s2); padding: 5px 10px; border-radius: 999px; border: 1px solid var(--border); font-weight: 500; }
+.link-btn { background:none; border:none; color: var(--accent); font-weight:700; font-size:12px; cursor:pointer; padding:0; }
+.small-note { font-size: 12px; color: var(--muted); margin-top: 8px; }
 /* ====== CHAT IA ====== */
 .chat-wrap { display: flex; flex-direction: column; height: 100%; }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; padding-bottom: 0; }
@@ -98,81 +343,9 @@
 .hist-mini { background: var(--s2); border-radius: 10px; padding: 10px 12px; margin-bottom: 7px; }
 .hist-mini-top { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 3px; color: var(--text); }
 .hist-mini-sub { font-size: 11px; color: var(--muted); }
-
-/* ===== PWA INSTALL ===== */
-#btn-install-pwa {
-  display: none;
-  align-items: center; gap: 5px;
-  background: var(--accent); color: #fff;
-  border: none; border-radius: 20px;
-  padding: 5px 12px; font-size: 11px; font-weight: 700;
-  cursor: pointer; font-family: var(--font);
-  box-shadow: 0 2px 8px rgba(232,93,38,0.35);
-  transition: transform 0.15s, box-shadow 0.15s;
-  white-space: nowrap;
-}
-#btn-install-pwa:active { transform: scale(0.96); box-shadow: 0 1px 4px rgba(232,93,38,0.2); }
-#btn-install-pwa.show { display: flex; }
-
-/* Banner iOS */
-#ios-install-banner {
-  display: none; position: fixed; bottom: 0; left: 0; right: 0;
-  z-index: 9000; background: var(--s1);
-  border-top: 1px solid var(--border);
-  border-radius: 20px 20px 0 0;
-  padding: 20px 20px calc(20px + var(--safe-bottom));
-  box-shadow: 0 -8px 32px rgba(0,0,0,0.12);
-  animation: slideUp 0.35s cubic-bezier(0.34,1.56,0.64,1) both;
-}
-#ios-install-banner.show { display: block; }
-@keyframes slideUp {
-  from { transform: translateY(100%); opacity: 0; }
-  to   { transform: translateY(0); opacity: 1; }
-}
-.ios-banner-header {
-  display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;
-}
-.ios-banner-title {
-  font-size: 15px; font-weight: 700; color: var(--text);
-  display: flex; align-items: center; gap: 8px;
-}
-.ios-banner-title .app-icon {
-  width: 36px; height: 36px; border-radius: 8px; overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-}
-.ios-banner-title .app-icon img { width: 100%; height: 100%; object-fit: cover; }
-.ios-banner-close {
-  background: var(--s2); border: none; border-radius: 50%;
-  width: 28px; height: 28px; font-size: 14px; cursor: pointer;
-  display: flex; align-items: center; justify-content: center; color: var(--muted);
-}
-.ios-steps { display: flex; flex-direction: column; gap: 10px; }
-.ios-step {
-  display: flex; align-items: center; gap: 12px;
-  font-size: 13px; color: var(--text); font-weight: 500;
-}
-.ios-step-num {
-  width: 24px; height: 24px; border-radius: 50%; background: var(--accent);
-  color: #fff; font-size: 11px; font-weight: 800;
-  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
-}
-.ios-step-icon { font-size: 18px; }
-
 </style>
 </head>
 <body>
-
-  <div class="splash-sparkles" id="splash-sparkles"></div>
-  <div class="splash-img-wrap">
-    <img src="/splash.png" alt="Estoque da Toca do Coelho" />
-    <div class="splash-glow"></div>
-  </div>
-  <div class="splash-loader">
-    <div class="splash-loader-dot"></div>
-    <div class="splash-loader-dot"></div>
-    <div class="splash-loader-dot"></div>
-  </div>
-</div>
 
 <div id="app-loading">
   <div class="loading-warehouse">
@@ -360,40 +533,9 @@
     <button id="btn-edit-nome" class="link-btn hidden" onclick="editarNome()">✏️ Nome</button>
     <button id="btn-change-pass" class="link-btn hidden" onclick="trocarSenha()">Trocar senha</button>
     <button id="btn-logout" class="link-btn hidden" onclick="logout()">Sair</button>
-    <button id="btn-install-pwa" onclick="triggerInstall()" title="Instalar app">
-      <span>⬇️</span> Instalar
-    </button>
     <div id="clock"></div>
   </div>
 </header>
-
-<!-- Banner de instalação iOS -->
-<div id="ios-install-banner">
-  <div class="ios-banner-header">
-    <div class="ios-banner-title">
-      <div class="app-icon"><img src="/icon-192.png" alt=""></div>
-      Instalar Toca Estoque
-    </div>
-    <button class="ios-banner-close" onclick="closeIosBanner()">✕</button>
-  </div>
-  <div class="ios-steps">
-    <div class="ios-step">
-      <div class="ios-step-num">1</div>
-      <span class="ios-step-icon">⬆️</span>
-      <span>Toque em <strong>Compartilhar</strong> na barra do Safari</span>
-    </div>
-    <div class="ios-step">
-      <div class="ios-step-num">2</div>
-      <span class="ios-step-icon">➕</span>
-      <span>Toque em <strong>Adicionar à Tela de Início</strong></span>
-    </div>
-    <div class="ios-step">
-      <div class="ios-step-num">3</div>
-      <span class="ios-step-icon">✅</span>
-      <span>Toque em <strong>Adicionar</strong> para confirmar</span>
-    </div>
-  </div>
-</div>
 
 <main>
   <!-- LANÇAMENTO -->
@@ -1707,114 +1849,8 @@ async function confirmarCadastro() {
   } catch(e) { toast(e.message, 'err'); }
 }
 
-// ===== PWA INSTALL =====
-let _deferredPrompt = null;
-const _isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
-const _isInStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
-
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
-}
-
-// Android / Desktop: captura o evento de instalação
-window.addEventListener('beforeinstallprompt', (e) => {
-  e.preventDefault();
-  _deferredPrompt = e;
-  const btn = document.getElementById('btn-install-pwa');
-  if (btn) btn.classList.add('show');
-});
-
-// Depois de instalar, esconde o botão
-window.addEventListener('appinstalled', () => {
-  _deferredPrompt = null;
-  const btn = document.getElementById('btn-install-pwa');
-  if (btn) btn.classList.remove('show');
-  toast('App instalado com sucesso! 🎉', 'ok');
-});
-
-// iOS: mostra botão no header imediatamente (não está em standalone)
-if (_isIos && !_isInStandalone) {
-  const btn = document.getElementById('btn-install-pwa');
-  if (btn) btn.classList.add('show');
-}
-
-// Fallback para Chrome/Edge no desktop: se após 2s não disparou beforeinstallprompt
-// mas o site está em HTTPS e tem SW, mostrar botão com instrução manual
-if (!_isIos && !_isInStandalone) {
-  setTimeout(() => {
-    // Se o deferredPrompt ainda não chegou, mostra o botão de qualquer forma
-    // com a instrução do menu do navegador
-    const btn = document.getElementById('btn-install-pwa');
-    if (btn) btn.classList.add('show');
-  }, 2500);
-}
-
-function triggerInstall() {
-  if (_deferredPrompt) {
-    // Android / Desktop Chrome/Edge — prompt nativo
-    _deferredPrompt.prompt();
-    _deferredPrompt.userChoice.then((choice) => {
-      if (choice.outcome === 'accepted') toast('Instalando o app... 🐰', 'ok');
-      _deferredPrompt = null;
-      const btn = document.getElementById('btn-install-pwa');
-      if (btn) btn.classList.remove('show');
-    });
-  } else if (_isIos) {
-    // iOS Safari: mostra banner passo a passo
-    const banner = document.getElementById('ios-install-banner');
-    if (banner) banner.classList.add('show');
-  } else {
-    // Chrome/Edge desktop sem prompt ainda: mostrar modal de instrução
-    showInstallModal();
-  }
-}
-
-function showInstallModal() {
-  // Criar modal de instrução se não existir
-  if (document.getElementById('install-modal')) {
-    document.getElementById('install-modal').classList.add('show');
-    return;
-  }
-  const modal = document.createElement('div');
-  modal.id = 'install-modal';
-  modal.style.cssText = `
-    position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5);
-    display:flex;align-items:center;justify-content:center;padding:20px;
-  `;
-  modal.innerHTML = \`
-    <div style="background:var(--s1);border-radius:20px;padding:24px;max-width:340px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
-      <div style="text-align:center;margin-bottom:16px;font-size:32px">📲</div>
-      <h3 style="text-align:center;margin-bottom:8px;font-size:17px;color:var(--text)">Instalar o App</h3>
-      <p style="text-align:center;font-size:13px;color:var(--muted);margin-bottom:20px">Escolha como instalar no seu dispositivo:</p>
-      <div style="display:flex;flex-direction:column;gap:10px">
-        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
-          <strong>🖥️ Chrome / Edge (Desktop)</strong><br>
-          <span style="color:var(--muted)">Clique no ícone <strong>⬇</strong> ou <strong>+</strong> na barra de endereço → "Instalar Toca Estoque"</span>
-        </div>
-        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
-          <strong>🤖 Android (Chrome)</strong><br>
-          <span style="color:var(--muted)">Menu ⋮ → "Adicionar à tela inicial" ou "Instalar app"</span>
-        </div>
-        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
-          <strong>🍎 iPhone / iPad (Safari)</strong><br>
-          <span style="color:var(--muted)">Botão Compartilhar ⬆️ → "Adicionar à Tela de Início"</span>
-        </div>
-      </div>
-      <button onclick="document.getElementById('install-modal').remove()" style="
-        width:100%;margin-top:16px;padding:12px;background:var(--accent);
-        color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;
-        cursor:pointer;font-family:var(--font)
-      ">Entendi!</button>
-    </div>
-  \`;
-  document.body.appendChild(modal);
-  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
-}
-
-function closeIosBanner() {
-  const banner = document.getElementById('ios-install-banner');
-  if (banner) banner.classList.remove('show');
-  localStorage.setItem('ios-install-dismissed', '1');
 }
 
 // ==================== GESTÃO DE PRODUTOS (ADMIN) ====================
@@ -2021,8 +2057,5 @@ async function peditBuscaCat(q) {
 
 init();
 </script>
-
-
-
 </body>
 </html>
