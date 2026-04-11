@@ -413,6 +413,66 @@ select.big-input { font-size: 14px; }
 .hist-mini { background: var(--s2); border-radius: 10px; padding: 10px 12px; margin-bottom: 7px; }
 .hist-mini-top { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 3px; color: var(--text); }
 .hist-mini-sub { font-size: 11px; color: var(--muted); }
+
+/* ===== PWA INSTALL ===== */
+#btn-install-pwa {
+  display: none;
+  align-items: center; gap: 5px;
+  background: var(--accent); color: #fff;
+  border: none; border-radius: 20px;
+  padding: 5px 12px; font-size: 11px; font-weight: 700;
+  cursor: pointer; font-family: var(--font);
+  box-shadow: 0 2px 8px rgba(232,93,38,0.35);
+  transition: transform 0.15s, box-shadow 0.15s;
+  white-space: nowrap;
+}
+#btn-install-pwa:active { transform: scale(0.96); box-shadow: 0 1px 4px rgba(232,93,38,0.2); }
+#btn-install-pwa.show { display: flex; }
+
+/* Banner iOS */
+#ios-install-banner {
+  display: none; position: fixed; bottom: 0; left: 0; right: 0;
+  z-index: 9000; background: var(--s1);
+  border-top: 1px solid var(--border);
+  border-radius: 20px 20px 0 0;
+  padding: 20px 20px calc(20px + var(--safe-bottom));
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.12);
+  animation: slideUp 0.35s cubic-bezier(0.34,1.56,0.64,1) both;
+}
+#ios-install-banner.show { display: block; }
+@keyframes slideUp {
+  from { transform: translateY(100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+.ios-banner-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;
+}
+.ios-banner-title {
+  font-size: 15px; font-weight: 700; color: var(--text);
+  display: flex; align-items: center; gap: 8px;
+}
+.ios-banner-title .app-icon {
+  width: 36px; height: 36px; border-radius: 8px; overflow: hidden;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+.ios-banner-title .app-icon img { width: 100%; height: 100%; object-fit: cover; }
+.ios-banner-close {
+  background: var(--s2); border: none; border-radius: 50%;
+  width: 28px; height: 28px; font-size: 14px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; color: var(--muted);
+}
+.ios-steps { display: flex; flex-direction: column; gap: 10px; }
+.ios-step {
+  display: flex; align-items: center; gap: 12px;
+  font-size: 13px; color: var(--text); font-weight: 500;
+}
+.ios-step-num {
+  width: 24px; height: 24px; border-radius: 50%; background: var(--accent);
+  color: #fff; font-size: 11px; font-weight: 800;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.ios-step-icon { font-size: 18px; }
+
 </style>
 </head>
 <body>
@@ -617,9 +677,40 @@ select.big-input { font-size: 14px; }
     <button id="btn-edit-nome" class="link-btn hidden" onclick="editarNome()">✏️ Nome</button>
     <button id="btn-change-pass" class="link-btn hidden" onclick="trocarSenha()">Trocar senha</button>
     <button id="btn-logout" class="link-btn hidden" onclick="logout()">Sair</button>
+    <button id="btn-install-pwa" onclick="triggerInstall()" title="Instalar app">
+      <span>⬇️</span> Instalar
+    </button>
     <div id="clock"></div>
   </div>
 </header>
+
+<!-- Banner de instalação iOS -->
+<div id="ios-install-banner">
+  <div class="ios-banner-header">
+    <div class="ios-banner-title">
+      <div class="app-icon"><img src="/icon-192.png" alt=""></div>
+      Instalar Toca Estoque
+    </div>
+    <button class="ios-banner-close" onclick="closeIosBanner()">✕</button>
+  </div>
+  <div class="ios-steps">
+    <div class="ios-step">
+      <div class="ios-step-num">1</div>
+      <span class="ios-step-icon">⬆️</span>
+      <span>Toque em <strong>Compartilhar</strong> na barra do Safari</span>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">2</div>
+      <span class="ios-step-icon">➕</span>
+      <span>Toque em <strong>Adicionar à Tela de Início</strong></span>
+    </div>
+    <div class="ios-step">
+      <div class="ios-step-num">3</div>
+      <span class="ios-step-icon">✅</span>
+      <span>Toque em <strong>Adicionar</strong> para confirmar</span>
+    </div>
+  </div>
+</div>
 
 <main>
   <!-- LANÇAMENTO -->
@@ -1933,8 +2024,67 @@ async function confirmarCadastro() {
   } catch(e) { toast(e.message, 'err'); }
 }
 
+// ===== PWA INSTALL =====
+let _deferredPrompt = null;
+const _isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
+const _isInStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+}
+
+// Android / Desktop: captura o evento de instalação
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  _deferredPrompt = e;
+  const btn = document.getElementById('btn-install-pwa');
+  if (btn) btn.classList.add('show');
+});
+
+// Depois de instalar, esconde o botão
+window.addEventListener('appinstalled', () => {
+  _deferredPrompt = null;
+  const btn = document.getElementById('btn-install-pwa');
+  if (btn) btn.classList.remove('show');
+  toast('App instalado com sucesso! 🎉', 'ok');
+});
+
+// iOS: mostra o banner se não estiver em standalone e nunca tiver mostrado
+if (_isIos && !_isInStandalone) {
+  const dismissed = localStorage.getItem('ios-install-dismissed');
+  if (!dismissed) {
+    setTimeout(() => {
+      const banner = document.getElementById('ios-install-banner');
+      if (banner) banner.classList.add('show');
+      const btn = document.getElementById('btn-install-pwa');
+      if (btn) btn.classList.add('show');
+    }, 4000); // aparece após a splash
+  }
+}
+
+function triggerInstall() {
+  if (_deferredPrompt) {
+    // Android / Desktop
+    _deferredPrompt.prompt();
+    _deferredPrompt.userChoice.then((choice) => {
+      if (choice.outcome === 'accepted') toast('Instalando o app... 🐰', 'ok');
+      _deferredPrompt = null;
+      const btn = document.getElementById('btn-install-pwa');
+      if (btn) btn.classList.remove('show');
+    });
+  } else if (_isIos) {
+    // iOS: mostra banner com instruções
+    const banner = document.getElementById('ios-install-banner');
+    if (banner) banner.classList.add('show');
+  } else {
+    toast('Para instalar: use o menu do navegador → "Instalar app" ou "Adicionar à tela inicial"', 'info');
+  }
+}
+
+function closeIosBanner() {
+  const banner = document.getElementById('ios-install-banner');
+  if (banner) banner.classList.remove('show');
+  localStorage.setItem('ios-install-dismissed', '1');
 }
 
 // ==================== GESTÃO DE PRODUTOS (ADMIN) ====================
