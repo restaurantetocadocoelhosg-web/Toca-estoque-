@@ -2049,22 +2049,26 @@ window.addEventListener('appinstalled', () => {
   toast('App instalado com sucesso! 🎉', 'ok');
 });
 
-// iOS: mostra o banner se não estiver em standalone e nunca tiver mostrado
+// iOS: mostra botão no header imediatamente (não está em standalone)
 if (_isIos && !_isInStandalone) {
-  const dismissed = localStorage.getItem('ios-install-dismissed');
-  if (!dismissed) {
-    setTimeout(() => {
-      const banner = document.getElementById('ios-install-banner');
-      if (banner) banner.classList.add('show');
-      const btn = document.getElementById('btn-install-pwa');
-      if (btn) btn.classList.add('show');
-    }, 4000); // aparece após a splash
-  }
+  const btn = document.getElementById('btn-install-pwa');
+  if (btn) btn.classList.add('show');
+}
+
+// Fallback para Chrome/Edge no desktop: se após 2s não disparou beforeinstallprompt
+// mas o site está em HTTPS e tem SW, mostrar botão com instrução manual
+if (!_isIos && !_isInStandalone) {
+  setTimeout(() => {
+    // Se o deferredPrompt ainda não chegou, mostra o botão de qualquer forma
+    // com a instrução do menu do navegador
+    const btn = document.getElementById('btn-install-pwa');
+    if (btn) btn.classList.add('show');
+  }, 2500);
 }
 
 function triggerInstall() {
   if (_deferredPrompt) {
-    // Android / Desktop
+    // Android / Desktop Chrome/Edge — prompt nativo
     _deferredPrompt.prompt();
     _deferredPrompt.userChoice.then((choice) => {
       if (choice.outcome === 'accepted') toast('Instalando o app... 🐰', 'ok');
@@ -2073,12 +2077,55 @@ function triggerInstall() {
       if (btn) btn.classList.remove('show');
     });
   } else if (_isIos) {
-    // iOS: mostra banner com instruções
+    // iOS Safari: mostra banner passo a passo
     const banner = document.getElementById('ios-install-banner');
     if (banner) banner.classList.add('show');
   } else {
-    toast('Para instalar: use o menu do navegador → "Instalar app" ou "Adicionar à tela inicial"', 'info');
+    // Chrome/Edge desktop sem prompt ainda: mostrar modal de instrução
+    showInstallModal();
   }
+}
+
+function showInstallModal() {
+  // Criar modal de instrução se não existir
+  if (document.getElementById('install-modal')) {
+    document.getElementById('install-modal').classList.add('show');
+    return;
+  }
+  const modal = document.createElement('div');
+  modal.id = 'install-modal';
+  modal.style.cssText = `
+    position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.5);
+    display:flex;align-items:center;justify-content:center;padding:20px;
+  `;
+  modal.innerHTML = \`
+    <div style="background:var(--s1);border-radius:20px;padding:24px;max-width:340px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.3)">
+      <div style="text-align:center;margin-bottom:16px;font-size:32px">📲</div>
+      <h3 style="text-align:center;margin-bottom:8px;font-size:17px;color:var(--text)">Instalar o App</h3>
+      <p style="text-align:center;font-size:13px;color:var(--muted);margin-bottom:20px">Escolha como instalar no seu dispositivo:</p>
+      <div style="display:flex;flex-direction:column;gap:10px">
+        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
+          <strong>🖥️ Chrome / Edge (Desktop)</strong><br>
+          <span style="color:var(--muted)">Clique no ícone <strong>⬇</strong> ou <strong>+</strong> na barra de endereço → "Instalar Toca Estoque"</span>
+        </div>
+        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
+          <strong>🤖 Android (Chrome)</strong><br>
+          <span style="color:var(--muted)">Menu ⋮ → "Adicionar à tela inicial" ou "Instalar app"</span>
+        </div>
+        <div style="background:var(--s2);border-radius:12px;padding:14px;font-size:13px;color:var(--text)">
+          <strong>🍎 iPhone / iPad (Safari)</strong><br>
+          <span style="color:var(--muted)">Botão Compartilhar ⬆️ → "Adicionar à Tela de Início"</span>
+        </div>
+      </div>
+      <button onclick="document.getElementById('install-modal').remove()" style="
+        width:100%;margin-top:16px;padding:12px;background:var(--accent);
+        color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:700;
+        cursor:pointer;font-family:var(--font)
+      ">Entendi!</button>
+    </div>
+  \`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if(e.target===modal) modal.remove(); });
 }
 
 function closeIosBanner() {
