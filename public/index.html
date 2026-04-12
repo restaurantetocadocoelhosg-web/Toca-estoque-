@@ -888,11 +888,39 @@ let prodAtual = null;
 let estStatus = '';
 let cupomItens = []; // estado dos itens do cupom
 
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
+let _idleTimer = null;
+
+function resetIdleTimer() {
+  clearTimeout(_idleTimer);
+  _idleTimer = setTimeout(() => {
+    if (!authToken) return;
+    authToken = '';
+    localStorage.removeItem('toca_token');
+    localStorage.removeItem('toca_session_ts');
+    showLogin(true);
+    toast('Sessão encerrada por inatividade.', 'err');
+  }, IDLE_TIMEOUT_MS);
+}
+
+function startIdleWatch() {
+  ['touchstart','click','keydown','scroll','mousemove'].forEach(ev =>
+    document.addEventListener(ev, resetIdleTimer, { passive: true })
+  );
+  resetIdleTimer();
+}
+
+function stopIdleWatch() {
+  clearTimeout(_idleTimer);
+  ['touchstart','click','keydown','scroll','mousemove'].forEach(ev =>
+    document.removeEventListener(ev, resetIdleTimer)
+  );
+}
+
 async function init() {
   clock(); setInterval(clock, 1000);
   bindAuthEnter();
   if (authToken) {
-    // Verificar expiração de sessão local (8 horas)
     const sessionTs = parseInt(localStorage.getItem('toca_session_ts') || '0');
     const oitoHoras = 8 * 60 * 60 * 1000;
     if (sessionTs && Date.now() - sessionTs > oitoHoras) {
@@ -932,7 +960,7 @@ function clock() {
   });
 }
 
-function showLogin(show) { document.getElementById('auth-overlay').classList.toggle('show', show); }
+function showLogin(show) { if (show) stopIdleWatch(); document.getElementById('auth-overlay').classList.toggle('show', show); }
 
 // Rate limiting de login (máx 5 tentativas em 2 minutos)
 const _loginAttempts = { count: 0, blockedUntil: 0 };
@@ -992,7 +1020,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !['admin','gerente'].includes(currentUser.role));
 }
 
-async function afterLogin() { showLogin(false); hideLoading(); await loadDash(); await loadCats(); restaurarChatUI(); }
+async function afterLogin() { showLogin(false); hideLoading(); await loadDash(); await loadCats(); restaurarChatUI(); startIdleWatch(); }
 
 function labelRole(r) { return ({admin:'Administrador',gerente:'Gerente',operador:'Operador'}[r]||r||'Usuário'); }
 
