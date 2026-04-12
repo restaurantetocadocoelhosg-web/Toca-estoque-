@@ -77,6 +77,8 @@ function parseNonNegativeNumber(value) {
   return n;
 }
 
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos de inatividade
+
 function createSession(user) {
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, {
@@ -85,9 +87,20 @@ function createSession(user) {
     nome: user.nome,
     role: user.role,
     created_at: nowIso(),
+    lastActivity: Date.now(),
   });
   return token;
 }
+
+// Limpa sessoes inativas a cada minuto
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of sessions.entries()) {
+    if (now - session.lastActivity > IDLE_TIMEOUT_MS) {
+      sessions.delete(token);
+    }
+  }
+}, 60 * 1000);
 
 function getToken(req) {
   const bearer = req.headers.authorization || '';
@@ -117,11 +130,16 @@ function auth(req, res, next) {
   const token = getToken(req);
   const session = sessions.get(token);
   if (!session) return res.status(401).json({ erro: 'Sessão expirada. Faça login novamente.' });
+  if (Date.now() - session.lastActivity > IDLE_TIMEOUT_MS) {
+    sessions.delete(token);
+    return res.status(401).json({ erro: 'Sessão encerrada por inatividade. Faça login novamente.' });
+  }
   const user = db.prepare('SELECT id, username, nome, role, active FROM users WHERE id = ?').get(session.id);
   if (!user || !user.active) {
     sessions.delete(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
   }
+  session.lastActivity = Date.now(); // renova atividade a cada request
   req.user = user;
   req.token = token;
   next();
@@ -570,6 +588,10 @@ app.get('/api/movimentacoes', auth, (req, res) => {
     sql += ' AND (produto_nome LIKE ? OR motivo LIKE ? OR obs LIKE ? OR responsavel LIKE ?)';
     params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
   }
+  const dataInicio = req.query?.data_inicio;
+  const dataFim    = req.query?.data_fim;
+  if (dataInicio) { sql += ' AND substr(created_at, 1, 10) >= ?'; params.push(dataInicio); }
+  if (dataFim)    { sql += ' AND substr(created_at, 1, 10) <= ?'; params.push(dataFim); }
   sql += ' ORDER BY id DESC LIMIT ?';
   params.push(limit);
   res.json(db.prepare(sql).all(...params));
