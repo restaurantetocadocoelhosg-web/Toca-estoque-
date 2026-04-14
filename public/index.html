@@ -738,6 +738,59 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- AUDITORIA DE DIVERGÊNCIAS -->
+  <div id="p-audit" class="page">
+    <div class="admin-section">
+      <div class="admin-card">
+        <div class="admin-card-title">🔍 Auditoria — Entradas vs Saídas</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Compare o que entrou com o que saiu por produto. Detecte lançamentos suspeitos.</div>
+        <div class="form-row" style="margin-bottom:12px">
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">De</label>
+            <input type="date" class="small-input" id="aud-de" style="padding:9px 10px">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">Até</label>
+            <input type="date" class="small-input" id="aud-ate" style="padding:9px 10px">
+          </div>
+          <div>
+            <label style="font-size:11px;color:var(--muted);display:block;margin-bottom:3px">Categoria</label>
+            <select class="small-input" id="aud-cat" style="padding:9px 10px">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <button class="btn-export btn-primary" style="padding:11px;align-self:flex-end" onclick="carregarAuditoria()">🔍 Analisar</button>
+        </div>
+
+        <!-- Resumo Cards -->
+        <div id="aud-resumo" style="display:none;margin-bottom:14px">
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:10px">
+            <div style="background:rgba(232,93,38,0.08);border:1px solid rgba(232,93,38,0.25);border-radius:10px;padding:10px;text-align:center">
+              <div style="font-size:20px;font-weight:800;color:#e85d26" id="aud-n-alertas">0</div>
+              <div style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase">Alertas</div>
+            </div>
+            <div style="background:rgba(255,193,7,0.08);border:1px solid rgba(255,193,7,0.3);border-radius:10px;padding:10px;text-align:center">
+              <div style="font-size:20px;font-weight:800;color:#b8860b" id="aud-n-sementrada">0</div>
+              <div style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase">Saída s/ entrada</div>
+            </div>
+            <div style="background:rgba(34,197,94,0.08);border:1px solid rgba(34,197,94,0.25);border-radius:10px;padding:10px;text-align:center">
+              <div style="font-size:20px;font-weight:800;color:#16a34a" id="aud-n-ok">0</div>
+              <div style="font-size:10px;color:var(--muted);font-weight:600;text-transform:uppercase">OK</div>
+            </div>
+          </div>
+          <!-- Filtro rápido -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">
+            <button class="pill active" id="aud-pill-todos" onclick="filtrarAuditoria('todos',this)">Todos</button>
+            <button class="pill" id="aud-pill-alertas" onclick="filtrarAuditoria('alertas',this)">🔴 Alertas</button>
+            <button class="pill" id="aud-pill-sementrada" onclick="filtrarAuditoria('sementrada',this)">🟡 Saída s/ entrada</button>
+          </div>
+        </div>
+
+        <div id="aud-lista"></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <nav>
@@ -746,6 +799,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
+  <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -1016,6 +1070,8 @@ async function loadSession() {
   if (navAdmin) navAdmin.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
   const navChat = document.getElementById('nav-chat');
   if (navChat) navChat.style.display = currentUser.role === 'operador' ? 'none' : 'flex';
+  const navAudit = document.getElementById('nav-audit');
+  if (navAudit) navAudit.style.display = ['admin','gerente'].includes(currentUser.role) ? 'flex' : 'none';
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !['admin','gerente'].includes(currentUser.role));
 }
@@ -1067,6 +1123,7 @@ function goPage(id, btn) {
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); }
+  if (id === 'audit') initAuditoria();
 }
 
 async function loadDash() {
@@ -2081,6 +2138,140 @@ async function peditBuscaCat(q) {
     ).join('');
     ac.classList.add('open');
   } catch(e) {}
+}
+
+// ==================== AUDITORIA ====================
+let audDados = [];
+let audFiltro = 'todos';
+
+async function initAuditoria() {
+  // Preenche datas padrão (últimos 30 dias)
+  const hoje = new Date();
+  const ha30 = new Date(hoje);
+  ha30.setDate(ha30.getDate() - 30);
+  const fmtDate = d => d.toISOString().slice(0, 10);
+  const campoAte = document.getElementById('aud-ate');
+  const campoDe = document.getElementById('aud-de');
+  if (!campoDe.value) campoDe.value = fmtDate(ha30);
+  if (!campoAte.value) campoAte.value = fmtDate(hoje);
+
+  // Carrega categorias
+  const catSel = document.getElementById('aud-cat');
+  if (catSel.options.length <= 1) {
+    try {
+      const cats = await api('/api/categorias');
+      cats.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c;
+        opt.textContent = c;
+        catSel.appendChild(opt);
+      });
+    } catch(e) {}
+  }
+  carregarAuditoria();
+}
+
+async function carregarAuditoria() {
+  const de = document.getElementById('aud-de').value;
+  const ate = document.getElementById('aud-ate').value;
+  const cat = document.getElementById('aud-cat').value;
+  const lista = document.getElementById('aud-lista');
+  lista.innerHTML = '<div class="loading">🔍 Analisando movimentações...</div>';
+  document.getElementById('aud-resumo').style.display = 'none';
+
+  try {
+    let url = `/api/auditoria/divergencias?data_inicio=${de}&data_fim=${ate}`;
+    if (cat) url += `&categoria=${encodeURIComponent(cat)}`;
+    const dados = await api(url);
+    audDados = dados.resultado;
+    renderAuditoria();
+  } catch(e) {
+    lista.innerHTML = `<div class="error-msg">${e.message || 'Erro ao carregar auditoria.'}</div>`;
+  }
+}
+
+function filtrarAuditoria(tipo, btn) {
+  audFiltro = tipo;
+  document.querySelectorAll('[id^="aud-pill-"]').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderAuditoria();
+}
+
+function renderAuditoria() {
+  const lista = document.getElementById('aud-lista');
+  const resumo = document.getElementById('aud-resumo');
+
+  const alertas = audDados.filter(r => r.alerta);
+  const semEntrada = audDados.filter(r => r.sem_entrada && !r.alerta);
+  const ok = audDados.filter(r => !r.alerta && !r.sem_entrada);
+
+  document.getElementById('aud-n-alertas').textContent = alertas.length;
+  document.getElementById('aud-n-sementrada').textContent = semEntrada.length;
+  document.getElementById('aud-n-ok').textContent = ok.length;
+  resumo.style.display = audDados.length > 0 ? 'block' : 'none';
+
+  let filtrado = audDados;
+  if (audFiltro === 'alertas') filtrado = alertas;
+  if (audFiltro === 'sementrada') filtrado = semEntrada;
+
+  if (filtrado.length === 0) {
+    lista.innerHTML = '<div style="text-align:center;padding:32px;color:var(--muted);font-size:14px">✅ Nenhum item encontrado para este filtro.</div>';
+    return;
+  }
+
+  // Agrupa por categoria
+  const porCat = {};
+  for (const r of filtrado) {
+    if (!porCat[r.categoria]) porCat[r.categoria] = [];
+    porCat[r.categoria].push(r);
+  }
+
+  let html = '';
+  for (const [cat, itens] of Object.entries(porCat)) {
+    html += `<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.8px;padding:10px 0 6px">${escapeHtml(cat)}</div>`;
+    for (const r of itens) {
+      const corBg = r.alerta ? 'rgba(232,93,38,0.06)' : r.sem_entrada ? 'rgba(255,193,7,0.06)' : 'var(--s2)';
+      const corBorda = r.alerta ? 'rgba(232,93,38,0.3)' : r.sem_entrada ? 'rgba(255,193,7,0.3)' : 'var(--border)';
+      const badge = r.alerta
+        ? '<span style="background:#e85d26;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">🔴 ALERTA</span>'
+        : r.sem_entrada
+          ? '<span style="background:#b8860b;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">🟡 SEM ENTRADA</span>'
+          : '<span style="background:#16a34a;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">🟢 OK</span>';
+
+      const pct = r.total_entrada > 0
+        ? ((r.total_saida / r.total_entrada) * 100).toFixed(0) + '%'
+        : r.total_saida > 0 ? '∞' : '0%';
+
+      html += `
+      <div style="background:${corBg};border:1px solid ${corBorda};border-radius:12px;padding:12px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
+          <div style="font-weight:700;font-size:14px;flex:1">${escapeHtml(r.produto_nome)}</div>
+          ${badge}
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
+          <div style="background:rgba(34,197,94,0.08);border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:15px;font-weight:800;color:#16a34a">+${r.total_entrada}</div>
+            <div style="font-size:10px;color:var(--muted);font-weight:600">${r.num_entradas}x ENTRADA</div>
+          </div>
+          <div style="background:rgba(232,93,38,0.08);border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:15px;font-weight:800;color:#e85d26">-${r.total_saida}</div>
+            <div style="font-size:10px;color:var(--muted);font-weight:600">${r.num_saidas}x SAÍDA</div>
+          </div>
+          <div style="background:var(--s1);border-radius:8px;padding:8px;text-align:center">
+            <div style="font-size:15px;font-weight:800;color:var(--text)">${pct}</div>
+            <div style="font-size:10px;color:var(--muted);font-weight:600">SAÍDA/ENTRADA</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
+          <span>📦 Estoque atual: <b>${r.qtd_atual ?? '?'} ${r.unidade}</b></span>
+          ${r.total_perda > 0 ? `<span>❌ Perdas: <b>${r.total_perda} ${r.unidade}</b></span>` : ''}
+          <span>💰 Saída valor: <b>R$ ${r.valor_saida.toFixed(2)}</b></span>
+        </div>
+      </div>`;
+    }
+  }
+
+  lista.innerHTML = html;
 }
 
 init();
