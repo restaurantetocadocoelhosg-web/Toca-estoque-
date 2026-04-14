@@ -982,6 +982,86 @@ app.get('/api/manutencao/normalizar', auth, requireRole('admin'), (req, res) => 
   res.json({ ok: true, total: todos.length, msg: `${todos.length} produtos normalizados!` });
 });
 
+// ==================== AUDITORIA DE DIVERGÊNCIAS ====================
+app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), (req, res) => {
+  const dataInicio = req.query?.data_inicio || new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+  const dataFim    = req.query?.data_fim    || nowSP().slice(0,10);
+  const categoria  = sanitizeText(req.query?.categoria || '', 80);
+
+  let catFilter = '';
+  const catParams = [];
+  if (categoria) {
+    catFilter = ' AND categoria = ?';
+    catParams.push(categoria);
+  }
+
+  // Entradas, saídas e perdas por produto no período
+  const rows = db.prepare(`
+    SELECT
+      produto_nome,
+      categoria,
+      unidade,
+      SUM(CASE WHEN tipo = 'Entrada' THEN qtd ELSE 0 END) as total_entrada,
+      SUM(CASE WHEN tipo IN ('Saída','Perda') THEN qtd ELSE 0 END) as total_saida,
+      SUM(CASE WHEN tipo = 'Perda' THEN qtd ELSE 0 END) as total_perda,
+      SUM(CASE WHEN tipo = 'Entrada' THEN valor ELSE 0 END) as valor_entrada,
+      SUM(CASE WHEN tipo IN ('Saída','Perda') THEN valor ELSE 0 END) as valor_saida,
+      COUNT(CASE WHEN tipo = 'Saída' THEN 1 END) as num_saidas,
+      COUNT(CASE WHEN tipo = 'Entrada' THEN 1 END) as num_entradas
+    FROM movimentacoes
+    WHERE substr(created_at,1,10) >= ? AND substr(created_at,1,10) <= ?
+    ${catFilter}
+    GROUP BY produto_nome, categoria, unidade
+    HAVING total_entrada > 0 OR total_saida > 0
+    ORDER BY categoria, produto_nome
+  `).all(dataInicio, dataFim, ...catParams);
+
+  // Estoque atual de cada produto
+  const produtos = db.prepare('SELECT nome, qtd, minimo FROM produtos').all();
+  const estoqueMap = {};
+  for (const p of produtos) estoqueMap[p.nome] = { qtd: p.qtd, minimo: p.minimo };
+
+  const resultado = rows.map(r => {
+    const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
+    const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
+    // Flag divergência: saída > 150% da entrada (sem estoque inicial conhecido é heurística)
+    const alerta = r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5;
+    // Flag saída sem entrada no período (possível lançamento errado)
+    const semEntrada = r.total_saida > 0 && r.total_entrada === 0;
+    return {
+      produto_nome: r.produto_nome,
+      categoria: r.categoria,
+      unidade: r.unidade,
+      total_entrada: Number(r.total_entrada.toFixed(3)),
+      total_saida: Number(r.total_saida.toFixed(3)),
+      total_perda: Number(r.total_perda.toFixed(3)),
+      valor_entrada: Number((r.valor_entrada||0).toFixed(2)),
+      valor_saida: Number((r.valor_saida||0).toFixed(2)),
+      num_entradas: r.num_entradas,
+      num_saidas: r.num_saidas,
+      saldo,
+      qtd_atual: qtdAtual,
+      alerta,
+      sem_entrada: semEntrada,
+    };
+  });
+
+  // Detalhes de saídas por produto (para drill-down)
+  const detalhesSaidas = db.prepare(`
+    SELECT produto_nome, tipo, qtd, unidade, motivo, responsavel, obs, created_at
+    FROM movimentacoes
+    WHERE tipo IN ('Saída','Perda')
+      AND substr(created_at,1,10) >= ?
+      AND substr(created_at,1,10) <= ?
+    ORDER BY produto_nome, created_at DESC
+  `).all(dataInicio, dataFim);
+
+  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'auditoria_divergencias',?,?,datetime('now','localtime'))`)
+    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ dataInicio, dataFim, categoria }), sanitizeText(req.ip, 80));
+
+  res.json({ resultado, detalhesSaidas, dataInicio, dataFim });
+});
+
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
