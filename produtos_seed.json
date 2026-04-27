@@ -1133,7 +1133,7 @@
     "unidade": "un",
     "qtd": 3.0,
     "minimo": 1.0,
-    "custo": 21.9
+    "custo": 10.0
   },
   {
     "nome": "Ovos 30 un",
@@ -1901,7 +1901,7 @@
     "unidade": "un",
     "qtd": 150.0,
     "minimo": 50.0,
-    "custo": 22.99
+    "custo": 0.29
   },
   {
     "nome": "Faca",

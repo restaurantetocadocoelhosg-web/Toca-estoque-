@@ -1,7 +1,7 @@
 process.env.TZ = 'America/Sao_Paulo';
 
 const express = require('express');
-const Database = require('better-sqlite3');
+const { createClient } = require('@supabase/supabase-js');
 const cors = require('cors');
 const path = require('path');
 const fs = require('fs');
@@ -9,43 +9,40 @@ const crypto = require('crypto');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const DB_PATH = process.env.DB_PATH || './estoque.db';
-const db = new Database(DB_PATH);
+
+// ==================== SUPABASE ====================
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY; // service_role key (backend only!)
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios!');
+  process.exit(1);
+}
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
 const sessions = new Map();
 
 app.use(cors());
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+// ==================== HELPERS ====================
 function nowIso() {
   return new Date().toISOString();
 }
+
 function nowSP() {
   const partes = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'America/Sao_Paulo',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: false
   }).formatToParts(new Date());
-
   const get = (type) => partes.find(p => p.type === type)?.value || '';
-
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
-}
-function sha(input) {
-  return crypto.createHash('sha256').update(String(input)).digest('hex');
 }
 
 function normalizeSearch(str) {
-  return String(str || '')
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .trim();
+  return String(str || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
 }
 
 function hashPassword(password) {
@@ -77,28 +74,22 @@ function parseNonNegativeNumber(value) {
   return n;
 }
 
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos de inatividade
+// ==================== SESSÕES ====================
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 
 function createSession(user) {
   const token = crypto.randomBytes(24).toString('hex');
   sessions.set(token, {
-    id: user.id,
-    username: user.username,
-    nome: user.nome,
-    role: user.role,
-    created_at: nowIso(),
-    lastActivity: Date.now(),
+    id: user.id, username: user.username, nome: user.nome,
+    role: user.role, created_at: nowIso(), lastActivity: Date.now(),
   });
   return token;
 }
 
-// Limpa sessoes inativas a cada minuto
 setInterval(() => {
   const now = Date.now();
   for (const [token, session] of sessions.entries()) {
-    if (now - session.lastActivity > IDLE_TIMEOUT_MS) {
-      sessions.delete(token);
-    }
+    if (now - session.lastActivity > IDLE_TIMEOUT_MS) sessions.delete(token);
   }
 }, 60 * 1000);
 
@@ -108,25 +99,22 @@ function getToken(req) {
   return req.headers['x-auth-token'] || '';
 }
 
-function audit(action, details = {}, user = null) {
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, datetime('now','localtime'))
-  `).run(
-    user?.id || null,
-    user?.nome || user?.username || '',
-    user?.role || '',
-    action,
-    JSON.stringify(details),
-    sanitizeText(reqIpFallback(details.ip), 80)
-  );
+function reqIpFallback(ip) { return ip || ''; }
+
+// ==================== AUDIT ====================
+async function audit(action, details = {}, user = null, ip = '') {
+  await supabase.from('audit_logs').insert({
+    usuario_id: user?.id || null,
+    usuario_nome: user?.nome || user?.username || '',
+    role: user?.role || '',
+    acao: action,
+    detalhes: JSON.stringify(details),
+    ip: sanitizeText(ip, 80),
+  });
 }
 
-function reqIpFallback(ip) {
-  return ip || '';
-}
-
-function auth(req, res, next) {
+// ==================== AUTH MIDDLEWARE ====================
+async function auth(req, res, next) {
   const token = getToken(req);
   const session = sessions.get(token);
   if (!session) return res.status(401).json({ erro: 'Sessão expirada. Faça login novamente.' });
@@ -134,12 +122,13 @@ function auth(req, res, next) {
     sessions.delete(token);
     return res.status(401).json({ erro: 'Sessão encerrada por inatividade. Faça login novamente.' });
   }
-  const user = db.prepare('SELECT id, username, nome, role, active FROM users WHERE id = ?').get(session.id);
+  const { data: user } = await supabase
+    .from('users').select('id, username, nome, role, active').eq('id', session.id).single();
   if (!user || !user.active) {
     sessions.delete(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
   }
-  session.lastActivity = Date.now(); // renova atividade a cada request
+  session.lastActivity = Date.now();
   req.user = user;
   req.token = token;
   next();
@@ -154,168 +143,83 @@ function requireRole(...roles) {
   };
 }
 
-function calcStatusClause(status) {
-  if (status === 'zerado') return ' AND qtd = 0';
-  if (status === 'critico') return ' AND qtd > 0 AND qtd <= minimo * 0.5';
-  if (status === 'atencao') return ' AND qtd > minimo * 0.5 AND qtd < minimo';
-  if (status === 'ok') return ' AND qtd >= minimo';
-  return '';
+// ==================== STATUS HELPERS ====================
+function addStatusFilter(query, status) {
+  if (status === 'zerado') return query.eq('qtd', 0);
+  if (status === 'critico') return query.gt('qtd', 0).filter('qtd', 'lte', 'minimo*0.5');
+  // Para filtros calculados usamos RPC ou filtramos no JS
+  return query;
 }
 
-// ==================== SETUP BANCO ====================
-db.exec(`
-  CREATE TABLE IF NOT EXISTS produtos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    nome TEXT NOT NULL UNIQUE,
-    categoria TEXT NOT NULL,
-    unidade TEXT NOT NULL,
-    qtd REAL DEFAULT 0,
-    minimo REAL DEFAULT 1,
-    custo REAL DEFAULT 0,
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-  );
+// ==================== SEED (primeira execução) ====================
+async function seed() {
+  // Seed users
+  const { count } = await supabase.from('users').select('id', { count: 'exact', head: true });
+  if (count === 0) {
+    const seedUsers = [
+      { username: 'admin', nome: 'Administrador', role: 'admin', password_hash: hashPassword(process.env.ADMIN_PASSWORD || 'Toca123!'), active: 1 },
+      { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password_hash: hashPassword('Nayara@2026Tc'), active: 1 },
+      { username: 'simone.gerente', nome: 'Simone', role: 'gerente', password_hash: hashPassword('Simone@2026Tc'), active: 1 },
+      { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password_hash: hashPassword('Estoque@2026Tc'), active: 1 },
+    ];
+    await supabase.from('users').insert(seedUsers);
+    console.log('🔐 Usuários iniciais criados');
+  }
 
-  CREATE TABLE IF NOT EXISTS movimentacoes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    produto_id INTEGER,
-    produto_nome TEXT NOT NULL,
-    categoria TEXT,
-    tipo TEXT NOT NULL,
-    qtd REAL NOT NULL,
-    unidade TEXT,
-    custo REAL DEFAULT 0,
-    valor REAL DEFAULT 0,
-    motivo TEXT,
-    responsavel TEXT,
-    obs TEXT,
-    created_at TEXT DEFAULT (datetime('now','localtime')),
-    FOREIGN KEY(produto_id) REFERENCES produtos(id)
-  );
+  // Seed produtos
+  const { count: prodCount } = await supabase.from('produtos').select('id', { count: 'exact', head: true });
+  if (prodCount === 0) {
+    const seedPath = path.join(__dirname, 'produtos_seed.json');
+    if (fs.existsSync(seedPath)) {
+      const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
+      // Supabase insert em lotes de 500
+      for (let i = 0; i < produtos.length; i += 500) {
+        const batch = produtos.slice(i, i + 500).map(p => ({
+          ...p,
+          nome_search: normalizeSearch(p.nome),
+          ativo: 1,
+        }));
+        await supabase.from('produtos').insert(batch);
+      }
+      console.log(`✅ ${produtos.length} produtos carregados no Supabase.`);
+    }
+  }
 
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    nome TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('admin','gerente','operador')),
-    password_hash TEXT NOT NULL,
-    active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT DEFAULT (datetime('now','localtime')),
-    updated_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-
-  CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    usuario_id INTEGER,
-    usuario_nome TEXT,
-    role TEXT,
-    acao TEXT NOT NULL,
-    detalhes TEXT,
-    ip TEXT,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-
-  CREATE TABLE IF NOT EXISTS sinonimos (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    termo TEXT NOT NULL UNIQUE,
-    produto_nome TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now','localtime'))
-  );
-`);
-
-// Migração: adiciona coluna nome_search se não existir
-try { db.exec(`ALTER TABLE produtos ADD COLUMN nome_search TEXT`); } catch(e) {}
-// Migração: coluna ativo para arquivamento
-try { db.exec(`ALTER TABLE produtos ADD COLUMN ativo INTEGER NOT NULL DEFAULT 1`); } catch(e) {}
-try { db.exec(`UPDATE produtos SET ativo = 1 WHERE ativo IS NULL`); } catch(e) {}
-// Popula nome_search em todos os produtos que ainda não têm
-const semNorm = db.prepare(`SELECT id, nome FROM produtos WHERE nome_search IS NULL OR nome_search = ''`).all();
-if (semNorm.length > 0) {
-  const updateNorm = db.prepare(`UPDATE produtos SET nome_search = ? WHERE id = ?`);
-  const normTx = db.transaction(() => {
-    for (const p of semNorm) updateNorm.run(normalizeSearch(p.nome), p.id);
-  });
-  normTx();
-  console.log(`✅ nome_search populado para ${semNorm.length} produtos`);
-}
-
-const userCount = db.prepare('SELECT COUNT(*) as n FROM users').get().n;
-if (userCount === 0) {
-  const adminUser = sanitizeText(process.env.ADMIN_USER || 'admin', 40) || 'admin';
-  const adminName = sanitizeText(process.env.ADMIN_NAME || 'Administrador', 60) || 'Administrador';
-  const adminPass = process.env.ADMIN_PASSWORD || 'Toca123!';
-  db.prepare(`
-    INSERT INTO users (username, nome, role, password_hash)
-    VALUES (?, ?, 'admin', ?)
-  `).run(adminUser, adminName, hashPassword(adminPass));
-  console.log(`🔐 Usuário inicial criado: ${adminUser}`);
-}
-const seedUsers = [
-  { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password: 'Nayara@2026Tc' },
-  { username: 'Simone.gerente', nome: 'Simone', role: 'gerente', password: 'Simone@2026Tc' },
-  { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password: 'Estoque@2026Tc' },
-];
-
-const insertSeedUser = db.prepare(`
-  INSERT OR IGNORE INTO users (username, nome, role, password_hash, active, created_at, updated_at)
-  VALUES (?, ?, ?, ?, 1, datetime('now','localtime'), datetime('now','localtime'))
-`);
-
-for (const u of seedUsers) {
-  insertSeedUser.run(
-    u.username,
-    u.nome,
-    u.role,
-    hashPassword(u.password)
-  );
-}
-const count = db.prepare('SELECT COUNT(*) as n FROM produtos').get();
-if (count.n === 0) {
-  const seedPath = path.join(__dirname, 'produtos_seed.json');
-  if (fs.existsSync(seedPath)) {
-    const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-    const insert = db.prepare(`
-      INSERT OR IGNORE INTO produtos (nome, categoria, unidade, qtd, minimo, custo)
-      VALUES (@nome, @categoria, @unidade, @qtd, @minimo, @custo)
-    `);
-    const insertMany = db.transaction((prods) => {
-      for (const p of prods) insert.run(p);
-    });
-    insertMany(produtos);
-    console.log(`✅ ${produtos.length} produtos carregados no banco.`);
+  // Popula nome_search nos que não têm
+  const { data: semNorm } = await supabase
+    .from('produtos').select('id, nome')
+    .or('nome_search.is.null,nome_search.eq.');
+  if (semNorm && semNorm.length > 0) {
+    for (const p of semNorm) {
+      await supabase.from('produtos').update({ nome_search: normalizeSearch(p.nome) }).eq('id', p.id);
+    }
+    console.log(`✅ nome_search populado para ${semNorm.length} produtos`);
   }
 }
 
-// ==================== AUTH ====================
-app.post('/api/login', (req, res) => {
+// ==================== AUTH ROUTES ====================
+app.post('/api/login', async (req, res) => {
   const username = sanitizeText(req.body?.username, 40).toLowerCase();
   const password = String(req.body?.password || '');
-  if (!username || !password) {
-    return res.status(400).json({ erro: 'Usuário e senha são obrigatórios.' });
-  }
+  if (!username || !password) return res.status(400).json({ erro: 'Usuário e senha são obrigatórios.' });
 
-  const user = db.prepare('SELECT * FROM users WHERE lower(username) = ? AND active = 1').get(username);
+  const { data: user } = await supabase
+    .from('users').select('*').ilike('username', username).eq('active', 1).single();
   if (!user || !verifyPassword(password, user.password_hash)) {
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
   }
 
   const token = createSession(user);
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, 'login', ?, ?, datetime('now','localtime'))
-  `).run(user.id, user.nome, user.role, JSON.stringify({ username: user.username }), sanitizeText(req.ip, 80));
-
+  await audit('login', { username: user.username }, user, req.ip);
   res.json({
     token,
     user: { id: user.id, username: user.username, nome: user.nome, role: user.role },
   });
 });
 
-app.post('/api/logout', auth, (req, res) => {
+app.post('/api/logout', auth, async (req, res) => {
   sessions.delete(req.token);
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, 'logout', ?, ?, datetime('now','localtime'))
-  `).run(req.user.id, req.user.nome, req.user.role, '{}', sanitizeText(req.ip, 80));
+  await audit('logout', {}, req.user, req.ip);
   res.json({ ok: true });
 });
 
@@ -325,76 +229,78 @@ app.get('/api/me', auth, (req, res) => {
     permissions: {
       pode_resetar: req.user.role === 'admin',
       pode_editar_produto: ['admin', 'gerente'].includes(req.user.role),
-      pode_exportar: true,
-      pode_lancar: true,
+      pode_exportar: true, pode_lancar: true,
     },
   });
 });
 
-app.put('/api/me', auth, (req, res) => {
+app.put('/api/me', auth, async (req, res) => {
   const nome = sanitizeText(req.body?.nome, 60);
   if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome inválido.' });
-  db.prepare(`UPDATE users SET nome = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(nome, req.user.id);
-  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'editar_perfil',?,?,datetime('now','localtime'))`)
-    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ nome_anterior: req.user.nome, nome_novo: nome }), sanitizeText(req.ip, 80));
+  await supabase.from('users').update({ nome }).eq('id', req.user.id);
+  await audit('editar_perfil', { nome_anterior: req.user.nome, nome_novo: nome }, req.user, req.ip);
   res.json({ ok: true, nome });
 });
 
-app.post('/api/change-password', auth, (req, res) => {
+app.post('/api/change-password', auth, async (req, res) => {
   const current = String(req.body?.current_password || '');
   const next = String(req.body?.new_password || '');
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!verifyPassword(current, user.password_hash)) {
-    return res.status(400).json({ erro: 'Senha atual incorreta.' });
-  }
-  if (next.length < 6) {
-    return res.status(400).json({ erro: 'A nova senha precisa ter pelo menos 6 caracteres.' });
-  }
-  db.prepare('UPDATE users SET password_hash = ?, updated_at = datetime(\'now\',\'localtime\') WHERE id = ?')
-    .run(hashPassword(next), req.user.id);
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, 'change_password', ?, ?, datetime('now','localtime'))
-  `).run(req.user.id, req.user.nome, req.user.role, '{}', sanitizeText(req.ip, 80));
+  const { data: user } = await supabase.from('users').select('*').eq('id', req.user.id).single();
+  if (!verifyPassword(current, user.password_hash)) return res.status(400).json({ erro: 'Senha atual incorreta.' });
+  if (next.length < 6) return res.status(400).json({ erro: 'A nova senha precisa ter pelo menos 6 caracteres.' });
+  await supabase.from('users').update({ password_hash: hashPassword(next) }).eq('id', req.user.id);
+  await audit('change_password', {}, req.user, req.ip);
   res.json({ ok: true });
 });
 
 // ==================== ROTAS PRODUTOS ====================
-app.get('/api/produtos', auth, (req, res) => {
+app.get('/api/produtos', auth, async (req, res) => {
   const { cat, status, q, arquivados } = req.query;
-  let sql = 'SELECT * FROM produtos WHERE 1=1';
-  const params = [];
-  // Arquivados só visíveis para admin e com flag explícita
+  let query = supabase.from('produtos').select('*');
+
   if (arquivados === '1' && req.user.role === 'admin') {
-    sql += ' AND ativo = 0';
+    query = query.eq('ativo', 0);
   } else {
-    sql += ' AND (ativo = 1 OR ativo IS NULL)';
+    query = query.or('ativo.eq.1,ativo.is.null');
   }
-  if (q) { sql += ' AND nome LIKE ?'; params.push(`%${sanitizeText(q, 100)}%`); }
-  if (cat) { sql += ' AND categoria = ?'; params.push(sanitizeText(cat, 80)); }
-  sql += calcStatusClause(status);
-  sql += ' ORDER BY categoria, nome';
-  const rows = db.prepare(sql).all(...params);
-  res.json(rows);
+  if (q) query = query.ilike('nome', `%${sanitizeText(q, 100)}%`);
+  if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
+  query = query.order('categoria').order('nome');
+
+  const { data: rows, error } = await query;
+  if (error) return res.status(500).json({ erro: 'Erro ao buscar produtos.' });
+
+  // Filtrar status no JS (cálculos com minimo)
+  let filtered = rows;
+  if (status === 'zerado') filtered = rows.filter(r => r.qtd === 0);
+  else if (status === 'critico') filtered = rows.filter(r => r.qtd > 0 && r.qtd <= r.minimo * 0.5);
+  else if (status === 'atencao') filtered = rows.filter(r => r.qtd > r.minimo * 0.5 && r.qtd < r.minimo);
+  else if (status === 'ok') filtered = rows.filter(r => r.qtd >= r.minimo);
+
+  res.json(filtered);
 });
 
-app.get('/api/produtos/buscar', auth, (req, res) => {
+app.get('/api/produtos/buscar', auth, async (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
   const qNorm = normalizeSearch(q);
-  const rows = db.prepare(`
-    SELECT id, nome, categoria, unidade, qtd, minimo, custo
-    FROM produtos WHERE nome_search LIKE ? AND (ativo = 1 OR ativo IS NULL) ORDER BY nome LIMIT 15
-  `).all(`%${qNorm}%`);
-  res.json(rows);
+  const { data } = await supabase
+    .from('produtos')
+    .select('id, nome, categoria, unidade, qtd, minimo, custo')
+    .ilike('nome_search', `%${qNorm}%`)
+    .or('ativo.eq.1,ativo.is.null')
+    .order('nome')
+    .limit(15);
+  res.json(data || []);
 });
 
-app.get('/api/categorias', auth, (req, res) => {
-  const rows = db.prepare('SELECT DISTINCT categoria FROM produtos ORDER BY categoria').all();
-  res.json(rows.map(r => r.categoria));
+app.get('/api/categorias', auth, async (req, res) => {
+  const { data } = await supabase.from('produtos').select('categoria').order('categoria');
+  const unique = [...new Set((data || []).map(r => r.categoria))];
+  res.json(unique);
 });
 
-app.post('/api/produtos', auth, requireRole('admin', 'gerente'), (req, res) => {
+app.post('/api/produtos', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const nome = sanitizeText(req.body?.nome, 120);
   const categoria = sanitizeText(req.body?.categoria, 80);
   const unidade = sanitizeText(req.body?.unidade, 20);
@@ -402,66 +308,68 @@ app.post('/api/produtos', auth, requireRole('admin', 'gerente'), (req, res) => {
   const custo = parseNonNegativeNumber(req.body?.custo ?? 0);
   const qtd = parseNonNegativeNumber(req.body?.qtd ?? 0);
   if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
-  try {
-    const info = db.prepare(`
-      INSERT INTO produtos (nome, nome_search, categoria, unidade, qtd, minimo, custo)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(nome, normalizeSearch(nome), categoria, unidade, qtd ?? 0, minimo ?? 1, custo ?? 0);
-    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'criar_produto',?,?,datetime('now','localtime'))`)
-      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ nome, categoria, unidade }), sanitizeText(req.ip, 80));
-    const novo = db.prepare('SELECT * FROM produtos WHERE id = ?').get(info.lastInsertRowid);
-    res.json({ ok: true, produto: novo });
-  } catch(e) {
-    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Produto já cadastrado com este nome.' });
-    res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
+
+  const { data: novo, error } = await supabase.from('produtos').insert({
+    nome, nome_search: normalizeSearch(nome), categoria, unidade,
+    qtd: qtd ?? 0, minimo: minimo ?? 1, custo: custo ?? 0, ativo: 1,
+  }).select().single();
+
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ erro: 'Produto já cadastrado com este nome.' });
+    return res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
   }
+  await audit('criar_produto', { nome, categoria, unidade }, req.user, req.ip);
+  res.json({ ok: true, produto: novo });
 });
 
-app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
-  const produto = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
+app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const { data: produto } = await supabase.from('produtos').select('*').eq('id', req.params.id).single();
   if (!produto) return res.status(404).json({ erro: 'Produto não encontrado.' });
 
-  const nome     = req.body?.nome     !== undefined ? sanitizeText(req.body.nome, 120)     : produto.nome;
-  const categoria= req.body?.categoria!== undefined ? sanitizeText(req.body.categoria, 80) : produto.categoria;
-  const unidade  = req.body?.unidade  !== undefined ? sanitizeText(req.body.unidade, 20)   : produto.unidade;
-  const custo    = req.body?.custo    !== undefined ? parseNonNegativeNumber(req.body.custo)  : produto.custo;
-  const minimo   = req.body?.minimo   !== undefined ? parseNonNegativeNumber(req.body.minimo) : produto.minimo;
+  const nome = req.body?.nome !== undefined ? sanitizeText(req.body.nome, 120) : produto.nome;
+  const categoria = req.body?.categoria !== undefined ? sanitizeText(req.body.categoria, 80) : produto.categoria;
+  const unidade = req.body?.unidade !== undefined ? sanitizeText(req.body.unidade, 20) : produto.unidade;
+  const custo = req.body?.custo !== undefined ? parseNonNegativeNumber(req.body.custo) : produto.custo;
+  const minimo = req.body?.minimo !== undefined ? parseNonNegativeNumber(req.body.minimo) : produto.minimo;
 
   if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
   if (custo === null || minimo === null) return res.status(400).json({ erro: 'Custo e mínimo devem ser números válidos.' });
 
-  try {
-    db.prepare(`UPDATE produtos SET nome=?, nome_search=?, categoria=?, unidade=?, custo=?, minimo=?, updated_at=datetime('now','localtime') WHERE id=?`)
-      .run(nome, normalizeSearch(nome), categoria, unidade, custo, minimo, req.params.id);
-    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'produto_update',?,?,datetime('now','localtime'))`)
-      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ id: produto.id, nome_anterior: produto.nome, nome, categoria, unidade, custo, minimo }), sanitizeText(req.ip, 80));
-    const atualizado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
-    res.json({ ok: true, produto: atualizado });
-  } catch(e) {
-    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Já existe um produto com este nome.' });
-    res.status(500).json({ erro: 'Erro ao atualizar produto.' });
+  const { data: atualizado, error } = await supabase.from('produtos').update({
+    nome, nome_search: normalizeSearch(nome), categoria, unidade, custo, minimo,
+  }).eq('id', req.params.id).select().single();
+
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ erro: 'Já existe um produto com este nome.' });
+    return res.status(500).json({ erro: 'Erro ao atualizar produto.' });
   }
+  await audit('produto_update', { id: produto.id, nome_anterior: produto.nome, nome, categoria, unidade, custo, minimo }, req.user, req.ip);
+  res.json({ ok: true, produto: atualizado });
 });
 
-app.put('/api/produtos/:id/arquivar', auth, requireRole('admin'), (req, res) => {
-  const prod = db.prepare('SELECT * FROM produtos WHERE id = ?').get(req.params.id);
+app.put('/api/produtos/:id/arquivar', auth, requireRole('admin'), async (req, res) => {
+  const { data: prod } = await supabase.from('produtos').select('*').eq('id', req.params.id).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
   const novoAtivo = prod.ativo === 0 ? 1 : 0;
-  db.prepare(`UPDATE produtos SET ativo=?, updated_at=datetime('now','localtime') WHERE id=?`).run(novoAtivo, req.params.id);
-  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'produto_arquivar',?,?,datetime('now','localtime'))`)
-    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ produto_id: prod.id, nome: prod.nome, ativo: novoAtivo }), sanitizeText(req.ip, 80));
+  await supabase.from('produtos').update({ ativo: novoAtivo }).eq('id', req.params.id);
+  await audit('produto_arquivar', { produto_id: prod.id, nome: prod.nome, ativo: novoAtivo }, req.user, req.ip);
   res.json({ ok: true, ativo: novoAtivo });
 });
 
-app.get('/api/produtos/:id/historico', auth, (req, res) => {
-  const movs = db.prepare(`SELECT tipo, qtd, unidade, motivo, responsavel, obs, created_at FROM movimentacoes WHERE produto_id = ? ORDER BY id DESC LIMIT 20`).all(req.params.id);
-  const prod = db.prepare('SELECT nome, qtd, unidade, ativo FROM produtos WHERE id = ?').get(req.params.id);
+app.get('/api/produtos/:id/historico', auth, async (req, res) => {
+  const { data: prod } = await supabase.from('produtos').select('nome, qtd, unidade, ativo').eq('id', req.params.id).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
-  res.json({ produto: prod, movimentacoes: movs });
+  const { data: movs } = await supabase
+    .from('movimentacoes')
+    .select('tipo, qtd, unidade, motivo, responsavel, obs, created_at')
+    .eq('produto_id', req.params.id)
+    .order('id', { ascending: false })
+    .limit(20);
+  res.json({ produto: prod, movimentacoes: movs || [] });
 });
 
 // ==================== ROTAS MOVIMENTAÇÕES ====================
-app.post('/api/movimentacoes', auth, (req, res) => {
+app.post('/api/movimentacoes', auth, async (req, res) => {
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   const tipo = sanitizeText(req.body?.tipo, 20);
   const motivo = sanitizeText(req.body?.motivo, 80);
@@ -472,7 +380,7 @@ app.post('/api/movimentacoes', auth, (req, res) => {
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
   }
 
-  const prod = db.prepare('SELECT * FROM produtos WHERE nome = ? COLLATE NOCASE').get(produto_nome);
+  const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', produto_nome).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
 
   let qtd;
@@ -483,197 +391,157 @@ app.post('/api/movimentacoes', auth, (req, res) => {
   }
 
   const custoBody = req.body?.custo === '' || req.body?.custo === null || req.body?.custo === undefined
-    ? null
-    : parseNonNegativeNumber(req.body?.custo);
+    ? null : parseNonNegativeNumber(req.body?.custo);
   if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null) {
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
   }
 
-  let novaQtd = prod.qtd;
+  let novaQtd = Number(prod.qtd);
   if (tipo === 'Entrada') {
-    novaQtd = Number((prod.qtd + qtd).toFixed(3));
+    novaQtd = Number((novaQtd + qtd).toFixed(3));
   } else if (tipo === 'Saída' || tipo === 'Perda') {
-    if (qtd > prod.qtd) {
-      return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prod.qtd} ${prod.unidade}.` });
-    }
-    novaQtd = Number((prod.qtd - qtd).toFixed(3));
+    if (qtd > novaQtd) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prod.qtd} ${prod.unidade}.` });
+    novaQtd = Number((novaQtd - qtd).toFixed(3));
   } else if (tipo === 'Ajuste') {
     novaQtd = Number(qtd.toFixed(3));
   }
 
   const custoUnit = custoBody !== null ? custoBody : Number(prod.custo || 0);
-  const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - prod.qtd) : qtd;
+  const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - Number(prod.qtd)) : qtd;
   const valor = Number((custoUnit * valorBase).toFixed(2));
 
-  const tx = db.transaction(() => {
-    if (tipo === 'Entrada' && custoBody !== null) {
-      db.prepare(`UPDATE produtos SET qtd = ?, custo = ?, updated_at = datetime('now','localtime') WHERE id = ?`)
-        .run(novaQtd, custoUnit, prod.id);
-    } else {
-      db.prepare(`UPDATE produtos SET qtd = ?, updated_at = datetime('now','localtime') WHERE id = ?`)
-        .run(novaQtd, prod.id);
-    }
+  // Atualiza produto
+  const updateData = { qtd: novaQtd };
+  if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
+  await supabase.from('produtos').update(updateData).eq('id', prod.id);
 
-    db.prepare(`
-  INSERT INTO movimentacoes (
-    produto_id, produto_nome, categoria, tipo, qtd, unidade,
-    custo, valor, motivo, responsavel, obs, created_at
-  )
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`).run(
-  prod.id,
-  prod.nome,
-  prod.categoria,
-  tipo,
-  tipo === 'Ajuste' ? novaQtd : qtd,
-  prod.unidade,
-  custoUnit,
-  valor,
-  motivo,
-  req.user.nome,
-  obs,
-  nowSP()
-);
-
-    db.prepare(`
-      INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-      VALUES (?, ?, ?, 'movimentacao', ?, ?, datetime('now','localtime'))
-    `).run(
-      req.user.id,
-      req.user.nome,
-      req.user.role,
-      JSON.stringify({ produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }),
-      sanitizeText(req.ip, 80)
-    );
+  // Insere movimentação
+  await supabase.from('movimentacoes').insert({
+    produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+    tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
+    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs,
+    created_at: nowSP(),
   });
 
-  tx();
+  await audit('movimentacao', { produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }, req.user, req.ip);
 
-  const prodAtualizado = db.prepare('SELECT * FROM produtos WHERE id = ?').get(prod.id);
+  const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
   res.json({ ok: true, produto: prodAtualizado });
 });
 
-app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
-  const mov = db.prepare('SELECT * FROM movimentacoes WHERE id = ?').get(req.params.id);
+app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const { data: mov } = await supabase.from('movimentacoes').select('*').eq('id', req.params.id).single();
   if (!mov) return res.status(404).json({ erro: 'Movimentação não encontrada.' });
-  const prod = db.prepare('SELECT * FROM produtos WHERE id = ?').get(mov.produto_id);
+  const { data: prod } = await supabase.from('produtos').select('*').eq('id', mov.produto_id).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
-  let novaQtd = prod.qtd;
+
+  let novaQtd = Number(prod.qtd);
   if (mov.tipo === 'Entrada') {
-    novaQtd = Number((prod.qtd - mov.qtd).toFixed(3));
+    novaQtd = Number((novaQtd - Number(mov.qtd)).toFixed(3));
     if (novaQtd < 0) return res.status(400).json({ erro: `Não é possível cancelar: estoque ficaria negativo (${prod.qtd} disponível).` });
   } else if (mov.tipo === 'Saída' || mov.tipo === 'Perda') {
-    novaQtd = Number((prod.qtd + mov.qtd).toFixed(3));
+    novaQtd = Number((novaQtd + Number(mov.qtd)).toFixed(3));
   } else if (mov.tipo === 'Ajuste') {
     return res.status(400).json({ erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' });
   }
-  const tx = db.transaction(() => {
-    db.prepare(`UPDATE produtos SET qtd = ?, updated_at = datetime('now','localtime') WHERE id = ?`).run(novaQtd, prod.id);
-    db.prepare(`DELETE FROM movimentacoes WHERE id = ?`).run(mov.id);
-    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'cancelar_movimentacao',?,?,datetime('now','localtime'))`)
-      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }), sanitizeText(req.ip, 80));
-  });
-  tx();
+
+  await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
+  await supabase.from('movimentacoes').delete().eq('id', mov.id);
+  await audit('cancelar_movimentacao', { mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }, req.user, req.ip);
   res.json({ ok: true, novaQtd });
 });
 
-app.get('/api/movimentacoes', auth, (req, res) => {
+app.get('/api/movimentacoes', auth, async (req, res) => {
   const tipo = sanitizeText(req.query?.tipo, 20);
   const q = sanitizeText(req.query?.q, 100);
   const limit = Math.min(Math.max(parseInt(req.query?.limit || '200', 10), 1), 500);
-  let sql = 'SELECT * FROM movimentacoes WHERE 1=1';
-  const params = [];
-  if (tipo) { sql += ' AND tipo = ?'; params.push(tipo); }
-  if (q) {
-    sql += ' AND (produto_nome LIKE ? OR motivo LIKE ? OR obs LIKE ? OR responsavel LIKE ?)';
-    params.push(`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`);
-  }
+
+  let query = supabase.from('movimentacoes').select('*');
+  if (tipo) query = query.eq('tipo', tipo);
+  if (q) query = query.or(`produto_nome.ilike.%${q}%,motivo.ilike.%${q}%,obs.ilike.%${q}%,responsavel.ilike.%${q}%`);
+
   const dataInicio = req.query?.data_inicio;
-  const dataFim    = req.query?.data_fim;
-  if (dataInicio) { sql += ' AND substr(created_at, 1, 10) >= ?'; params.push(dataInicio); }
-  if (dataFim)    { sql += ' AND substr(created_at, 1, 10) <= ?'; params.push(dataFim); }
-  sql += ' ORDER BY id DESC LIMIT ?';
-  params.push(limit);
-  res.json(db.prepare(sql).all(...params));
+  const dataFim = req.query?.data_fim;
+  if (dataInicio) query = query.gte('created_at', dataInicio);
+  if (dataFim) query = query.lte('created_at', dataFim + 'T23:59:59');
+
+  query = query.order('id', { ascending: false }).limit(limit);
+  const { data } = await query;
+  res.json(data || []);
 });
 
 // ==================== DASHBOARD ====================
-app.get('/api/dashboard', auth, (req, res) => {
-  const zerados = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd = 0').get().n;
-  const criticos = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5').get().n;
-  const atencao = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo').get().n;
-  const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
+app.get('/api/dashboard', auth, async (req, res) => {
+  const { data: produtos } = await supabase.from('produtos').select('qtd, minimo, custo');
+  const all = produtos || [];
+  const zerados = all.filter(p => Number(p.qtd) === 0).length;
+  const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
+  const atencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+  const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
+
   const hojeSP = nowSP().slice(0, 10);
-  const lancHoje = db.prepare(`
-    SELECT COUNT(*) as n
-    FROM movimentacoes
-    WHERE substr(created_at, 1, 10) = ?
-  `).get(hojeSP).n;
-  const ultimos = db.prepare('SELECT * FROM movimentacoes ORDER BY id DESC LIMIT 8').all();
-  res.json({ zerados, criticos, atencao, valorTotal, lancHoje, ultimos });
+  const { count: lancHoje } = await supabase
+    .from('movimentacoes').select('id', { count: 'exact', head: true })
+    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+
+  const { data: ultimos } = await supabase
+    .from('movimentacoes').select('*').order('id', { ascending: false }).limit(8);
+
+  res.json({ zerados, criticos, atencao, valorTotal, lancHoje: lancHoje || 0, ultimos: ultimos || [] });
 });
 
 // ==================== EXPORTAR ====================
-app.get('/api/exportar/:tipo', auth, (req, res) => {
+app.get('/api/exportar/:tipo', auth, async (req, res) => {
   const { tipo } = req.params;
   let rows, headers, filename;
 
   if (tipo === 'estoque') {
-    rows = db.prepare('SELECT nome, categoria, unidade, qtd, minimo, custo FROM produtos ORDER BY categoria, nome').all();
+    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Custo Unit.','Valor Total','Status'];
-    rows = rows.map(r => {
-      let st = r.qtd === 0 ? 'ZERADO' : r.qtd <= r.minimo * 0.5 ? 'CRITICO' : r.qtd < r.minimo ? 'ATENCAO' : 'OK';
-      return [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, r.custo, (r.qtd * r.custo).toFixed(2), st];
+    rows = (data || []).map(r => {
+      let st = Number(r.qtd) === 0 ? 'ZERADO' : Number(r.qtd) <= Number(r.minimo) * 0.5 ? 'CRITICO' : Number(r.qtd) < Number(r.minimo) ? 'ATENCAO' : 'OK';
+      return [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, r.custo, (Number(r.qtd) * Number(r.custo)).toFixed(2), st];
     });
     filename = 'estoque_toca_coelho.csv';
   } else if (tipo === 'movimentacoes') {
-    rows = db.prepare('SELECT * FROM movimentacoes ORDER BY id DESC').all();
+    const { data } = await supabase.from('movimentacoes').select('*').order('id', { ascending: false });
     headers = ['Data/Hora','Produto','Categoria','Tipo','Qtd','Unidade','Custo','Valor','Motivo','Responsável','Obs'];
-    rows = rows.map(r => [r.created_at, r.produto_nome, r.categoria, r.tipo, r.qtd, r.unidade, r.custo, r.valor, r.motivo, r.responsavel, r.obs]);
+    rows = (data || []).map(r => [r.created_at, r.produto_nome, r.categoria, r.tipo, r.qtd, r.unidade, r.custo, r.valor, r.motivo, r.responsavel, r.obs]);
     filename = 'movimentacoes_toca_coelho.csv';
   } else if (tipo === 'compras') {
-    rows = db.prepare(`SELECT nome, categoria, unidade, qtd, minimo FROM produtos WHERE qtd <= minimo * 0.5 ORDER BY categoria, nome`).all();
+    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Sugerido Comprar'];
-    rows = rows.map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, r.minimo * 2 - r.qtd).toFixed(3)]);
+    rows = (data || []).filter(r => Number(r.qtd) <= Number(r.minimo) * 0.5)
+      .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
     filename = 'lista_compras_toca_coelho.csv';
   } else {
     return res.status(400).json({ erro: 'Tipo inválido' });
   }
 
-  db.prepare(`
-    INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-    VALUES (?, ?, ?, 'exportar', ?, ?, datetime('now','localtime'))
-  `).run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ tipo }), sanitizeText(req.ip, 80));
-
+  await audit('exportar', { tipo }, req.user, req.ip);
   const csv = [headers, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send('\uFEFF' + csv);
 });
 
-app.post('/api/resetar', auth, requireRole('admin'), (req, res) => {
+// ==================== RESETAR ====================
+app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
   const confirmacao = sanitizeText(req.body?.confirmacao, 20).toUpperCase();
-  if (confirmacao !== 'RESTAURAR') {
-    return res.status(400).json({ erro: 'Confirmação inválida. Digite RESTAURAR para continuar.' });
-  }
-  // Verifica senha do admin como segunda confirmação
+  if (confirmacao !== 'RESTAURAR') return res.status(400).json({ erro: 'Confirmação inválida. Digite RESTAURAR para continuar.' });
+
   const senhaAdmin = String(req.body?.senha_admin || '');
-  const userDb = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
-  if (!verifyPassword(senhaAdmin, userDb.password_hash)) {
-    return res.status(401).json({ erro: 'Senha de administrador incorreta.' });
-  }
+  const { data: userDb } = await supabase.from('users').select('*').eq('id', req.user.id).single();
+  if (!verifyPassword(senhaAdmin, userDb.password_hash)) return res.status(401).json({ erro: 'Senha de administrador incorreta.' });
+
   const seedPath = path.join(__dirname, 'produtos_seed.json');
   if (!fs.existsSync(seedPath)) return res.status(404).json({ erro: 'Seed não encontrado.' });
   const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-  const update = db.prepare('UPDATE produtos SET qtd = ?, custo = ?, minimo = ?, updated_at = datetime(\'now\',\'localtime\') WHERE nome = ?');
-  const tx = db.transaction(() => {
-    for (const p of produtos) update.run(p.qtd, p.custo, p.minimo, p.nome);
-    db.prepare(`
-      INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-      VALUES (?, ?, ?, 'resetar_estoque', ?, ?, datetime('now','localtime'))
-    `).run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ total_produtos: produtos.length }), sanitizeText(req.ip, 80));
-  });
-  tx();
+
+  for (const p of produtos) {
+    await supabase.from('produtos').update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo }).eq('nome', p.nome);
+  }
+  await audit('resetar_estoque', { total_produtos: produtos.length }, req.user, req.ip);
   res.json({ ok: true });
 });
 
@@ -688,30 +556,19 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01'
-      },
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001',
-        max_tokens: 1024,
+        model: 'claude-haiku-4-5-20251001', max_tokens: 1024,
         messages: [{
           role: 'user',
           content: [
-            {
-              type: 'image',
-              source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem }
-            },
-            {
-              type: 'text',
-              text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.
+            { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
+            { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.
 Extraia TODOS os itens comprados com nome do produto e quantidade.
 Responda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:
 {"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}
 Use unidade KG para peso, UN para unidade, L para litro, CX para caixa.
-Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
-            }
+Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
           ]
         }]
       })
@@ -719,40 +576,43 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
 
     if (!response.ok) {
       const err = await response.text();
-      console.error('Anthropic error:', err);
       return res.status(502).json({ erro: 'Erro na API: ' + err.slice(0, 300) });
     }
 
     const data = await response.json();
     const text = (data.content || []).map(b => b.text || '').join('');
     const clean = text.replace(/```json|```/g, '').trim();
-
     let parsed;
     try { parsed = JSON.parse(clean); } catch(e) {
       return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' });
     }
-
     if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
 
-    const itens = (parsed.itens || []).map(item => {
+    const itens = [];
+    for (const item of (parsed.itens || [])) {
       const qNorm = normalizeSearch(item.nome);
-      // Primeiro tenta sinônimo exato
-      const sinonimo = db.prepare(`SELECT produto_nome FROM sinonimos WHERE termo = ?`).get(qNorm);
+
+      // Tenta sinônimo
+      const { data: sinonimo } = await supabase.from('sinonimos').select('produto_nome').eq('termo', qNorm).single();
       let candidatos = [];
       let produtoExato = null;
+
       if (sinonimo) {
-        const p = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome = ? COLLATE NOCASE`).get(sinonimo.produto_nome);
+        const { data: p } = await supabase.from('produtos')
+          .select('id, nome, categoria, unidade, qtd, minimo, custo')
+          .ilike('nome', sinonimo.produto_nome).single();
         if (p) { produtoExato = p; candidatos = [p]; }
       }
+
       if (!produtoExato) {
-        // Busca por palavras individuais — resolve nomes compostos fora de ordem
-        // Ex: "PEITO FRANGO KG" → encontra "Frango Peito"
         const palavras = qNorm.split(/\s+/).filter(p => p.length > 2);
         if (palavras.length > 1) {
           const scoreMap = new Map();
           for (const palavra of palavras) {
-            const matches = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 10`).all(`%${palavra}%`);
-            for (const m of matches) {
+            const { data: matches } = await supabase.from('produtos')
+              .select('id, nome, categoria, unidade, qtd, minimo, custo')
+              .ilike('nome_search', `%${palavra}%`).order('nome').limit(10);
+            for (const m of (matches || [])) {
               const entry = scoreMap.get(m.id) || { produto: m, score: 0 };
               entry.score++;
               scoreMap.set(m.id, entry);
@@ -760,32 +620,25 @@ Se não conseguir ler: {"itens":[],"erro":"descrição do problema"}`
           }
           if (scoreMap.size > 0) {
             candidatos = Array.from(scoreMap.values())
-              .sort((a, b) => b.score - a.score)
-              .slice(0, 3)
-              .map(r => r.produto);
+              .sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
           }
         }
-        // Fallback: busca o string completo normalizado
         if (!candidatos.length) {
-          candidatos = db.prepare(`SELECT id, nome, categoria, unidade, qtd, minimo, custo FROM produtos WHERE nome_search LIKE ? ORDER BY nome LIMIT 3`).all(`%${qNorm}%`);
+          const { data: fallback } = await supabase.from('produtos')
+            .select('id, nome, categoria, unidade, qtd, minimo, custo')
+            .ilike('nome_search', `%${qNorm}%`).order('nome').limit(3);
+          candidatos = fallback || [];
         }
       }
-      return {
-        nome_cupom: item.nome,
-        qtd: Number(item.qtd) || 1,
-        unidade_cupom: item.unidade || 'UN',
-        candidatos,
-        produto: candidatos[0] || null,
-        via_sinonimo: !!produtoExato
-      };
-    });
 
-    db.prepare(`
-      INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at)
-      VALUES (?, ?, ?, 'ler_cupom', ?, ?, datetime('now','localtime'))
-    `).run(req.user.id, req.user.nome, req.user.role,
-      JSON.stringify({ total_itens: itens.length }), sanitizeText(req.ip, 80));
+      itens.push({
+        nome_cupom: item.nome, qtd: Number(item.qtd) || 1,
+        unidade_cupom: item.unidade || 'UN', candidatos,
+        produto: candidatos[0] || null, via_sinonimo: !!produtoExato,
+      });
+    }
 
+    await audit('ler_cupom', { total_itens: itens.length }, req.user, req.ip);
     res.json({ itens });
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
@@ -802,19 +655,47 @@ app.post('/api/chat', auth, async (req, res) => {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'API não configurada.' });
 
-  const totalProd = db.prepare('SELECT COUNT(*) as n FROM produtos').get().n;
-  const zerados = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd = 0').get().n;
-  const criticos = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5').get().n;
-  const atencao = db.prepare('SELECT COUNT(*) as n FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo').get().n;
-  const valorTotal = db.prepare('SELECT SUM(qtd * custo) as v FROM produtos').get().v || 0;
+  const { data: allProd } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
+  const all = allProd || [];
+  const totalProd = all.length;
+  const zerados = all.filter(p => Number(p.qtd) === 0).length;
+  const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
+  const atencao_count = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+  const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
+  const prodZerados = all.filter(p => Number(p.qtd) === 0).slice(0, 50);
+  const prodCriticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).slice(0, 50);
+  const prodAtencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).slice(0, 30);
+
   const hojeSP = nowSP().slice(0, 10);
-  const lancHoje = db.prepare(`SELECT COUNT(*) as n FROM movimentacoes WHERE substr(created_at,1,10)=?`).get(hojeSP).n;
-  const prodZerados = db.prepare(`SELECT nome, categoria FROM produtos WHERE qtd = 0 ORDER BY categoria, nome LIMIT 50`).all();
-  const prodCriticos = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > 0 AND qtd <= minimo * 0.5 ORDER BY categoria LIMIT 50`).all();
-  const prodAtencao = db.prepare(`SELECT nome, categoria, qtd, minimo, unidade FROM produtos WHERE qtd > minimo * 0.5 AND qtd < minimo ORDER BY categoria LIMIT 30`).all();
-  const ultimosMov = db.prepare(`SELECT produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at FROM movimentacoes ORDER BY id DESC LIMIT 15`).all();
-  const maisConsumidos = db.prepare(`SELECT produto_nome, SUM(qtd) as total, unidade FROM movimentacoes WHERE tipo IN ('Saída','Perda') AND substr(created_at,1,10) >= date(?) GROUP BY produto_nome ORDER BY total DESC LIMIT 10`).all(new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10));
-  const cats = db.prepare(`SELECT categoria, COUNT(*) as n, SUM(qtd*custo) as valor FROM produtos GROUP BY categoria ORDER BY valor DESC`).all();
+  const { count: lancHoje } = await supabase
+    .from('movimentacoes').select('id', { count: 'exact', head: true })
+    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+
+  const { data: ultimosMov } = await supabase
+    .from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at')
+    .order('id', { ascending: false }).limit(15);
+
+  const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+  const { data: movConsumo } = await supabase
+    .from('movimentacoes').select('produto_nome, qtd, unidade')
+    .in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
+
+  const consumoMap = {};
+  for (const m of (movConsumo || [])) {
+    const key = m.produto_nome;
+    if (!consumoMap[key]) consumoMap[key] = { total: 0, unidade: m.unidade };
+    consumoMap[key].total += Number(m.qtd);
+  }
+  const maisConsumidos = Object.entries(consumoMap)
+    .sort((a, b) => b[1].total - a[1].total).slice(0, 10);
+
+  const catMap = {};
+  for (const p of all) {
+    if (!catMap[p.categoria]) catMap[p.categoria] = { n: 0, valor: 0 };
+    catMap[p.categoria].n++;
+    catMap[p.categoria].valor += Number(p.qtd) * Number(p.custo);
+  }
+  const cats = Object.entries(catMap).sort((a, b) => b[1].valor - a[1].valor);
 
   const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.
 Responda SEMPRE em português brasileiro. Seja direto e preciso.
@@ -830,9 +711,9 @@ RESUMO DO ESTOQUE:
 - Total de produtos cadastrados: ${totalProd}
 - Zerados (qtd = 0): ${zerados} produtos
 - Críticos (qtd ≤ 50% do mínimo): ${criticos} produtos
-- Atenção (qtd entre 50% e 100% do mínimo): ${atencao} produtos
+- Atenção (qtd entre 50% e 100% do mínimo): ${atencao_count} produtos
 - Valor total em estoque: R$ ${Number(valorTotal).toFixed(2)}
-- Lançamentos hoje: ${lancHoje}
+- Lançamentos hoje: ${lancHoje || 0}
 
 === PRODUTOS ZERADOS — qtd = 0 (${prodZerados.length} total) ===
 ${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum produto zerado.'}
@@ -844,13 +725,13 @@ ${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${
 ${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}
 
 === MAIS CONSUMIDOS (últimos 30 dias) ===
-${maisConsumidos.map(p => `• ${p.produto_nome}: ${Number(p.total).toFixed(2)} ${p.unidade}`).join('\n') || 'Sem dados suficientes.'}
+${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados suficientes.'}
 
 === ÚLTIMAS MOVIMENTAÇÕES ===
-${ultimosMov.map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}
+${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}
 
 === ESTOQUE POR CATEGORIA ===
-${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).toFixed(2)}`).join('\n')}`;
+${cats.map(([cat, d]) => `• ${cat}: ${d.n} produtos, R$ ${d.valor.toFixed(2)}`).join('\n')}`;
 
   try {
     const messages = [
@@ -864,26 +745,24 @@ ${cats.map(c => `• ${c.categoria}: ${c.n} produtos, R$ ${Number(c.valor||0).to
     });
     if (!response.ok) {
       const errText = await response.text();
-      console.error('Chat API error:', errText);
       return res.status(502).json({ erro: 'Erro na API: ' + errText.slice(0, 200) });
     }
     const data = await response.json();
     const resposta = (data.content||[]).map(b => b.text||'').join('').trim();
-    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'chat_ia',?,?,datetime('now','localtime'))`).run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ pergunta: pergunta.slice(0,100) }), sanitizeText(req.ip, 80));
+    await audit('chat_ia', { pergunta: pergunta.slice(0,100) }, req.user, req.ip);
     res.json({ resposta });
   } catch(e) {
-    console.error('Erro chat:', e.message);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
 });
 
 // ==================== GERENCIAR USUÁRIOS (admin) ====================
-app.get('/api/users', auth, requireRole('admin'), (req, res) => {
-  const users = db.prepare(`SELECT id, username, nome, role, active, created_at FROM users ORDER BY role, nome`).all();
-  res.json(users);
+app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
+  const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at').order('role').order('nome');
+  res.json(data || []);
 });
 
-app.post('/api/users', auth, requireRole('admin'), (req, res) => {
+app.post('/api/users', auth, requireRole('admin'), async (req, res) => {
   const username = sanitizeText(req.body?.username, 40).toLowerCase();
   const nome = sanitizeText(req.body?.nome, 60);
   const role = sanitizeText(req.body?.role, 20);
@@ -891,19 +770,19 @@ app.post('/api/users', auth, requireRole('admin'), (req, res) => {
   if (!username || !nome || !password) return res.status(400).json({ erro: 'Preencha todos os campos.' });
   if (!['admin','gerente','operador'].includes(role)) return res.status(400).json({ erro: 'Perfil inválido.' });
   if (password.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
-  try {
-    db.prepare(`INSERT INTO users (username, nome, role, password_hash, active) VALUES (?,?,?,?,1)`)
-      .run(username, nome, role, hashPassword(password));
-    db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'criar_usuario',?,?,datetime('now','localtime'))`)
-      .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ novo: username, role }), sanitizeText(req.ip, 80));
-    res.json({ ok: true });
-  } catch(e) {
-    if (e.message.includes('UNIQUE')) return res.status(400).json({ erro: 'Usuário já existe.' });
-    res.status(500).json({ erro: 'Erro ao criar usuário.' });
+
+  const { error } = await supabase.from('users').insert({
+    username, nome, role, password_hash: hashPassword(password), active: 1,
+  });
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ erro: 'Usuário já existe.' });
+    return res.status(500).json({ erro: 'Erro ao criar usuário.' });
   }
+  await audit('criar_usuario', { novo: username, role }, req.user, req.ip);
+  res.json({ ok: true });
 });
 
-app.put('/api/users/:id', auth, requireRole('admin'), (req, res) => {
+app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
   const { id } = req.params;
   const active = req.body?.active !== undefined ? (req.body.active ? 1 : 0) : null;
   const nova_senha = String(req.body?.nova_senha || '');
@@ -911,161 +790,383 @@ app.put('/api/users/:id', auth, requireRole('admin'), (req, res) => {
 
   if (Number(id) === req.user.id && active === 0) return res.status(400).json({ erro: 'Você não pode desativar sua própria conta.' });
 
-  if (active !== null) {
-    db.prepare(`UPDATE users SET active=?, updated_at=datetime('now','localtime') WHERE id=?`).run(active, id);
-  }
-  if (role && ['admin','gerente','operador'].includes(role)) {
-    db.prepare(`UPDATE users SET role=?, updated_at=datetime('now','localtime') WHERE id=?`).run(role, id);
-  }
+  const updates = {};
+  if (active !== null) updates.active = active;
+  if (role && ['admin','gerente','operador'].includes(role)) updates.role = role;
   if (nova_senha) {
     if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
-    db.prepare(`UPDATE users SET password_hash=?, updated_at=datetime('now','localtime') WHERE id=?`).run(hashPassword(nova_senha), id);
+    updates.password_hash = hashPassword(nova_senha);
   }
-  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'editar_usuario',?,?,datetime('now','localtime'))`)
-    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ id, active, role }), sanitizeText(req.ip, 80));
+
+  if (Object.keys(updates).length > 0) {
+    await supabase.from('users').update(updates).eq('id', id);
+  }
+  await audit('editar_usuario', { id, active, role }, req.user, req.ip);
   res.json({ ok: true });
 });
 
 // ==================== SINÔNIMOS ====================
-app.get('/api/sinonimos', auth, (req, res) => {
-  res.json(db.prepare(`SELECT * FROM sinonimos ORDER BY termo`).all());
+app.get('/api/sinonimos', auth, async (req, res) => {
+  const { data } = await supabase.from('sinonimos').select('*').order('termo');
+  res.json(data || []);
 });
 
-app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), (req, res) => {
+app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const termo = sanitizeText(req.body?.termo, 120);
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   if (!termo || !produto_nome) return res.status(400).json({ erro: 'Termo e produto são obrigatórios.' });
-  const prod = db.prepare(`SELECT nome FROM produtos WHERE nome = ? COLLATE NOCASE`).get(produto_nome);
+  const { data: prod } = await supabase.from('produtos').select('nome').ilike('nome', produto_nome).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
-  try {
-    db.prepare(`INSERT INTO sinonimos (termo, produto_nome) VALUES (?,?) ON CONFLICT(termo) DO UPDATE SET produto_nome=excluded.produto_nome`)
-      .run(normalizeSearch(termo), prod.nome);
-    res.json({ ok: true });
-  } catch(e) {
-    res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
-  }
-});
 
-app.post('/api/sinonimos/importar', auth, requireRole('admin'), (req, res) => {
-  const lista = req.body?.lista;
-  if (!Array.isArray(lista) || !lista.length) return res.status(400).json({ erro: 'Lista inválida.' });
-  let ok = 0, erros = [];
-  const upsert = db.prepare(`INSERT OR REPLACE INTO sinonimos (termo, produto_nome) VALUES (?,?)`);
-  const tx = db.transaction(() => {
-    for (const s of lista) {
-      try {
-        const termo = normalizeSearch(String(s.termo || ''));
-        const prod = db.prepare(`SELECT nome FROM produtos WHERE nome = ? COLLATE NOCASE`).get(s.produto_nome);
-        if (!termo || !prod) { erros.push(s.termo); continue; }
-        upsert.run(termo, prod.nome); ok++;
-      } catch(e) { erros.push(s.termo); }
-    }
-  });
-  tx();
-  res.json({ ok, erros });
-});
-
-app.delete('/api/sinonimos/:id', auth, requireRole('admin', 'gerente'), (req, res) => {
-  db.prepare(`DELETE FROM sinonimos WHERE id=?`).run(req.params.id);
+  const { error } = await supabase.from('sinonimos').upsert(
+    { termo: normalizeSearch(termo), produto_nome: prod.nome },
+    { onConflict: 'termo' }
+  );
+  if (error) return res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
   res.json({ ok: true });
 });
 
-// Rota de manutenção - forçar atualização do nome_search
-app.get('/api/manutencao/normalizar', auth, requireRole('admin'), (req, res) => {
-  const todos = db.prepare(`SELECT id, nome FROM produtos`).all();
-  const update = db.prepare(`UPDATE produtos SET nome_search = ? WHERE id = ?`);
-  const tx = db.transaction(() => {
-    for (const p of todos) update.run(normalizeSearch(p.nome), p.id);
-  });
-  tx();
-  console.log(`✅ nome_search atualizado para ${todos.length} produtos`);
-  res.json({ ok: true, total: todos.length, msg: `${todos.length} produtos normalizados!` });
+app.post('/api/sinonimos/importar', auth, requireRole('admin'), async (req, res) => {
+  const lista = req.body?.lista;
+  if (!Array.isArray(lista) || !lista.length) return res.status(400).json({ erro: 'Lista inválida.' });
+  let ok = 0, erros = [];
+
+  for (const s of lista) {
+    try {
+      const termo = normalizeSearch(String(s.termo || ''));
+      const { data: prod } = await supabase.from('produtos').select('nome').ilike('nome', s.produto_nome).single();
+      if (!termo || !prod) { erros.push(s.termo); continue; }
+      await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: 'termo' });
+      ok++;
+    } catch(e) { erros.push(s.termo); }
+  }
+  res.json({ ok, erros });
+});
+
+app.delete('/api/sinonimos/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  await supabase.from('sinonimos').delete().eq('id', req.params.id);
+  res.json({ ok: true });
+});
+
+// Manutenção - normalizar
+app.get('/api/manutencao/normalizar', auth, requireRole('admin'), async (req, res) => {
+  const { data: todos } = await supabase.from('produtos').select('id, nome');
+  for (const p of (todos || [])) {
+    await supabase.from('produtos').update({ nome_search: normalizeSearch(p.nome) }).eq('id', p.id);
+  }
+  console.log(`✅ nome_search atualizado para ${(todos||[]).length} produtos`);
+  res.json({ ok: true, total: (todos||[]).length, msg: `${(todos||[]).length} produtos normalizados!` });
 });
 
 // ==================== AUDITORIA DE DIVERGÊNCIAS ====================
-app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), (req, res) => {
+app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const dataInicio = req.query?.data_inicio || new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
-  const dataFim    = req.query?.data_fim    || nowSP().slice(0,10);
-  const categoria  = sanitizeText(req.query?.categoria || '', 80);
+  const dataFim = req.query?.data_fim || nowSP().slice(0,10);
+  const categoria = sanitizeText(req.query?.categoria || '', 80);
 
-  let catFilter = '';
-  const catParams = [];
-  if (categoria) {
-    catFilter = ' AND categoria = ?';
-    catParams.push(categoria);
+  let movQuery = supabase.from('movimentacoes').select('*')
+    .gte('created_at', dataInicio).lte('created_at', dataFim + 'T23:59:59');
+  if (categoria) movQuery = movQuery.eq('categoria', categoria);
+  const { data: allMovs } = await movQuery;
+
+  // Agrupa no JS (equivalente ao GROUP BY da versão SQLite)
+  const groups = {};
+  for (const m of (allMovs || [])) {
+    const key = m.produto_nome;
+    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade,
+      total_entrada: 0, total_saida: 0, total_perda: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
+    const g = groups[key];
+    if (m.tipo === 'Entrada') { g.total_entrada += Number(m.qtd); g.valor_entrada += Number(m.valor || 0); g.num_entradas++; }
+    if (['Saída','Perda'].includes(m.tipo)) { g.total_saida += Number(m.qtd); g.valor_saida += Number(m.valor || 0); g.num_saidas++; }
+    if (m.tipo === 'Perda') g.total_perda += Number(m.qtd);
   }
 
-  // Entradas, saídas e perdas por produto no período
-  const rows = db.prepare(`
-    SELECT
-      produto_nome,
-      categoria,
-      unidade,
-      SUM(CASE WHEN tipo = 'Entrada' THEN qtd ELSE 0 END) as total_entrada,
-      SUM(CASE WHEN tipo IN ('Saída','Perda') THEN qtd ELSE 0 END) as total_saida,
-      SUM(CASE WHEN tipo = 'Perda' THEN qtd ELSE 0 END) as total_perda,
-      SUM(CASE WHEN tipo = 'Entrada' THEN valor ELSE 0 END) as valor_entrada,
-      SUM(CASE WHEN tipo IN ('Saída','Perda') THEN valor ELSE 0 END) as valor_saida,
-      COUNT(CASE WHEN tipo = 'Saída' THEN 1 END) as num_saidas,
-      COUNT(CASE WHEN tipo = 'Entrada' THEN 1 END) as num_entradas
-    FROM movimentacoes
-    WHERE substr(created_at,1,10) >= ? AND substr(created_at,1,10) <= ?
-    ${catFilter}
-    GROUP BY produto_nome, categoria, unidade
-    HAVING total_entrada > 0 OR total_saida > 0
-    ORDER BY categoria, produto_nome
-  `).all(dataInicio, dataFim, ...catParams);
-
-  // Estoque atual de cada produto
-  const produtos = db.prepare('SELECT nome, qtd, minimo FROM produtos').all();
+  const { data: produtos } = await supabase.from('produtos').select('nome, qtd, minimo');
   const estoqueMap = {};
-  for (const p of produtos) estoqueMap[p.nome] = { qtd: p.qtd, minimo: p.minimo };
+  for (const p of (produtos || [])) estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) };
 
-  const resultado = rows.map(r => {
-    const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
-    const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
-    // Flag divergência: saída > 150% da entrada (sem estoque inicial conhecido é heurística)
-    const alerta = r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5;
-    // Flag saída sem entrada no período (possível lançamento errado)
-    const semEntrada = r.total_saida > 0 && r.total_entrada === 0;
-    return {
-      produto_nome: r.produto_nome,
-      categoria: r.categoria,
-      unidade: r.unidade,
-      total_entrada: Number(r.total_entrada.toFixed(3)),
-      total_saida: Number(r.total_saida.toFixed(3)),
-      total_perda: Number(r.total_perda.toFixed(3)),
-      valor_entrada: Number((r.valor_entrada||0).toFixed(2)),
-      valor_saida: Number((r.valor_saida||0).toFixed(2)),
-      num_entradas: r.num_entradas,
-      num_saidas: r.num_saidas,
-      saldo,
-      qtd_atual: qtdAtual,
-      alerta,
-      sem_entrada: semEntrada,
-    };
-  });
+  const resultado = Object.values(groups)
+    .filter(g => g.total_entrada > 0 || g.total_saida > 0)
+    .map(r => {
+      const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
+      const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
+      const alerta = r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5;
+      const semEntrada = r.total_saida > 0 && r.total_entrada === 0;
+      return { ...r,
+        total_entrada: Number(r.total_entrada.toFixed(3)), total_saida: Number(r.total_saida.toFixed(3)),
+        total_perda: Number(r.total_perda.toFixed(3)),
+        valor_entrada: Number(r.valor_entrada.toFixed(2)), valor_saida: Number(r.valor_saida.toFixed(2)),
+        saldo, qtd_atual: qtdAtual, alerta, sem_entrada: semEntrada,
+      };
+    })
+    .sort((a, b) => (a.categoria + a.produto_nome).localeCompare(b.categoria + b.produto_nome));
 
-  // Detalhes de saídas por produto (para drill-down)
-  const detalhesSaidas = db.prepare(`
-    SELECT produto_nome, tipo, qtd, unidade, motivo, responsavel, obs, created_at
-    FROM movimentacoes
-    WHERE tipo IN ('Saída','Perda')
-      AND substr(created_at,1,10) >= ?
-      AND substr(created_at,1,10) <= ?
-    ORDER BY produto_nome, created_at DESC
-  `).all(dataInicio, dataFim);
+  const detalhesSaidas = (allMovs || [])
+    .filter(m => ['Saída','Perda'].includes(m.tipo))
+    .map(m => ({ produto_nome: m.produto_nome, tipo: m.tipo, qtd: m.qtd, unidade: m.unidade, motivo: m.motivo, responsavel: m.responsavel, obs: m.obs, created_at: m.created_at }))
+    .sort((a, b) => (a.produto_nome + b.created_at).localeCompare(b.produto_nome + a.created_at));
 
-  db.prepare(`INSERT INTO audit_logs (usuario_id, usuario_nome, role, acao, detalhes, ip, created_at) VALUES (?,?,?,'auditoria_divergencias',?,?,datetime('now','localtime'))`)
-    .run(req.user.id, req.user.nome, req.user.role, JSON.stringify({ dataInicio, dataFim, categoria }), sanitizeText(req.ip, 80));
-
+  await audit('auditoria_divergencias', { dataInicio, dataFim, categoria }, req.user, req.ip);
   res.json({ resultado, detalhesSaidas, dataInicio, dataFim });
+});
+
+// ==================== BACKUP AUTOMÁTICO DIÁRIO ====================
+// Snapshot do estoque salvo no Supabase todo dia às 18h (configurável)
+
+async function criarBackupEstoque(motivo = 'automatico') {
+  const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo, ativo');
+  if (!produtos || !produtos.length) return null;
+
+  const snapshot = {
+    data_backup: nowSP(),
+    motivo,
+    total_produtos: produtos.length,
+    valor_total: produtos.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0),
+    zerados: produtos.filter(p => Number(p.qtd) === 0).length,
+    criticos: produtos.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length,
+    dados: JSON.stringify(produtos),
+  };
+
+  const { data, error } = await supabase.from('backups_estoque').insert(snapshot).select('id, data_backup').single();
+  if (error) { console.error('❌ Erro no backup:', error.message); return null; }
+  console.log(`✅ Backup #${data.id} criado em ${data.data_backup} (${motivo})`);
+  return data;
+}
+
+// Cron simples: verifica a cada minuto se é 18:00
+let ultimoBackupDia = '';
+setInterval(async () => {
+  const agora = nowSP();
+  const hora = agora.slice(11, 16); // HH:MM
+  const dia = agora.slice(0, 10);
+  const HORA_BACKUP = process.env.HORA_BACKUP || '18:00';
+  if (hora === HORA_BACKUP && dia !== ultimoBackupDia) {
+    ultimoBackupDia = dia;
+    await criarBackupEstoque('automatico_18h');
+  }
+}, 60 * 1000);
+
+// API: criar backup manual
+app.post('/api/backup', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const motivo = sanitizeText(req.body?.motivo || 'manual', 100);
+  const backup = await criarBackupEstoque(motivo);
+  if (!backup) return res.status(500).json({ erro: 'Erro ao criar backup.' });
+  await audit('backup_manual', { backup_id: backup.id, motivo }, req.user, req.ip);
+  res.json({ ok: true, backup });
+});
+
+// API: listar backups
+app.get('/api/backups', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const { data } = await supabase
+    .from('backups_estoque')
+    .select('id, data_backup, motivo, total_produtos, valor_total, zerados, criticos')
+    .order('id', { ascending: false })
+    .limit(30);
+  res.json(data || []);
+});
+
+// API: restaurar backup
+app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, res) => {
+  const senhaAdmin = String(req.body?.senha_admin || '');
+  const { data: userDb } = await supabase.from('users').select('*').eq('id', req.user.id).single();
+  if (!verifyPassword(senhaAdmin, userDb.password_hash)) return res.status(401).json({ erro: 'Senha incorreta.' });
+
+  const { data: backup } = await supabase.from('backups_estoque').select('*').eq('id', req.params.id).single();
+  if (!backup) return res.status(404).json({ erro: 'Backup não encontrado.' });
+
+  // Salvar snapshot antes de restaurar (segurança)
+  await criarBackupEstoque('pre_restauracao');
+
+  const produtos = JSON.parse(backup.dados);
+  let restaurados = 0;
+  for (const p of produtos) {
+    const { error } = await supabase.from('produtos')
+      .update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo, ativo: p.ativo })
+      .eq('id', p.id);
+    if (!error) restaurados++;
+  }
+
+  await audit('restaurar_backup', { backup_id: backup.id, data_backup: backup.data_backup, restaurados }, req.user, req.ip);
+  res.json({ ok: true, restaurados, data_backup: backup.data_backup });
+});
+
+// ==================== WEBHOOK WHATSAPP (n8n / Evolution API) ====================
+// Endpoint que o n8n chama para consultar/operar estoque via WhatsApp
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'toca-webhook-2026';
+
+app.post('/api/webhook/whatsapp', async (req, res) => {
+  // Validação por secret (configurar no n8n)
+  const secret = req.headers['x-webhook-secret'] || req.body?.secret;
+  if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
+
+  const acao = sanitizeText(req.body?.acao, 40);
+  const produto_nome = sanitizeText(req.body?.produto, 120);
+  const remetente = sanitizeText(req.body?.remetente, 40);
+
+  // AÇÃO: consultar — "quanto tem de frango?"
+  if (acao === 'consultar') {
+    if (!produto_nome) return res.json({ resposta: 'Me diz o nome do produto que quer consultar.' });
+    const qNorm = normalizeSearch(produto_nome);
+    const { data: resultados } = await supabase
+      .from('produtos').select('nome, categoria, qtd, unidade, minimo, custo')
+      .ilike('nome_search', `%${qNorm}%`)
+      .or('ativo.eq.1,ativo.is.null')
+      .order('nome').limit(5);
+
+    if (!resultados || resultados.length === 0) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+
+    const linhas = resultados.map(p => {
+      const status = Number(p.qtd) === 0 ? '🔴 ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? '🟠 CRÍTICO' : Number(p.qtd) < Number(p.minimo) ? '🟡 ATENÇÃO' : '🟢 OK';
+      return `📦 *${p.nome}*\n   ${p.qtd} ${p.unidade} (mín: ${p.minimo}) ${status}\n   Custo: R$${Number(p.custo).toFixed(2)}`;
+    });
+    return res.json({ resposta: linhas.join('\n\n') });
+  }
+
+  // AÇÃO: resumo — relatório rápido do estoque
+  if (acao === 'resumo') {
+    const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
+    const prods = all || [];
+    const zerados = prods.filter(p => Number(p.qtd) === 0).length;
+    const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
+    const atencao = prods.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+    const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
+
+    const hojeSP = nowSP().slice(0, 10);
+    const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
+      .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+
+    return res.json({
+      resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n` +
+        `📦 Total: ${prods.length} produtos\n` +
+        `🔴 Zerados: ${zerados}\n🟠 Críticos: ${criticos}\n🟡 Atenção: ${atencao}\n` +
+        `💰 Valor total: R$ ${valor.toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje || 0}`
+    });
+  }
+
+  // AÇÃO: zerados — lista produtos zerados
+  if (acao === 'zerados') {
+    const { data } = await supabase.from('produtos').select('nome, categoria').eq('qtd', 0).or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    if (!data || data.length === 0) return res.json({ resposta: '✅ Nenhum produto zerado!' });
+    const txt = (data || []).map(p => `• ${p.nome} (${p.categoria})`).join('\n');
+    return res.json({ resposta: `🔴 *PRODUTOS ZERADOS (${data.length})*\n\n${txt}` });
+  }
+
+  // AÇÃO: criticos — lista produtos críticos
+  if (acao === 'criticos') {
+    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade')
+      .gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
+    const crit = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
+    if (crit.length === 0) return res.json({ resposta: '✅ Nenhum produto em nível crítico!' });
+    const txt = crit.map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n');
+    return res.json({ resposta: `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${txt}` });
+  }
+
+  // AÇÃO: entrada — lançar entrada via WhatsApp
+  if (acao === 'entrada' || acao === 'saida') {
+    const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
+    const qtd = parsePositiveNumber(req.body?.qtd);
+    if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie:\nproduto, quantidade\nEx: "Filé de Frango, 5"` });
+
+    const { data: prod } = await supabase.from('produtos').select('*').ilike('nome_search', `%${normalizeSearch(produto_nome)}%`).single();
+    if (!prod) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+
+    let novaQtd = Number(prod.qtd);
+    if (tipo === 'Entrada') { novaQtd = Number((novaQtd + qtd).toFixed(3)); }
+    else {
+      if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prod.nome}. Disponível: ${prod.qtd} ${prod.unidade}` });
+      novaQtd = Number((novaQtd - qtd).toFixed(3));
+    }
+
+    await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
+    await supabase.from('movimentacoes').insert({
+      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+      tipo, qtd, unidade: prod.unidade, custo: prod.custo,
+      valor: Number((Number(prod.custo) * qtd).toFixed(2)),
+      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção',
+      responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp',
+      created_at: nowSP(),
+    });
+
+    await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, remetente }, null, '');
+    return res.json({
+      resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}`
+    });
+  }
+
+  // AÇÃO: compras — lista de compras sugerida
+  if (acao === 'compras') {
+    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade')
+      .or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    const lista = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
+    if (lista.length === 0) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' });
+    const txt = lista.map(p => {
+      const comprar = Math.max(0, Number(p.minimo) * 2 - Number(p.qtd)).toFixed(1);
+      return `• ${p.nome}: tem ${p.qtd}, comprar ~${comprar} ${p.unidade}`;
+    }).join('\n');
+    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${txt}` });
+  }
+
+  // Ação não reconhecida — ajuda
+  res.json({
+    resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos disponíveis:\n` +
+      `📦 *consultar* [produto] — ver estoque\n` +
+      `📊 *resumo* — painel geral\n` +
+      `🔴 *zerados* — produtos em falta\n` +
+      `🟠 *criticos* — itens críticos\n` +
+      `🛒 *compras* — lista de compras\n` +
+      `➕ *entrada* [produto] [qtd] — registrar entrada\n` +
+      `➖ *saida* [produto] [qtd] — registrar saída`
+  });
+});
+
+// Endpoint para relatório diário (chamado pelo n8n via cron)
+app.get('/api/webhook/relatorio-diario', async (req, res) => {
+  const secret = req.headers['x-webhook-secret'] || req.query?.secret;
+  if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
+
+  const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
+  const prods = all || [];
+  const zerados = prods.filter(p => Number(p.qtd) === 0);
+  const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+  const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
+
+  const hojeSP = nowSP().slice(0, 10);
+  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
+    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+
+  let msg = `📊 *RELATÓRIO DIÁRIO — ${hojeSP}*\n🐰 Toca do Coelho\n\n`;
+  msg += `📦 ${prods.length} produtos | 💰 R$ ${valor.toFixed(2)}\n`;
+  msg += `📋 ${lancHoje || 0} lançamentos hoje\n\n`;
+
+  if (zerados.length > 0) {
+    msg += `🔴 *ZERADOS (${zerados.length})*\n`;
+    msg += zerados.slice(0, 15).map(p => `• ${p.nome}`).join('\n');
+    if (zerados.length > 15) msg += `\n... e mais ${zerados.length - 15}`;
+    msg += '\n\n';
+  }
+
+  if (criticos.length > 0) {
+    msg += `🟠 *CRÍTICOS (${criticos.length})*\n`;
+    msg += criticos.slice(0, 10).map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n');
+    msg += '\n\n';
+  }
+
+  msg += `_Backup automático às 18h ✅_`;
+
+  res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
 
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`🐰 Toca do Coelho — Estoque rodando em http://localhost:${PORT}`);
+// ==================== START ====================
+seed().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🐰 Toca do Coelho — Estoque (Supabase) rodando em http://localhost:${PORT}`);
+    console.log(`⏰ Backup automático configurado para ${process.env.HORA_BACKUP || '18:00'}`);
+  });
+}).catch(err => {
+  console.error('❌ Erro ao inicializar:', err.message);
+  process.exit(1);
 });
