@@ -26,16 +26,13 @@ app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ==================== HELPERS ====================
-function nowIso() {
-  return new Date().toISOString();
-}
+function nowIso() { return new Date().toISOString(); }
 
 function nowSP() {
   const partes = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'America/Sao_Paulo',
     year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
   }).formatToParts(new Date());
   const get = (type) => partes.find(p => p.type === type)?.value || '';
   return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
@@ -78,21 +75,80 @@ function getClientIp(req) {
   return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
 }
 
-// ==================== SESSÕES (Supabase) ====================
+// ==================== SESSÕES ====================
+// Usa Supabase se a tabela 'sessions' existir, caso contrário usa memória.
+// Para ativar persistência: crie a tabela no dashboard Supabase:
+//   CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id INTEGER, username TEXT,
+//     nome TEXT, role TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
+//     last_activity TIMESTAMPTZ DEFAULT NOW());
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const memSessions = new Map();
+let useSupabaseSessions = false;
+
+async function initSessionsBackend() {
+  const { error } = await supabase.from('sessions').select('token').limit(1);
+  if (!error) {
+    useSupabaseSessions = true;
+    console.log('💾 Sessões persistidas no Supabase.');
+  } else {
+    useSupabaseSessions = false;
+    console.log('⚠️  Tabela sessions não encontrada — usando memória. Crie a tabela para persistência.');
+  }
+}
 
 async function createSession(user) {
   const token = crypto.randomBytes(24).toString('hex');
-  await supabase.from('sessions').insert({
-    token, user_id: user.id, username: user.username, nome: user.nome,
-    role: user.role, last_activity: new Date().toISOString(),
-  });
+  if (useSupabaseSessions) {
+    await supabase.from('sessions').insert({
+      token, user_id: user.id, username: user.username, nome: user.nome,
+      role: user.role, last_activity: new Date().toISOString(),
+    });
+  } else {
+    memSessions.set(token, {
+      user_id: user.id, username: user.username, nome: user.nome,
+      role: user.role, last_activity: Date.now(),
+    });
+  }
   return token;
 }
 
+async function getSession(token) {
+  if (useSupabaseSessions) {
+    const { data } = await supabase.from('sessions').select('*').eq('token', token).single();
+    return data;
+  }
+  const s = memSessions.get(token);
+  if (!s) return null;
+  return { ...s, last_activity: new Date(s.last_activity).toISOString() };
+}
+
+async function touchSession(token) {
+  if (useSupabaseSessions) {
+    await supabase.from('sessions').update({ last_activity: new Date().toISOString() }).eq('token', token);
+  } else {
+    const s = memSessions.get(token);
+    if (s) s.last_activity = Date.now();
+  }
+}
+
+async function deleteSession(token) {
+  if (useSupabaseSessions) {
+    await supabase.from('sessions').delete().eq('token', token);
+  } else {
+    memSessions.delete(token);
+  }
+}
+
 setInterval(async () => {
-  const cutoff = new Date(Date.now() - IDLE_TIMEOUT_MS).toISOString();
-  await supabase.from('sessions').delete().lt('last_activity', cutoff);
+  if (useSupabaseSessions) {
+    const cutoff = new Date(Date.now() - IDLE_TIMEOUT_MS).toISOString();
+    await supabase.from('sessions').delete().lt('last_activity', cutoff);
+  } else {
+    const now = Date.now();
+    for (const [token, s] of memSessions.entries()) {
+      if (now - s.last_activity > IDLE_TIMEOUT_MS) memSessions.delete(token);
+    }
+  }
 }, 60 * 1000);
 
 function getToken(req) {
@@ -118,23 +174,23 @@ async function auth(req, res, next) {
   const token = getToken(req);
   if (!token) return res.status(401).json({ erro: 'Sessão expirada. Faça login novamente.' });
 
-  const { data: session } = await supabase.from('sessions').select('*').eq('token', token).single();
+  const session = await getSession(token);
   if (!session) return res.status(401).json({ erro: 'Sessão expirada. Faça login novamente.' });
 
   const idleMs = Date.now() - new Date(session.last_activity).getTime();
   if (idleMs > IDLE_TIMEOUT_MS) {
-    await supabase.from('sessions').delete().eq('token', token);
+    await deleteSession(token);
     return res.status(401).json({ erro: 'Sessão encerrada por inatividade. Faça login novamente.' });
   }
 
   const { data: user } = await supabase
     .from('users').select('id, username, nome, role, active').eq('id', session.user_id).single();
   if (!user || !user.active) {
-    await supabase.from('sessions').delete().eq('token', token);
+    await deleteSession(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
   }
 
-  await supabase.from('sessions').update({ last_activity: new Date().toISOString() }).eq('token', token);
+  await touchSession(token);
   req.user = user;
   req.token = token;
   next();
@@ -142,14 +198,13 @@ async function auth(req, res, next) {
 
 function requireRole(...roles) {
   return (req, res, next) => {
-    if (!roles.includes(req.user.role)) {
+    if (!roles.includes(req.user.role))
       return res.status(403).json({ erro: 'Você não tem permissão para esta ação.' });
-    }
     next();
   };
 }
 
-// ==================== SEED (primeira execução) ====================
+// ==================== SEED ====================
 async function seed() {
   const { count } = await supabase.from('users').select('id', { count: 'exact', head: true });
   if (count === 0) {
@@ -169,34 +224,25 @@ async function seed() {
     if (fs.existsSync(seedPath)) {
       const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
       for (let i = 0; i < produtos.length; i += 500) {
-        const batch = produtos.slice(i, i + 500).map(p => ({
-          ...p,
-          nome_search: normalizeSearch(p.nome),
-          ativo: 1,
-        }));
+        const batch = produtos.slice(i, i + 500).map(p => ({ ...p, nome_search: normalizeSearch(p.nome), ativo: 1 }));
         await supabase.from('produtos').insert(batch);
       }
       console.log(`✅ ${produtos.length} produtos carregados no Supabase.`);
     }
   }
 
-  const { data: semNorm } = await supabase
-    .from('produtos').select('id, nome')
-    .or('nome_search.is.null,nome_search.eq.');
+  const { data: semNorm } = await supabase.from('produtos').select('id, nome').or('nome_search.is.null,nome_search.eq.');
   if (semNorm && semNorm.length > 0) {
-    for (const p of semNorm) {
+    for (const p of semNorm)
       await supabase.from('produtos').update({ nome_search: normalizeSearch(p.nome) }).eq('id', p.id);
-    }
     console.log(`✅ nome_search populado para ${semNorm.length} produtos`);
   }
 }
 
 // ==================== RATE LIMITERS ====================
 const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
+  windowMs: 15 * 60 * 1000, max: 20,
+  standardHeaders: true, legacyHeaders: false,
   message: { erro: 'Muitas tentativas de login. Aguarde 15 minutos.' },
 });
 
@@ -206,22 +252,17 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   const password = String(req.body?.password || '');
   if (!username || !password) return res.status(400).json({ erro: 'Usuário e senha são obrigatórios.' });
 
-  const { data: user } = await supabase
-    .from('users').select('*').ilike('username', username).eq('active', 1).single();
-  if (!user || !verifyPassword(password, user.password_hash)) {
+  const { data: user } = await supabase.from('users').select('*').ilike('username', username).eq('active', 1).single();
+  if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
-  }
 
   const token = await createSession(user);
   await audit('login', { username: user.username }, user, getClientIp(req));
-  res.json({
-    token,
-    user: { id: user.id, username: user.username, nome: user.nome, role: user.role },
-  });
+  res.json({ token, user: { id: user.id, username: user.username, nome: user.nome, role: user.role } });
 });
 
 app.post('/api/logout', auth, async (req, res) => {
-  await supabase.from('sessions').delete().eq('token', req.token);
+  await deleteSession(req.token);
   await audit('logout', {}, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -260,48 +301,31 @@ app.post('/api/change-password', auth, async (req, res) => {
 app.get('/api/produtos', auth, async (req, res) => {
   const { cat, status, q, arquivados } = req.query;
   let query = supabase.from('produtos').select('*');
-
-  if (arquivados === '1' && req.user.role === 'admin') {
-    query = query.eq('ativo', 0);
-  } else {
-    query = query.or('ativo.eq.1,ativo.is.null');
-  }
+  if (arquivados === '1' && req.user.role === 'admin') query = query.eq('ativo', 0);
+  else query = query.or('ativo.eq.1,ativo.is.null');
   if (q) query = query.ilike('nome', `%${sanitizeText(q, 100)}%`);
   if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
   query = query.order('categoria').order('nome');
-
   const { data: rows, error } = await query;
   if (error) return res.status(500).json({ erro: 'Erro ao buscar produtos.' });
-
   let filtered = rows;
   if (status === 'zerado') filtered = rows.filter(r => r.qtd === 0);
   else if (status === 'critico') filtered = rows.filter(r => r.qtd > 0 && r.qtd <= r.minimo * 0.5);
   else if (status === 'atencao') filtered = rows.filter(r => r.qtd > r.minimo * 0.5 && r.qtd < r.minimo);
   else if (status === 'ok') filtered = rows.filter(r => r.qtd >= r.minimo);
-
   res.json(filtered);
 });
 
 app.get('/api/produtos/buscar', auth, async (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
-  const qNorm = normalizeSearch(q);
-  const { data } = await supabase
-    .from('produtos')
-    .select('id, nome, categoria, unidade, qtd, minimo, custo')
-    .ilike('nome_search', `%${qNorm}%`)
-    .or('ativo.eq.1,ativo.is.null')
-    .order('nome')
-    .limit(15);
+  const { data } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo')
+    .ilike('nome_search', `%${normalizeSearch(q)}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(15);
   res.json(data || []);
 });
 
 app.get('/api/categorias', auth, async (req, res) => {
-  const { data } = await supabase
-    .from('produtos')
-    .select('categoria')
-    .or('ativo.eq.1,ativo.is.null')
-    .order('categoria');
+  const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null').order('categoria');
   const unique = [...new Set((data || []).map(r => r.categoria).filter(Boolean))];
   res.json(unique);
 });
@@ -314,12 +338,10 @@ app.post('/api/produtos', auth, requireRole('admin', 'gerente'), async (req, res
   const custo = parseNonNegativeNumber(req.body?.custo ?? 0);
   const qtd = parseNonNegativeNumber(req.body?.qtd ?? 0);
   if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
-
   const { data: novo, error } = await supabase.from('produtos').insert({
     nome, nome_search: normalizeSearch(nome), categoria, unidade,
     qtd: qtd ?? 0, minimo: minimo ?? 1, custo: custo ?? 0, ativo: 1,
   }).select().single();
-
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Produto já cadastrado com este nome.' });
     return res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
@@ -331,20 +353,16 @@ app.post('/api/produtos', auth, requireRole('admin', 'gerente'), async (req, res
 app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const { data: produto } = await supabase.from('produtos').select('*').eq('id', req.params.id).single();
   if (!produto) return res.status(404).json({ erro: 'Produto não encontrado.' });
-
   const nome = req.body?.nome !== undefined ? sanitizeText(req.body.nome, 120) : produto.nome;
   const categoria = req.body?.categoria !== undefined ? sanitizeText(req.body.categoria, 80) : produto.categoria;
   const unidade = req.body?.unidade !== undefined ? sanitizeText(req.body.unidade, 20) : produto.unidade;
   const custo = req.body?.custo !== undefined ? parseNonNegativeNumber(req.body.custo) : produto.custo;
   const minimo = req.body?.minimo !== undefined ? parseNonNegativeNumber(req.body.minimo) : produto.minimo;
-
   if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
   if (custo === null || minimo === null) return res.status(400).json({ erro: 'Custo e mínimo devem ser números válidos.' });
-
   const { data: atualizado, error } = await supabase.from('produtos').update({
     nome, nome_search: normalizeSearch(nome), categoria, unidade, custo, minimo,
   }).eq('id', req.params.id).select().single();
-
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Já existe um produto com este nome.' });
     return res.status(500).json({ erro: 'Erro ao atualizar produto.' });
@@ -365,12 +383,9 @@ app.put('/api/produtos/:id/arquivar', auth, requireRole('admin'), async (req, re
 app.get('/api/produtos/:id/historico', auth, async (req, res) => {
   const { data: prod } = await supabase.from('produtos').select('nome, qtd, unidade, ativo').eq('id', req.params.id).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
-  const { data: movs } = await supabase
-    .from('movimentacoes')
+  const { data: movs } = await supabase.from('movimentacoes')
     .select('tipo, qtd, unidade, motivo, responsavel, obs, created_at')
-    .eq('produto_id', req.params.id)
-    .order('id', { ascending: false })
-    .limit(20);
+    .eq('produto_id', req.params.id).order('id', { ascending: false }).limit(20);
   res.json({ produto: prod, movimentacoes: movs || [] });
 });
 
@@ -382,40 +397,31 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   const obs = sanitizeText(req.body?.obs, 200);
   const qtdInput = req.body?.qtd;
 
-  if (!produto_nome || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo)) {
+  if (!produto_nome || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
-  }
 
   const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', produto_nome).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
 
-  let qtd;
-  if (tipo === 'Ajuste') qtd = parseNonNegativeNumber(qtdInput);
-  else qtd = parsePositiveNumber(qtdInput);
-  if (qtd === null) {
+  let qtd = tipo === 'Ajuste' ? parseNonNegativeNumber(qtdInput) : parsePositiveNumber(qtdInput);
+  if (qtd === null)
     return res.status(400).json({ erro: tipo === 'Ajuste' ? 'Ajuste deve ser zero ou maior.' : 'Quantidade deve ser maior que zero.' });
-  }
 
   const custoBody = req.body?.custo === '' || req.body?.custo === null || req.body?.custo === undefined
     ? null : parseNonNegativeNumber(req.body?.custo);
-  if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null) {
+  if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null)
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
-  }
 
   let novaQtd = Number(prod.qtd);
-  if (tipo === 'Entrada') {
-    novaQtd = Number((novaQtd + qtd).toFixed(3));
-  } else if (tipo === 'Saída' || tipo === 'Perda') {
+  if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
+  else if (tipo === 'Saída' || tipo === 'Perda') {
     if (qtd > novaQtd) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prod.qtd} ${prod.unidade}.` });
     novaQtd = Number((novaQtd - qtd).toFixed(3));
-  } else if (tipo === 'Ajuste') {
-    novaQtd = Number(qtd.toFixed(3));
-  }
+  } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
 
   const custoUnit = custoBody !== null ? custoBody : Number(prod.custo || 0);
   const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - Number(prod.qtd)) : qtd;
   const valor = Number((custoUnit * valorBase).toFixed(2));
-
   const updateData = { qtd: novaQtd };
   if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
 
@@ -425,8 +431,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   const { error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
-    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs,
-    created_at: nowSP(),
+    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs, created_at: nowSP(),
   });
   if (movErr) {
     await supabase.from('produtos').update({ qtd: prod.qtd, custo: prod.custo }).eq('id', prod.id);
@@ -434,7 +439,6 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }
 
   await audit('movimentacao', { produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }, req.user, getClientIp(req));
-
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
   res.json({ ok: true, produto: prodAtualizado });
 });
@@ -444,7 +448,6 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
   if (!mov) return res.status(404).json({ erro: 'Movimentação não encontrada.' });
   const { data: prod } = await supabase.from('produtos').select('*').eq('id', mov.produto_id).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
-
   let novaQtd = Number(prod.qtd);
   if (mov.tipo === 'Entrada') {
     novaQtd = Number((novaQtd - Number(mov.qtd)).toFixed(3));
@@ -454,7 +457,6 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
   } else if (mov.tipo === 'Ajuste') {
     return res.status(400).json({ erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' });
   }
-
   await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
   await supabase.from('movimentacoes').delete().eq('id', mov.id);
   await audit('cancelar_movimentacao', { mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }, req.user, getClientIp(req));
@@ -465,16 +467,13 @@ app.get('/api/movimentacoes', auth, async (req, res) => {
   const tipo = sanitizeText(req.query?.tipo, 20);
   const q = sanitizeText(req.query?.q, 100);
   const limit = Math.min(Math.max(parseInt(req.query?.limit || '200', 10), 1), 500);
-
   let query = supabase.from('movimentacoes').select('*');
   if (tipo) query = query.eq('tipo', tipo);
   if (q) query = query.or(`produto_nome.ilike.%${q}%,motivo.ilike.%${q}%,obs.ilike.%${q}%,responsavel.ilike.%${q}%`);
-
   const dataInicio = req.query?.data_inicio;
   const dataFim = req.query?.data_fim;
   if (dataInicio) query = query.gte('created_at', dataInicio);
   if (dataFim) query = query.lte('created_at', dataFim + 'T23:59:59');
-
   query = query.order('id', { ascending: false }).limit(limit);
   const { data } = await query;
   res.json(data || []);
@@ -488,15 +487,10 @@ app.get('/api/dashboard', auth, async (req, res) => {
   const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
   const atencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
   const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
-
   const hojeSP = nowSP().slice(0, 10);
-  const { count: lancHoje } = await supabase
-    .from('movimentacoes').select('id', { count: 'exact', head: true })
+  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
     .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-
-  const { data: ultimos } = await supabase
-    .from('movimentacoes').select('*').order('id', { ascending: false }).limit(8);
-
+  const { data: ultimos } = await supabase.from('movimentacoes').select('*').order('id', { ascending: false }).limit(8);
   res.json({ zerados, criticos, atencao, valorTotal, lancHoje: lancHoje || 0, ultimos: ultimos || [] });
 });
 
@@ -504,7 +498,6 @@ app.get('/api/dashboard', auth, async (req, res) => {
 app.get('/api/exportar/:tipo', auth, async (req, res) => {
   const { tipo } = req.params;
   let rows, headers, filename;
-
   if (tipo === 'estoque') {
     const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Custo Unit.','Valor Total','Status'];
@@ -524,10 +517,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     rows = (data || []).filter(r => Number(r.qtd) <= Number(r.minimo) * 0.5)
       .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
     filename = 'lista_compras_toca_coelho.csv';
-  } else {
-    return res.status(400).json({ erro: 'Tipo inválido' });
-  }
-
+  } else return res.status(400).json({ erro: 'Tipo inválido' });
   await audit('exportar', { tipo }, req.user, getClientIp(req));
   const csv = [headers, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
@@ -539,18 +529,14 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
 app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
   const confirmacao = sanitizeText(req.body?.confirmacao, 20).toUpperCase();
   if (confirmacao !== 'RESTAURAR') return res.status(400).json({ erro: 'Confirmação inválida. Digite RESTAURAR para continuar.' });
-
   const senhaAdmin = String(req.body?.senha_admin || '');
   const { data: userDb } = await supabase.from('users').select('*').eq('id', req.user.id).single();
   if (!verifyPassword(senhaAdmin, userDb.password_hash)) return res.status(401).json({ erro: 'Senha de administrador incorreta.' });
-
   const seedPath = path.join(__dirname, 'produtos_seed.json');
   if (!fs.existsSync(seedPath)) return res.status(404).json({ erro: 'Seed não encontrado.' });
   const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-
-  for (const p of produtos) {
+  for (const p of produtos)
     await supabase.from('produtos').update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo }).eq('nome', p.nome);
-  }
   await audit('resetar_estoque', { total_produtos: produtos.length }, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -559,41 +545,29 @@ app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
 app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, res) => {
   const { imagem, mediaType } = req.body;
   if (!imagem) return res.status(400).json({ erro: 'Imagem não enviada.' });
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'ANTHROPIC_API_KEY não configurada no servidor.' });
-
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-haiku-4-5-20251001', max_tokens: 1024,
-        messages: [{
-          role: 'user',
-          content: [
-            { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
-            { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
-          ]
-        }]
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
+          { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
+        ]}]
       })
     });
-
-    if (!response.ok) {
-      const err = await response.text();
-      return res.status(502).json({ erro: 'Erro na API: ' + err.slice(0, 300) });
-    }
-
+    if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 300) });
     const data = await response.json();
     const text = (data.content || []).map(b => b.text || '').join('');
-    const clean = text.replace(/```json|```/g, '').trim();
     let parsed;
-    try { parsed = JSON.parse(clean); } catch(e) {
-      return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' });
-    }
+    try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
+    catch(e) { return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' }); }
     if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
 
-    // Batch synonym lookup — elimina N+1 queries
+    // Batch synonym lookup — 1 query para todos os itens
     const termos = (parsed.itens || []).map(i => normalizeSearch(i.nome));
     const { data: sinonimosData } = await supabase.from('sinonimos').select('termo, produto_nome').in('termo', termos);
     const sinoMap = Object.fromEntries((sinonimosData || []).map(s => [s.termo, s.produto_nome]));
@@ -601,51 +575,29 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
     const itens = [];
     for (const item of (parsed.itens || [])) {
       const qNorm = normalizeSearch(item.nome);
-      let candidatos = [];
-      let produtoExato = null;
-
+      let candidatos = [], produtoExato = null;
       const prodNomeSinonimo = sinoMap[qNorm];
       if (prodNomeSinonimo) {
-        const { data: p } = await supabase.from('produtos')
-          .select('id, nome, categoria, unidade, qtd, minimo, custo')
-          .ilike('nome', prodNomeSinonimo).single();
+        const { data: p } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome', prodNomeSinonimo).single();
         if (p) { produtoExato = p; candidatos = [p]; }
       }
-
       if (!produtoExato) {
         const palavras = qNorm.split(/\s+/).filter(p => p.length > 2);
         if (palavras.length > 1) {
           const scoreMap = new Map();
           for (const palavra of palavras) {
-            const { data: matches } = await supabase.from('produtos')
-              .select('id, nome, categoria, unidade, qtd, minimo, custo')
-              .ilike('nome_search', `%${palavra}%`).order('nome').limit(10);
-            for (const m of (matches || [])) {
-              const entry = scoreMap.get(m.id) || { produto: m, score: 0 };
-              entry.score++;
-              scoreMap.set(m.id, entry);
-            }
+            const { data: matches } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${palavra}%`).order('nome').limit(10);
+            for (const m of (matches || [])) { const e = scoreMap.get(m.id) || { produto: m, score: 0 }; e.score++; scoreMap.set(m.id, e); }
           }
-          if (scoreMap.size > 0) {
-            candidatos = Array.from(scoreMap.values())
-              .sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
-          }
+          if (scoreMap.size > 0) candidatos = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
         }
         if (!candidatos.length) {
-          const { data: fallback } = await supabase.from('produtos')
-            .select('id, nome, categoria, unidade, qtd, minimo, custo')
-            .ilike('nome_search', `%${qNorm}%`).order('nome').limit(3);
+          const { data: fallback } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${qNorm}%`).order('nome').limit(3);
           candidatos = fallback || [];
         }
       }
-
-      itens.push({
-        nome_cupom: item.nome, qtd: Number(item.qtd) || 1,
-        unidade_cupom: item.unidade || 'UN', candidatos,
-        produto: candidatos[0] || null, via_sinonimo: !!produtoExato,
-      });
+      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo: !!produtoExato });
     }
-
     await audit('ler_cupom', { total_itens: itens.length }, req.user, getClientIp(req));
     res.json({ itens });
   } catch(e) {
@@ -659,10 +611,8 @@ app.post('/api/chat', auth, async (req, res) => {
   const pergunta = sanitizeText(req.body?.pergunta, 500);
   const historico = Array.isArray(req.body?.historico) ? req.body.historico.slice(-8) : [];
   if (!pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'API não configurada.' });
-
   const { data: allProd } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
   const all = allProd || [];
   const totalProd = all.length;
@@ -673,64 +623,34 @@ app.post('/api/chat', auth, async (req, res) => {
   const prodZerados = all.filter(p => Number(p.qtd) === 0).slice(0, 50);
   const prodCriticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).slice(0, 50);
   const prodAtencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).slice(0, 30);
-
   const hojeSP = nowSP().slice(0, 10);
-  const { count: lancHoje } = await supabase
-    .from('movimentacoes').select('id', { count: 'exact', head: true })
-    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-
-  const { data: ultimosMov } = await supabase
-    .from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at')
-    .order('id', { ascending: false }).limit(15);
-
+  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').order('id', { ascending: false }).limit(15);
   const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
-  const { data: movConsumo } = await supabase
-    .from('movimentacoes').select('produto_nome, qtd, unidade')
-    .in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
-
+  const { data: movConsumo } = await supabase.from('movimentacoes').select('produto_nome, qtd, unidade').in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
   const consumoMap = {};
-  for (const m of (movConsumo || [])) {
-    const key = m.produto_nome;
-    if (!consumoMap[key]) consumoMap[key] = { total: 0, unidade: m.unidade };
-    consumoMap[key].total += Number(m.qtd);
-  }
-  const maisConsumidos = Object.entries(consumoMap)
-    .sort((a, b) => b[1].total - a[1].total).slice(0, 10);
-
+  for (const m of (movConsumo || [])) { if (!consumoMap[m.produto_nome]) consumoMap[m.produto_nome] = { total: 0, unidade: m.unidade }; consumoMap[m.produto_nome].total += Number(m.qtd); }
+  const maisConsumidos = Object.entries(consumoMap).sort((a, b) => b[1].total - a[1].total).slice(0, 10);
   const catMap = {};
-  for (const p of all) {
-    if (!catMap[p.categoria]) catMap[p.categoria] = { n: 0, valor: 0 };
-    catMap[p.categoria].n++;
-    catMap[p.categoria].valor += Number(p.qtd) * Number(p.custo);
-  }
+  for (const p of all) { if (!catMap[p.categoria]) catMap[p.categoria] = { n: 0, valor: 0 }; catMap[p.categoria].n++; catMap[p.categoria].valor += Number(p.qtd) * Number(p.custo); }
   const cats = Object.entries(catMap).sort((a, b) => b[1].valor - a[1].valor);
-
-  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.\n2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS. Nunca liste itens com status OK como "em falta".\n3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.\n4. Se perguntarem sobre um produto específico não listado, diga que o estoque está OK (não consta nas listas de alerta).\n\nRESUMO DO ESTOQUE:\n- Total de produtos cadastrados: ${totalProd}\n- Zerados (qtd = 0): ${zerados} produtos\n- Críticos (qtd ≤ 50% do mínimo): ${criticos} produtos\n- Atenção (qtd entre 50% e 100% do mínimo): ${atencao_count} produtos\n- Valor total em estoque: R$ ${Number(valorTotal).toFixed(2)}\n- Lançamentos hoje: ${lancHoje || 0}\n\n=== PRODUTOS ZERADOS — qtd = 0 (${prodZerados.length} total) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum produto zerado.'}\n\n=== PRODUTOS CRÍTICOS — qtd ≤ 50% do mínimo (${prodCriticos.length} total) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade} | ${p.categoria}`).join('\n') || 'Nenhum produto crítico.'}\n\n=== PRODUTOS EM ATENÇÃO — qtd entre 50% e 100% do mínimo (${prodAtencao.length} total) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (últimos 30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados suficientes.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== ESTOQUE POR CATEGORIA ===\n${cats.map(([cat, d]) => `• ${cat}: ${d.n} produtos, R$ ${d.valor.toFixed(2)}`).join('\n')}`;
-
+  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.\n2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS.\n3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.\n4. Se perguntarem sobre um produto não listado, diga que o estoque está OK.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== POR CATEGORIA ===\n${cats.map(([cat, d]) => `• ${cat}: ${d.n} produtos, R$ ${d.valor.toFixed(2)}`).join('\n')}`;
   try {
-    const messages = [
-      ...historico.map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: pergunta }
-    ];
+    const messages = [...historico.map(h => ({ role: h.role, content: h.content })), { role: 'user', content: pergunta }];
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: contexto, messages })
     });
-    if (!response.ok) {
-      const errText = await response.text();
-      return res.status(502).json({ erro: 'Erro na API: ' + errText.slice(0, 200) });
-    }
+    if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 200) });
     const data = await response.json();
     const resposta = (data.content||[]).map(b => b.text||'').join('').trim();
     await audit('chat_ia', { pergunta: pergunta.slice(0,100) }, req.user, getClientIp(req));
     res.json({ resposta });
-  } catch(e) {
-    res.status(500).json({ erro: 'Erro interno: ' + e.message });
-  }
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
-// ==================== GERENCIAR USUÁRIOS (admin) ====================
+// ==================== GERENCIAR USUÁRIOS ====================
 app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
   const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at').order('role').order('nome');
   res.json(data || []);
@@ -744,10 +664,7 @@ app.post('/api/users', auth, requireRole('admin'), async (req, res) => {
   if (!username || !nome || !password) return res.status(400).json({ erro: 'Preencha todos os campos.' });
   if (!['admin','gerente','operador'].includes(role)) return res.status(400).json({ erro: 'Perfil inválido.' });
   if (password.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
-
-  const { error } = await supabase.from('users').insert({
-    username, nome, role, password_hash: hashPassword(password), active: 1,
-  });
+  const { error } = await supabase.from('users').insert({ username, nome, role, password_hash: hashPassword(password), active: 1 });
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Usuário já existe.' });
     return res.status(500).json({ erro: 'Erro ao criar usuário.' });
@@ -761,9 +678,7 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
   const active = req.body?.active !== undefined ? (req.body.active ? 1 : 0) : null;
   const nova_senha = String(req.body?.nova_senha || '');
   const role = sanitizeText(req.body?.role, 20);
-
   if (Number(id) === req.user.id && active === 0) return res.status(400).json({ erro: 'Você não pode desativar sua própria conta.' });
-
   const updates = {};
   if (active !== null) updates.active = active;
   if (role && ['admin','gerente','operador'].includes(role)) updates.role = role;
@@ -771,10 +686,7 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
     if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
     updates.password_hash = hashPassword(nova_senha);
   }
-
-  if (Object.keys(updates).length > 0) {
-    await supabase.from('users').update(updates).eq('id', id);
-  }
+  if (Object.keys(updates).length > 0) await supabase.from('users').update(updates).eq('id', id);
   await audit('editar_usuario', { id, active, role }, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -791,11 +703,7 @@ app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), async (req, re
   if (!termo || !produto_nome) return res.status(400).json({ erro: 'Termo e produto são obrigatórios.' });
   const { data: prod } = await supabase.from('produtos').select('nome').ilike('nome', produto_nome).single();
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
-
-  const { error } = await supabase.from('sinonimos').upsert(
-    { termo: normalizeSearch(termo), produto_nome: prod.nome },
-    { onConflict: 'termo' }
-  );
+  const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: 'termo' });
   if (error) return res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
   res.json({ ok: true });
 });
@@ -804,7 +712,6 @@ app.post('/api/sinonimos/importar', auth, requireRole('admin'), async (req, res)
   const lista = req.body?.lista;
   if (!Array.isArray(lista) || !lista.length) return res.status(400).json({ erro: 'Lista inválida.' });
   let ok = 0, erros = [];
-
   for (const s of lista) {
     try {
       const termo = normalizeSearch(String(s.termo || ''));
@@ -824,10 +731,7 @@ app.delete('/api/sinonimos/:id', auth, requireRole('admin', 'gerente'), async (r
 
 app.get('/api/manutencao/normalizar', auth, requireRole('admin'), async (req, res) => {
   const { data: todos } = await supabase.from('produtos').select('id, nome');
-  for (const p of (todos || [])) {
-    await supabase.from('produtos').update({ nome_search: normalizeSearch(p.nome) }).eq('id', p.id);
-  }
-  console.log(`✅ nome_search atualizado para ${(todos||[]).length} produtos`);
+  for (const p of (todos || [])) await supabase.from('produtos').update({ nome_search: normalizeSearch(p.nome) }).eq('id', p.id);
   res.json({ ok: true, total: (todos||[]).length, msg: `${(todos||[]).length} produtos normalizados!` });
 });
 
@@ -836,67 +740,46 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   const dataInicio = req.query?.data_inicio || new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
   const dataFim = req.query?.data_fim || nowSP().slice(0,10);
   const categoria = sanitizeText(req.query?.categoria || '', 80);
-
-  let movQuery = supabase.from('movimentacoes').select('*')
-    .gte('created_at', dataInicio).lte('created_at', dataFim + 'T23:59:59');
+  let movQuery = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio).lte('created_at', dataFim + 'T23:59:59');
   if (categoria) movQuery = movQuery.eq('categoria', categoria);
   const { data: allMovs } = await movQuery;
-
   const groups = {};
   for (const m of (allMovs || [])) {
     const key = m.produto_nome;
-    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade,
-      total_entrada: 0, total_saida: 0, total_perda: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
+    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade, total_entrada: 0, total_saida: 0, total_perda: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
     const g = groups[key];
     if (m.tipo === 'Entrada') { g.total_entrada += Number(m.qtd); g.valor_entrada += Number(m.valor || 0); g.num_entradas++; }
     if (['Saída','Perda'].includes(m.tipo)) { g.total_saida += Number(m.qtd); g.valor_saida += Number(m.valor || 0); g.num_saidas++; }
     if (m.tipo === 'Perda') g.total_perda += Number(m.qtd);
   }
-
   const { data: produtos } = await supabase.from('produtos').select('nome, qtd, minimo');
   const estoqueMap = {};
   for (const p of (produtos || [])) estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) };
-
-  const resultado = Object.values(groups)
-    .filter(g => g.total_entrada > 0 || g.total_saida > 0)
-    .map(r => {
-      const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
-      const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
-      const alerta = r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5;
-      const semEntrada = r.total_saida > 0 && r.total_entrada === 0;
-      return { ...r,
-        total_entrada: Number(r.total_entrada.toFixed(3)), total_saida: Number(r.total_saida.toFixed(3)),
-        total_perda: Number(r.total_perda.toFixed(3)),
-        valor_entrada: Number(r.valor_entrada.toFixed(2)), valor_saida: Number(r.valor_saida.toFixed(2)),
-        saldo, qtd_atual: qtdAtual, alerta, sem_entrada: semEntrada,
-      };
-    })
-    .sort((a, b) => (a.categoria + a.produto_nome).localeCompare(b.categoria + b.produto_nome));
-
-  const detalhesSaidas = (allMovs || [])
-    .filter(m => ['Saída','Perda'].includes(m.tipo))
+  const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0).map(r => {
+    const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
+    const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
+    return { ...r, total_entrada: Number(r.total_entrada.toFixed(3)), total_saida: Number(r.total_saida.toFixed(3)),
+      total_perda: Number(r.total_perda.toFixed(3)), valor_entrada: Number(r.valor_entrada.toFixed(2)),
+      valor_saida: Number(r.valor_saida.toFixed(2)), saldo, qtd_atual: qtdAtual,
+      alerta: r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5,
+      sem_entrada: r.total_saida > 0 && r.total_entrada === 0 };
+  }).sort((a, b) => (a.categoria + a.produto_nome).localeCompare(b.categoria + b.produto_nome));
+  const detalhesSaidas = (allMovs || []).filter(m => ['Saída','Perda'].includes(m.tipo))
     .map(m => ({ produto_nome: m.produto_nome, tipo: m.tipo, qtd: m.qtd, unidade: m.unidade, motivo: m.motivo, responsavel: m.responsavel, obs: m.obs, created_at: m.created_at }))
     .sort((a, b) => (a.produto_nome + b.created_at).localeCompare(b.produto_nome + a.created_at));
-
   await audit('auditoria_divergencias', { dataInicio, dataFim, categoria }, req.user, getClientIp(req));
   res.json({ resultado, detalhesSaidas, dataInicio, dataFim });
 });
 
-// ==================== BACKUP AUTOMÁTICO DIÁRIO ====================
+// ==================== BACKUP AUTOMÁTICO ====================
 async function criarBackupEstoque(motivo = 'automatico') {
   const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo, ativo');
   if (!produtos || !produtos.length) return null;
-
-  const snapshot = {
-    data_backup: nowSP(),
-    motivo,
-    total_produtos: produtos.length,
+  const snapshot = { data_backup: nowSP(), motivo, total_produtos: produtos.length,
     valor_total: produtos.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0),
     zerados: produtos.filter(p => Number(p.qtd) === 0).length,
     criticos: produtos.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length,
-    dados: JSON.stringify(produtos),
-  };
-
+    dados: JSON.stringify(produtos) };
   const { data, error } = await supabase.from('backups_estoque').insert(snapshot).select('id, data_backup').single();
   if (error) { console.error('❌ Erro no backup:', error.message); return null; }
   console.log(`✅ Backup #${data.id} criado em ${data.data_backup} (${motivo})`);
@@ -905,14 +788,9 @@ async function criarBackupEstoque(motivo = 'automatico') {
 
 let ultimoBackupDia = '';
 setInterval(async () => {
-  const agora = nowSP();
-  const hora = agora.slice(11, 16);
-  const dia = agora.slice(0, 10);
+  const agora = nowSP(), hora = agora.slice(11, 16), dia = agora.slice(0, 10);
   const HORA_BACKUP = process.env.HORA_BACKUP || '18:00';
-  if (hora === HORA_BACKUP && dia !== ultimoBackupDia) {
-    ultimoBackupDia = dia;
-    await criarBackupEstoque('automatico_18h');
-  }
+  if (hora === HORA_BACKUP && dia !== ultimoBackupDia) { ultimoBackupDia = dia; await criarBackupEstoque('automatico_18h'); }
 }, 60 * 1000);
 
 app.post('/api/backup', auth, requireRole('admin', 'gerente'), async (req, res) => {
@@ -924,11 +802,7 @@ app.post('/api/backup', auth, requireRole('admin', 'gerente'), async (req, res) 
 });
 
 app.get('/api/backups', auth, requireRole('admin', 'gerente'), async (req, res) => {
-  const { data } = await supabase
-    .from('backups_estoque')
-    .select('id, data_backup, motivo, total_produtos, valor_total, zerados, criticos')
-    .order('id', { ascending: false })
-    .limit(30);
+  const { data } = await supabase.from('backups_estoque').select('id, data_backup, motivo, total_produtos, valor_total, zerados, criticos').order('id', { ascending: false }).limit(30);
   res.json(data || []);
 });
 
@@ -936,195 +810,116 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
   const senhaAdmin = String(req.body?.senha_admin || '');
   const { data: userDb } = await supabase.from('users').select('*').eq('id', req.user.id).single();
   if (!verifyPassword(senhaAdmin, userDb.password_hash)) return res.status(401).json({ erro: 'Senha incorreta.' });
-
   const { data: backup } = await supabase.from('backups_estoque').select('*').eq('id', req.params.id).single();
   if (!backup) return res.status(404).json({ erro: 'Backup não encontrado.' });
-
   await criarBackupEstoque('pre_restauracao');
-
   const produtos = JSON.parse(backup.dados);
   let restaurados = 0;
   for (const p of produtos) {
-    const { error } = await supabase.from('produtos')
-      .update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo, ativo: p.ativo })
-      .eq('id', p.id);
+    const { error } = await supabase.from('produtos').update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo, ativo: p.ativo }).eq('id', p.id);
     if (!error) restaurados++;
   }
-
   await audit('restaurar_backup', { backup_id: backup.id, data_backup: backup.data_backup, restaurados }, req.user, getClientIp(req));
   res.json({ ok: true, restaurados, data_backup: backup.data_backup });
 });
 
-// ==================== WEBHOOK WHATSAPP (n8n / Evolution API) ====================
+// ==================== WEBHOOK WHATSAPP ====================
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'toca-webhook-2026';
 
 app.post('/api/webhook/whatsapp', async (req, res) => {
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
-
   const acao = sanitizeText(req.body?.acao, 40);
   const produto_nome = sanitizeText(req.body?.produto, 120);
   const remetente = sanitizeText(req.body?.remetente, 40);
 
   if (acao === 'consultar') {
     if (!produto_nome) return res.json({ resposta: 'Me diz o nome do produto que quer consultar.' });
-    const qNorm = normalizeSearch(produto_nome);
-    const { data: resultados } = await supabase
-      .from('produtos').select('nome, categoria, qtd, unidade, minimo, custo')
-      .ilike('nome_search', `%${qNorm}%`)
-      .or('ativo.eq.1,ativo.is.null')
-      .order('nome').limit(5);
-
-    if (!resultados || resultados.length === 0) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
-
-    const linhas = resultados.map(p => {
-      const status = Number(p.qtd) === 0 ? '🔴 ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? '🟠 CRÍTICO' : Number(p.qtd) < Number(p.minimo) ? '🟡 ATENÇÃO' : '🟢 OK';
-      return `📦 *${p.nome}*\n   ${p.qtd} ${p.unidade} (mín: ${p.minimo}) ${status}\n   Custo: R$${Number(p.custo).toFixed(2)}`;
-    });
+    const { data: resultados } = await supabase.from('produtos').select('nome, categoria, qtd, unidade, minimo, custo').ilike('nome_search', `%${normalizeSearch(produto_nome)}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(5);
+    if (!resultados || !resultados.length) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+    const linhas = resultados.map(p => { const st = Number(p.qtd) === 0 ? '🔴 ZERADO' : Number(p.qtd) <= Number(p.minimo)*0.5 ? '🟠 CRÍTICO' : Number(p.qtd) < Number(p.minimo) ? '🟡 ATENÇÃO' : '🟢 OK'; return `📦 *${p.nome}*\n   ${p.qtd} ${p.unidade} (mín: ${p.minimo}) ${st}\n   Custo: R$${Number(p.custo).toFixed(2)}`; });
     return res.json({ resposta: linhas.join('\n\n') });
   }
 
   if (acao === 'resumo') {
     const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
     const prods = all || [];
-    const zerados = prods.filter(p => Number(p.qtd) === 0).length;
-    const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
-    const atencao = prods.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
-    const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
     const hojeSP = nowSP().slice(0, 10);
-    const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
-      .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-    return res.json({
-      resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n` +
-        `📦 Total: ${prods.length} produtos\n` +
-        `🔴 Zerados: ${zerados}\n🟠 Críticos: ${criticos}\n🟡 Atenção: ${atencao}\n` +
-        `💰 Valor total: R$ ${valor.toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje || 0}`
-    });
+    const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+    return res.json({ resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n📦 Total: ${prods.length}\n🔴 Zerados: ${prods.filter(p=>Number(p.qtd)===0).length}\n🟠 Críticos: ${prods.filter(p=>Number(p.qtd)>0&&Number(p.qtd)<=Number(p.minimo)*0.5).length}\n🟡 Atenção: ${prods.filter(p=>Number(p.qtd)>Number(p.minimo)*0.5&&Number(p.qtd)<Number(p.minimo)).length}\n💰 Valor total: R$ ${prods.reduce((s,p)=>s+Number(p.qtd)*Number(p.custo),0).toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje||0}` });
   }
 
   if (acao === 'zerados') {
     const { data } = await supabase.from('produtos').select('nome, categoria').eq('qtd', 0).or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
-    if (!data || data.length === 0) return res.json({ resposta: '✅ Nenhum produto zerado!' });
-    const txt = (data || []).map(p => `• ${p.nome} (${p.categoria})`).join('\n');
-    return res.json({ resposta: `🔴 *PRODUTOS ZERADOS (${data.length})*\n\n${txt}` });
+    if (!data || !data.length) return res.json({ resposta: '✅ Nenhum produto zerado!' });
+    return res.json({ resposta: `🔴 *PRODUTOS ZERADOS (${data.length})*\n\n${data.map(p=>`• ${p.nome} (${p.categoria})`).join('\n')}` });
   }
 
   if (acao === 'criticos') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade')
-      .gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
+    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
     const crit = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
-    if (crit.length === 0) return res.json({ resposta: '✅ Nenhum produto em nível crítico!' });
-    const txt = crit.map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n');
-    return res.json({ resposta: `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${txt}` });
+    if (!crit.length) return res.json({ resposta: '✅ Nenhum produto em nível crítico!' });
+    return res.json({ resposta: `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${crit.map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}` });
   }
 
   if (acao === 'entrada' || acao === 'saida') {
     const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
     const qtd = parsePositiveNumber(req.body?.qtd);
-    if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie:\nproduto, quantidade\nEx: "Filé de Frango, 5"` });
-
+    if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie: produto, quantidade` });
     const { data: prod } = await supabase.from('produtos').select('*').ilike('nome_search', `%${normalizeSearch(produto_nome)}%`).single();
     if (!prod) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
-
     let novaQtd = Number(prod.qtd);
-    if (tipo === 'Entrada') { novaQtd = Number((novaQtd + qtd).toFixed(3)); }
+    if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
     else {
       if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prod.nome}. Disponível: ${prod.qtd} ${prod.unidade}` });
       novaQtd = Number((novaQtd - qtd).toFixed(3));
     }
-
     const { error: updateErr } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
     if (updateErr) return res.json({ resposta: `❌ Erro ao atualizar estoque de ${prod.nome}.` });
-
     const { error: movErr } = await supabase.from('movimentacoes').insert({
-      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-      tipo, qtd, unidade: prod.unidade, custo: prod.custo,
-      valor: Number((Number(prod.custo) * qtd).toFixed(2)),
-      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção',
-      responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp',
-      created_at: nowSP(),
+      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
+      custo: prod.custo, valor: Number((Number(prod.custo)*qtd).toFixed(2)),
+      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
     });
-    if (movErr) {
-      await supabase.from('produtos').update({ qtd: prod.qtd }).eq('id', prod.id);
-      return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` });
-    }
-
+    if (movErr) { await supabase.from('produtos').update({ qtd: prod.qtd }).eq('id', prod.id); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, remetente }, null, '');
-    return res.json({
-      resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}`
-    });
+    return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}` });
   }
 
   if (acao === 'compras') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade')
-      .or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     const lista = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
-    if (lista.length === 0) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' });
-    const txt = lista.map(p => {
-      const comprar = Math.max(0, Number(p.minimo) * 2 - Number(p.qtd)).toFixed(1);
-      return `• ${p.nome}: tem ${p.qtd}, comprar ~${comprar} ${p.unidade}`;
-    }).join('\n');
-    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${txt}` });
+    if (!lista.length) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' });
+    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}` });
   }
 
-  res.json({
-    resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos disponíveis:\n` +
-      `📦 *consultar* [produto] — ver estoque\n` +
-      `📊 *resumo* — painel geral\n` +
-      `🔴 *zerados* — produtos em falta\n` +
-      `🟠 *criticos* — itens críticos\n` +
-      `🛒 *compras* — lista de compras\n` +
-      `➕ *entrada* [produto] [qtd] — registrar entrada\n` +
-      `➖ *saida* [produto] [qtd] — registrar saída`
-  });
+  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida` });
 });
 
 app.get('/api/webhook/relatorio-diario', async (req, res) => {
   const secret = req.headers['x-webhook-secret'] || req.query?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
-
   const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
   const prods = all || [];
   const zerados = prods.filter(p => Number(p.qtd) === 0);
   const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
   const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
-
   const hojeSP = nowSP().slice(0, 10);
-  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
-    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-
-  let msg = `📊 *RELATÓRIO DIÁRIO — ${hojeSP}*\n🐰 Toca do Coelho\n\n`;
-  msg += `📦 ${prods.length} produtos | 💰 R$ ${valor.toFixed(2)}\n`;
-  msg += `📋 ${lancHoje || 0} lançamentos hoje\n\n`;
-
-  if (zerados.length > 0) {
-    msg += `🔴 *ZERADOS (${zerados.length})*\n`;
-    msg += zerados.slice(0, 15).map(p => `• ${p.nome}`).join('\n');
-    if (zerados.length > 15) msg += `\n... e mais ${zerados.length - 15}`;
-    msg += '\n\n';
-  }
-
-  if (criticos.length > 0) {
-    msg += `🟠 *CRÍTICOS (${criticos.length})*\n`;
-    msg += criticos.slice(0, 10).map(p => `• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n');
-    msg += '\n\n';
-  }
-
+  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+  let msg = `📊 *RELATÓRIO DIÁRIO — ${hojeSP}*\n🐰 Toca do Coelho\n\n📦 ${prods.length} produtos | 💰 R$ ${valor.toFixed(2)}\n📋 ${lancHoje||0} lançamentos hoje\n\n`;
+  if (zerados.length) { msg += `🔴 *ZERADOS (${zerados.length})*\n${zerados.slice(0,15).map(p=>`• ${p.nome}`).join('\n')}${zerados.length>15?`\n... e mais ${zerados.length-15}`:''}\n\n`; }
+  if (criticos.length) { msg += `🟠 *CRÍTICOS (${criticos.length})*\n${criticos.slice(0,10).map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}\n\n`; }
   msg += `_Backup automático às 18h ✅_`;
   res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // ==================== START ====================
-seed().then(() => {
+seed().then(async () => {
+  await initSessionsBackend();
   app.listen(PORT, () => {
     console.log(`🐰 Toca do Coelho — Estoque (Supabase) rodando em http://localhost:${PORT}`);
     console.log(`⏰ Backup automático configurado para ${process.env.HORA_BACKUP || '18:00'}`);
   });
-}).catch(err => {
-  console.error('❌ Erro ao inicializar:', err.message);
-  process.exit(1);
-});
+}).catch(err => { console.error('❌ Erro ao inicializar:', err.message); process.exit(1); });
