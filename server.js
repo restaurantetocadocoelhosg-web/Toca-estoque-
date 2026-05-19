@@ -82,6 +82,15 @@ function getClientIp(req) {
 //     nome TEXT, role TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
 //     last_activity TIMESTAMPTZ DEFAULT NOW());
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
+const THRESHOLDS_ALERTA = {
+  'Hortifruti': 7, 'Aves': 7, 'Massa Fresca': 7,
+  'Carnes Bovinas': 10, 'Carnes Suínas': 10, 'Pescados': 10, 'Laticínios': 10, 'Outras Proteínas': 10,
+  'Bebidas': 15, 'Sorvetes': 15,
+  'Secos e Grãos': 20, 'Embutidos': 20,
+  'Óleos': 30, 'Especiarias': 30,
+  'Descartáveis': 45, 'Limpeza': 45,
+};
+const THRESHOLD_PADRAO = 30;
 const memSessions = new Map();
 let useSupabaseSessions = false;
 
@@ -631,6 +640,20 @@ app.post('/api/chat', auth, async (req, res) => {
   const consumoMap = {};
   for (const m of (movConsumo || [])) { if (!consumoMap[m.produto_nome]) consumoMap[m.produto_nome] = { total: 0, unidade: m.unidade }; consumoMap[m.produto_nome].total += Number(m.qtd); }
   const maisConsumidos = Object.entries(consumoMap).sort((a, b) => b[1].total - a[1].total).slice(0, 10);
+  // Alertas de giro parado para IA
+  const CATS_ALTO_GIRO_IA = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
+  const THRESHOLDS_IA = { 'Hortifruti': 7, 'Aves': 7, 'Massa Fresca': 7, 'Carnes Bovinas': 10, 'Carnes Suínas': 10, 'Pescados': 10, 'Laticínios': 10, 'Outras Proteínas': 10, 'Bebidas': 15 };
+  const { data: lastMovGiro } = await supabase.from('movimentacoes')
+    .select('produto_nome, created_at').in('categoria', CATS_ALTO_GIRO_IA).order('created_at', { ascending: false });
+  const lastMovByNomeIA = {};
+  for (const m of (lastMovGiro || [])) { if (!lastMovByNomeIA[m.produto_nome]) lastMovByNomeIA[m.produto_nome] = m.created_at; }
+  const alertasParadosIA = all.filter(p => THRESHOLDS_IA[p.categoria]).reduce((acc, p) => {
+    const last = lastMovByNomeIA[p.nome];
+    const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
+    if (dias === null || dias >= THRESHOLDS_IA[p.categoria])
+      acc.push({ nome: p.nome, cat: p.categoria, dias: dias !== null ? dias : 'sem histórico', qtd: p.qtd, unidade: p.unidade });
+    return acc;
+  }, []);
   const catMap = {};
   for (const p of all) {
     if (!catMap[p.categoria]) catMap[p.categoria] = { n: 0, valor: 0, prods: [] };
@@ -640,7 +663,7 @@ app.post('/api/chat', auth, async (req, res) => {
     catMap[p.categoria].prods.push(`[${st}] ${p.nome}: ${p.qtd} ${p.unidade}`);
   }
   const cats = Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0]));
-  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.\n2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS.\n3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.\n4. Se perguntarem sobre um produto não listado, diga que o estoque está OK.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}`;
+  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados fornecidos. NUNCA invente, estime ou suponha valores.\n2. "Itens em falta" = APENAS os de ZERADOS e CRÍTICOS.\n3. Ao listar produtos: nome + quantidade atual + mínimo.\n4. Produto não encontrado nos dados = diga "não há registro" (nunca "está OK" sem confirmar).\n5. Se houver itens em ALERTA GIRO PARADO, mencione os mais críticos proativamente.\n6. Ao executar lançamentos: confirme nome exato + tipo + quantidade ANTES do ACAO_JSON.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}\n\n=== ⚠️ ALERTA GIRO PARADO (verificar urgente) ===\n${alertasParadosIA.length === 0 ? 'Todos os itens de alto giro estão com movimentão normal.' : alertasParadosIA.map(a => `• ${a.nome} (${a.cat}): ${a.dias} dias sem mov. | Estoque: ${a.qtd} ${a.unidade}`).join('\n')}`;
   try {
     const messages = [...historico.map(h => ({ role: h.role, content: h.content })), { role: 'user', content: pergunta }];
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -699,6 +722,39 @@ app.post('/api/chat', auth, async (req, res) => {
 
     await audit('chat_ia', { pergunta: pergunta.slice(0,100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// ==================== ALERTAS ====================
+app.get('/api/alertas/estoque-parado', auth, async (req, res) => {
+  try {
+    const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, qtd, unidade, minimo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    const ids = (produtos || []).map(p => p.id);
+    if (!ids.length) return res.json({ alertas: [], resumo: { total: 0, criticos: 0, atencao: 0, sem_historico: 0 } });
+    const { data: todosMov } = await supabase.from('movimentacoes').select('produto_id, created_at, tipo, responsavel').in('produto_id', ids).order('created_at', { ascending: false });
+    const lastMovMap = {};
+    for (const m of (todosMov || [])) { if (!lastMovMap[m.produto_id]) lastMovMap[m.produto_id] = m; }
+    const agora = Date.now();
+    const alertas = [];
+    for (const p of (produtos || [])) {
+      const thDias = THRESHOLDS_ALERTA[p.categoria] || THRESHOLD_PADRAO;
+      const lastMov = lastMovMap[p.id];
+      const diasParado = lastMov ? Math.floor((agora - new Date(lastMov.created_at).getTime()) / 86400000) : null;
+      if (diasParado === null || diasParado >= thDias) {
+        const urgencia = diasParado === null ? 'SEM_HISTORICO' : diasParado >= thDias * 2 ? 'CRITICO' : 'ATENCAO';
+        alertas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, qtd: p.qtd, unidade: p.unidade,
+          dias_parado: diasParado, ultimo_movimento: lastMov?.created_at || null,
+          ultimo_responsavel: lastMov?.responsavel || null, threshold_dias: thDias, urgencia });
+      }
+    }
+    alertas.sort((a, b) => { const o = { SEM_HISTORICO: 0, CRITICO: 1, ATENCAO: 2 };
+      return o[a.urgencia] !== o[b.urgencia] ? o[a.urgencia] - o[b.urgencia] : (b.dias_parado||999) - (a.dias_parado||999); });
+    const resumo = { total: alertas.length,
+      criticos: alertas.filter(a => a.urgencia === 'CRITICO').length,
+      atencao: alertas.filter(a => a.urgencia === 'ATENCAO').length,
+      sem_historico: alertas.filter(a => a.urgencia === 'SEM_HISTORICO').length };
+    await audit('alertas_estoque_parado', resumo, req.user, getClientIp(req));
+    res.json({ alertas, resumo });
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
@@ -961,6 +1017,23 @@ app.get('/api/webhook/relatorio-diario', async (req, res) => {
   let msg = `📊 *RELATÓRIO DIÁRIO — ${hojeSP}*\n🐰 Toca do Coelho\n\n📦 ${prods.length} produtos | 💰 R$ ${valor.toFixed(2)}\n📋 ${lancHoje||0} lançamentos hoje\n\n`;
   if (zerados.length) { msg += `🔴 *ZERADOS (${zerados.length})*\n${zerados.slice(0,15).map(p=>`• ${p.nome}`).join('\n')}${zerados.length>15?`\n... e mais ${zerados.length-15}`:''}\n\n`; }
   if (criticos.length) { msg += `🟠 *CRÍTICOS (${criticos.length})*\n${criticos.slice(0,10).map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}\n\n`; }
+  // Alerta estoque parado alto giro
+  const CATS_GIRO_REL = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
+  const { data: prodGiro } = await supabase.from('produtos').select('id, nome, categoria').or('ativo.eq.1,ativo.is.null').in('categoria', CATS_GIRO_REL);
+  if (prodGiro && prodGiro.length > 0) {
+    const idsGiro = prodGiro.map(p => p.id);
+    const { data: movsGiro } = await supabase.from('movimentacoes').select('produto_id, created_at').in('produto_id', idsGiro).order('created_at', { ascending: false });
+    const lastMG = {};
+    for (const m of (movsGiro || [])) { if (!lastMG[m.produto_id]) lastMG[m.produto_id] = m.created_at; }
+    const paradosRel = prodGiro.filter(p => {
+      const last = lastMG[p.id];
+      if (!last) return true;
+      return Math.floor((Date.now() - new Date(last).getTime()) / 86400000) >= (THRESHOLDS_ALERTA[p.categoria] || 10);
+    });
+    if (paradosRel.length > 0) {
+      msg += `\n\n⚠️ *ALTO GIRO SEM MOVIMENTO (${paradosRel.length})*\n${paradosRel.slice(0,12).map(p => `• ${p.nome} (${p.categoria})`).join('\n')}${paradosRel.length > 12 ? `\n... +${paradosRel.length-12}` : ''}`;
+    }
+  }
   msg += `_Backup automático às 18h ✅_`;
   res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
