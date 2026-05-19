@@ -561,7 +561,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6', max_tokens: 1024,
+        model: 'claude-sonnet-4-6', max_tokens: 4096,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
           { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
@@ -634,7 +634,7 @@ app.post('/api/chat', auth, async (req, res) => {
   const prodAtencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).slice(0, 30);
   const hojeSP = nowSP().slice(0, 10);
   const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').order('id', { ascending: false }).limit(15);
+  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').order('id', { ascending: false }).limit(50);
   const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
   const { data: movConsumo } = await supabase.from('movimentacoes').select('produto_nome, qtd, unidade').in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
   const consumoMap = {};
@@ -669,7 +669,7 @@ app.post('/api/chat', auth, async (req, res) => {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: contexto, messages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: contexto, messages })
     });
     if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 200) });
     const data = await response.json();

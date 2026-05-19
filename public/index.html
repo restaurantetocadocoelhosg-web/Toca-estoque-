@@ -1978,14 +1978,15 @@ function switchModalTab(tab, el) {
   document.getElementById('modal-tab-' + tab).classList.add('active');
 }
 
+async let _modalBuscaItems = [];
 async function modalBuscaProd(q) {
   if (!q || q.length < 2) { document.getElementById('modal-busca-ac').classList.remove('open'); return; }
   try {
-    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    _modalBuscaItems = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
     const ac = document.getElementById('modal-busca-ac');
-    if (!items.length) { ac.classList.remove('open'); return; }
-    ac.innerHTML = items.map(p =>
-      `<div class="ac-item" onclick="modalSelProd(${JSON.stringify(JSON.stringify(p))})">
+    if (!_modalBuscaItems.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = _modalBuscaItems.map((p, i) =>
+      `<div class="ac-item" onmousedown="modalSelProd(${i})">
         <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${escapeHtml(p.categoria)} · ${fmt(p.qtd)} ${escapeHtml(p.unidade)}</div></div>
       </div>`
     ).join('');
@@ -1993,8 +1994,9 @@ async function modalBuscaProd(q) {
   } catch(e) {}
 }
 
-function modalSelProd(jsonStr) {
-  modalProdSel = JSON.parse(jsonStr);
+function modalSelProd(idx) {
+  modalProdSel = _modalBuscaItems[idx];
+  if (!modalProdSel) return;
   document.getElementById('modal-busca-ac').classList.remove('open');
   document.getElementById('modal-busca-input').value = modalProdSel.nome;
   document.getElementById('modal-busca-nome').textContent = modalProdSel.nome;
