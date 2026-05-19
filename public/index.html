@@ -1978,7 +1978,7 @@ function switchModalTab(tab, el) {
   document.getElementById('modal-tab-' + tab).classList.add('active');
 }
 
-async let _modalBuscaItems = [];
+let _modalBuscaItems = [];
 async function modalBuscaProd(q) {
   if (!q || q.length < 2) { document.getElementById('modal-busca-ac').classList.remove('open'); return; }
   try {
