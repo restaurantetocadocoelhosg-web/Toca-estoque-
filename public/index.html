@@ -791,6 +791,20 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- ALERTAS DE ESTOQUE PARADO -->
+  <div id="p-alertas" class="page">
+    <div class="admin-section">
+      <div class="admin-card">
+        <div class="admin-card-title">⚠️ Alertas — Estoque Parado por Categoria</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Produtos de alto giro sem movimento além do esperado para a categoria.
+        </div>
+        <div id="alertas-resumo" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
+        <div id="alertas-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <nav>
@@ -800,6 +814,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
+  <button class="nav-btn" id="nav-alertas" onclick="goPage('alertas', this)" style="position:relative"><span class="icon">⚠️</span>Alertas<span id="alertas-badge" style="display:none;position:absolute;top:3px;right:2px;background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:8px;font-weight:700;align-items:center;justify-content:center;line-height:1"></span></button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -1124,25 +1139,76 @@ function goPage(id, btn) {
   if (id === 'hist') loadHist();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); }
   if (id === 'audit') initAuditoria();
+  if (id === 'alertas') loadAlertas();
 }
 
 async function loadDash() {
   try {
-    const d = await api('/api/dashboard');
+    const [d, al] = await Promise.all([
+      api('/api/dashboard'),
+      api('/api/alertas/estoque-parado').catch(() => null)
+    ]);
+    const paradosCrit = al ? al.resumo.criticos + al.resumo.sem_historico : 0;
+    const paradosTotal = al ? al.resumo.total : 0;
     document.getElementById('dash-cards').innerHTML = `
       <div class="card"><div class="card-label">📅 Hoje</div><div class="card-val accent">${d.lancHoje}</div><div class="card-hint">lançamentos</div></div>
       <div class="card card-click" onclick="irEstoque('zerado')"><div class="card-label">🔴 Zerados</div><div class="card-val red">${d.zerados}</div><div class="card-hint">toque para ver →</div></div>
       <div class="card card-click" onclick="irEstoque('critico')"><div class="card-label">🟡 Críticos</div><div class="card-val yellow">${d.criticos}</div><div class="card-hint">toque para ver →</div></div>
-      <div class="card"><div class="card-label">💰 Valor R$</div><div class="card-val green">${fmtMoneyCompact(d.valorTotal)}</div><div class="card-hint">em estoque</div></div>
+      <div class="card card-click" onclick="goPage('alertas', document.getElementById('nav-alertas'))"><div class="card-label">⚠️ Parados</div><div class="card-val" style="color:#f97316">${paradosTotal}</div><div class="card-hint">${paradosCrit > 0 ? paradosCrit + ' urgentes' : 'alto giro'}</div></div>
     `;
+    const badge = document.getElementById('alertas-badge');
+    if (badge) { badge.textContent = paradosCrit > 0 ? paradosCrit : ''; badge.style.display = paradosCrit > 0 ? 'inline-flex' : 'none'; }
     const banner = document.getElementById('alert-banner');
     const total = d.zerados + d.criticos;
-    if (total > 0) {
-      banner.textContent = `⚠️ ${total} item${total>1?'ns precisam':' precisa'} de atenção — ${d.zerados} zerado${d.zerados!==1?'s':''}, ${d.criticos} crítico${d.criticos!==1?'s':''}. Toque para ver.`;
+    if (total > 0 || paradosCrit > 0) {
+      let msg = '';
+      if (total > 0) msg += `⚠️ ${total} item${total>1?'ns precisam':' precisa'} de atenção — ${d.zerados} zerado${d.zerados!==1?'s':''}, ${d.criticos} crítico${d.criticos!==1?'s':''}.`;
+      if (paradosCrit > 0) msg += (msg?' ':'') + `${paradosCrit} item${paradosCrit>1?'ns de alto giro parados':' de alto giro parado'}.`;
+      banner.textContent = msg + ' Toque para ver.';
       banner.classList.add('show');
     } else { banner.classList.remove('show'); }
     renderUltimos(d.ultimos);
   } catch(e) { handleApiError(e); }
+}
+
+async function loadAlertas() {
+  const lista = document.getElementById('alertas-lista');
+  const resumoEl = document.getElementById('alertas-resumo');
+  try {
+    lista.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div>';
+    const r = await api('/api/alertas/estoque-parado');
+    const { alertas, resumo } = r;
+    resumoEl.innerHTML = [
+      `<span style="background:rgba(239,68,68,.12);color:#ef4444;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600">🔴 Crítico: ${resumo.criticos}</span>`,
+      `<span style="background:rgba(249,115,22,.12);color:#f97316;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600">🟠 Atenção: ${resumo.atencao}</span>`,
+      `<span style="background:rgba(100,116,139,.1);color:var(--muted);padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600">⚫ Sem histórico: ${resumo.sem_historico}</span>`,
+    ].join('');
+    if (!alertas.length) {
+      lista.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Nenhum item de alto giro parado. Estoque com bom giro!</div></div>';
+      return;
+    }
+    const urgColors = { CRITICO: '#ef4444', ATENCAO: '#f97316', SEM_HISTORICO: '#94a3b8' };
+    const urgLabels = { CRITICO: '🔴 CRÍTICO', ATENCAO: '🟠 ATENÇÃO', SEM_HISTORICO: '⚫ SEM HISTÓRICO' };
+    const groups = {};
+    for (const a of alertas) { if (!groups[a.urgencia]) groups[a.urgencia] = []; groups[a.urgencia].push(a); }
+    const order = ['CRITICO', 'ATENCAO', 'SEM_HISTORICO'];
+    let html = '';
+    for (const urg of order) {
+      if (!groups[urg]) continue;
+      html += `<div style="margin-bottom:16px">`;
+      html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">${urgLabels[urg]} (${groups[urg].length})</div>`;
+      for (const a of groups[urg]) {
+        const diasTxt = a.dias_parado !== null ? `${a.dias_parado} dias sem mov.` : 'Sem histórico';
+        const ultTxt = a.ultimo_movimento ? 'último: ' + new Date(String(a.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (a.ultimo_responsavel ? ' (' + a.ultimo_responsavel + ')' : '') : 'Nunca movimentado';
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${urgColors[urg]}">`;
+        html += `<div><div style="font-size:13px;font-weight:600">${a.nome}</div><div style="font-size:11px;color:var(--muted)">${a.categoria} | ${a.qtd} ${a.unidade} | limite: ${a.threshold_dias}d</div><div style="font-size:10px;color:var(--muted);margin-top:2px">${ultTxt}</div></div>`;
+        html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};text-align:right;flex-shrink:0;margin-left:8px">${diasTxt}</div>`;
+        html += `</div>`;
+      }
+      html += `</div>`;
+    }
+    lista.innerHTML = html;
+  } catch(e) { lista.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar alertas.</div></div>'; }
 }
 
 function irEstoque(status) {
