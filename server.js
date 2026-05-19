@@ -81,7 +81,7 @@ function getClientIp(req) {
 //   CREATE TABLE sessions (token TEXT PRIMARY KEY, user_id INTEGER, username TEXT,
 //     nome TEXT, role TEXT, created_at TIMESTAMPTZ DEFAULT NOW(),
 //     last_activity TIMESTAMPTZ DEFAULT NOW());
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000;
+const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 const memSessions = new Map();
 let useSupabaseSessions = false;
 
@@ -552,7 +552,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-haiku-4-5-20251001', max_tokens: 1024,
+        model: 'claude-sonnet-4-6', max_tokens: 1024,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
           { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
@@ -640,19 +640,65 @@ app.post('/api/chat', auth, async (req, res) => {
     catMap[p.categoria].prods.push(`[${st}] ${p.nome}: ${p.qtd} ${p.unidade}`);
   }
   const cats = Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0]));
-  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.\n2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS.\n3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.\n4. Se perguntarem sobre um produto não listado, diga que o estoque está OK.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}`;
+  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados abaixo. Nunca invente ou suponha quantidades.\n2. "Itens em falta" = APENAS os listados em ZERADOS e CRÍTICOS.\n3. Ao listar produtos, mostre nome, quantidade atual e mínimo quando disponível.\n4. Se perguntarem sobre um produto não listado, diga que o estoque está OK.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}`;
   try {
     const messages = [...historico.map(h => ({ role: h.role, content: h.content })), { role: 'user', content: pergunta }];
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, system: contexto, messages })
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1024, system: contexto, messages })
     });
     if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 200) });
     const data = await response.json();
-    const resposta = (data.content||[]).map(b => b.text||'').join('').trim();
-    await audit('chat_ia', { pergunta: pergunta.slice(0,100) }, req.user, getClientIp(req));
-    res.json({ resposta });
+    const respostaRaw = (data.content||[]).map(b => b.text||'').join('').trim();
+
+    // Detecta e executa lançamentos em lote
+    const acaoMatch = respostaRaw.match(/ACAO_JSON:(\{[\s\S]*?\})\s*$/);
+    let textoFinal = respostaRaw;
+    let movimentosExecutados = [];
+
+    if (acaoMatch) {
+      textoFinal = respostaRaw.replace(/ACAO_JSON:[\s\S]*$/, '').trim();
+      try {
+        const acao = JSON.parse(acaoMatch[1]);
+        for (const mov of (acao.movimentos || [])) {
+          const nomeBusca = String(mov.produto_nome || '');
+          const tipo = ['Entrada','Saída','Perda'].includes(mov.tipo) ? mov.tipo : 'Entrada';
+          const qtdMov = Number(mov.qtd) || 0;
+          if (!nomeBusca || qtdMov <= 0) continue;
+          const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
+          if (!prod) { movimentosExecutados.push({ nome: nomeBusca, ok: false, erro: 'Produto não encontrado' }); continue; }
+          let novaQtd = Number(prod.qtd);
+          if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtdMov).toFixed(3));
+          else if (tipo === 'Saída' || tipo === 'Perda') {
+            if (qtdMov > novaQtd) { movimentosExecutados.push({ nome: prod.nome, ok: false, erro: `Estoque insuficiente (${prod.qtd} ${prod.unidade})` }); continue; }
+            novaQtd = Number((novaQtd - qtdMov).toFixed(3));
+          }
+          const { error: updErr } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
+          if (updErr) { movimentosExecutados.push({ nome: prod.nome, ok: false, erro: 'Erro ao atualizar' }); continue; }
+          await supabase.from('movimentacoes').insert({
+            produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+            tipo, qtd: qtdMov, unidade: prod.unidade,
+            custo: Number(prod.custo || 0), valor: Number((Number(prod.custo || 0) * qtdMov).toFixed(2)),
+            motivo: tipo === 'Entrada' ? 'Compra (IA chat)' : 'Lançamento IA chat',
+            responsavel: req.user.nome, obs: `via chat IA: ${pergunta.slice(0, 80)}`,
+            created_at: nowSP(),
+          });
+          movimentosExecutados.push({ nome: prod.nome, tipo, qtd: qtdMov, unidade: prod.unidade, ok: true });
+        }
+        if (movimentosExecutados.length > 0) {
+          const okCount = movimentosExecutados.filter(m => m.ok).length;
+          const linhas = movimentosExecutados.map(m => m.ok
+            ? `✅ ${m.tipo} — ${m.nome}: ${m.qtd} ${m.unidade}`
+            : `❌ ${m.nome}: ${m.erro}`
+          );
+          textoFinal += `\n\n**Lançamentos executados (${okCount}/${movimentosExecutados.length}):**\n${linhas.join('\n')}`;
+        }
+      } catch(eAcao) { console.error('Erro ao executar acao chat:', eAcao.message); }
+    }
+
+    await audit('chat_ia', { pergunta: pergunta.slice(0,100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
+    res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
