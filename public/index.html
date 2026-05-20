@@ -1695,7 +1695,7 @@ async function api(url) {
   return data;
 }
 
-async async function apiPost(url, body, method='POST') {
+async function apiPost(url, body, method='POST') {
   const res = await fetch(API + url, {method, headers:{'Content-Type':'application/json',...authHeaders()}, body:JSON.stringify(body)});
   const data = await res.json();
   if (res.status === 409 && data.alerta) return { ...data, _alerta409: true };
