@@ -817,6 +817,41 @@ app.get('/api/alertas/estoque-parado', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
+app.get('/api/alertas/fantasmas', auth, async (req, res) => {
+  try {
+    const { data: produtos } = await supabase.from('produtos')
+      .select('id, nome, categoria, qtd, unidade')
+      .or('ativo.eq.1,ativo.is.null')
+      .eq('qtd', 0)
+      .order('categoria').order('nome');
+    const ids = (produtos || []).map(p => p.id);
+    if (!ids.length) return res.json({ fantasmas: [] });
+    const { data: movs } = await supabase.from('movimentacoes')
+      .select('produto_id, tipo, qtd, created_at, responsavel')
+      .in('produto_id', ids)
+      .order('created_at', { ascending: false });
+    const movByProd = {};
+    for (const m of (movs || [])) {
+      if (!movByProd[m.produto_id]) movByProd[m.produto_id] = { entradas: 0, saidas: 0, ultimo: null, ultimo_responsavel: null };
+      if (m.tipo === 'Entrada') movByProd[m.produto_id].entradas += Number(m.qtd);
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') movByProd[m.produto_id].saidas += Number(m.qtd);
+      if (!movByProd[m.produto_id].ultimo) { movByProd[m.produto_id].ultimo = m.created_at; movByProd[m.produto_id].ultimo_responsavel = m.responsavel; }
+    }
+    const fantasmas = [];
+    for (const p of (produtos || [])) {
+      const hist = movByProd[p.id];
+      if (!hist || hist.entradas === 0) continue;
+      if (hist.saidas === 0) {
+        fantasmas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, unidade: p.unidade,
+          total_entradas: Number(hist.entradas.toFixed(3)), total_saidas: 0,
+          ultimo_movimento: hist.ultimo, ultimo_responsavel: hist.ultimo_responsavel });
+      }
+    }
+    fantasmas.sort((a, b) => new Date(b.ultimo_movimento) - new Date(a.ultimo_movimento));
+    res.json({ fantasmas });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
 // ==================== GERENCIAR USUÁRIOS ====================
 app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
   const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at').order('role').order('nome');

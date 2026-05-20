@@ -802,6 +802,13 @@ select.big-input { font-size: 14px; }
         <div id="alertas-resumo" style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px"></div>
         <div id="alertas-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
       </div>
+      <div class="admin-card" style="margin-top:16px">
+        <div class="admin-card-title">👻 Fantasmas — Entrada sem Saída</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Produtos zerados com entradas registradas mas nenhuma saída no histórico. Alguém usou sem lançar?
+        </div>
+        <div id="fantasmas-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
+      </div>
     </div>
   </div>
 
@@ -1174,9 +1181,14 @@ async function loadDash() {
 async function loadAlertas() {
   const lista = document.getElementById('alertas-lista');
   const resumoEl = document.getElementById('alertas-resumo');
+  const fantasmasEl = document.getElementById('fantasmas-lista');
   try {
     lista.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div>';
-    const r = await api('/api/alertas/estoque-parado');
+    fantasmasEl.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div>';
+    const [r, rf] = await Promise.all([
+      api('/api/alertas/estoque-parado'),
+      api('/api/alertas/fantasmas').catch(() => ({ fantasmas: [] }))
+    ]);
     const { alertas, resumo } = r;
     resumoEl.innerHTML = [
       `<span style="background:rgba(239,68,68,.12);color:#ef4444;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600">🔴 Crítico: ${resumo.criticos}</span>`,
@@ -1185,29 +1197,44 @@ async function loadAlertas() {
     ].join('');
     if (!alertas.length) {
       lista.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Nenhum item de alto giro parado. Estoque com bom giro!</div></div>';
-      return;
-    }
-    const urgColors = { CRITICO: '#ef4444', ATENCAO: '#f97316', SEM_HISTORICO: '#94a3b8' };
-    const urgLabels = { CRITICO: '🔴 CRÍTICO', ATENCAO: '🟠 ATENÇÃO', SEM_HISTORICO: '⚫ SEM HISTÓRICO' };
-    const groups = {};
-    for (const a of alertas) { if (!groups[a.urgencia]) groups[a.urgencia] = []; groups[a.urgencia].push(a); }
-    const order = ['CRITICO', 'ATENCAO', 'SEM_HISTORICO'];
-    let html = '';
-    for (const urg of order) {
-      if (!groups[urg]) continue;
-      html += `<div style="margin-bottom:16px">`;
-      html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">${urgLabels[urg]} (${groups[urg].length})</div>`;
-      for (const a of groups[urg]) {
-        const diasTxt = a.dias_parado !== null ? `${a.dias_parado} dias sem mov.` : 'Sem histórico';
-        const ultTxt = a.ultimo_movimento ? 'último: ' + new Date(String(a.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (a.ultimo_responsavel ? ' (' + a.ultimo_responsavel + ')' : '') : 'Nunca movimentado';
-        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${urgColors[urg]}">`;
-        html += `<div><div style="font-size:13px;font-weight:600">${a.nome}</div><div style="font-size:11px;color:var(--muted)">${a.categoria} | ${a.qtd} ${a.unidade} | limite: ${a.threshold_dias}d</div><div style="font-size:10px;color:var(--muted);margin-top:2px">${ultTxt}</div></div>`;
-        html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};text-align:right;flex-shrink:0;margin-left:8px">${diasTxt}</div>`;
+    } else {
+      const urgColors = { CRITICO: '#ef4444', ATENCAO: '#f97316', SEM_HISTORICO: '#94a3b8' };
+      const urgLabels = { CRITICO: '🔴 CRÍTICO', ATENCAO: '🟠 ATENÇÃO', SEM_HISTORICO: '⚫ SEM HISTÓRICO' };
+      const groups = {};
+      for (const a of alertas) { if (!groups[a.urgencia]) groups[a.urgencia] = []; groups[a.urgencia].push(a); }
+      const order = ['CRITICO', 'ATENCAO', 'SEM_HISTORICO'];
+      let html = '';
+      for (const urg of order) {
+        if (!groups[urg]) continue;
+        html += `<div style="margin-bottom:16px">`;
+        html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};margin-bottom:8px;text-transform:uppercase;letter-spacing:.5px">${urgLabels[urg]} (${groups[urg].length})</div>`;
+        for (const a of groups[urg]) {
+          const diasTxt = a.dias_parado !== null ? `${a.dias_parado} dias sem mov.` : 'Sem histórico';
+          const ultTxt = a.ultimo_movimento ? 'último: ' + new Date(String(a.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (a.ultimo_responsavel ? ' (' + a.ultimo_responsavel + ')' : '') : 'Nunca movimentado';
+          html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${urgColors[urg]}">`;
+          html += `<div><div style="font-size:13px;font-weight:600">${a.nome}</div><div style="font-size:11px;color:var(--muted)">${a.categoria} | ${a.qtd} ${a.unidade} | limite: ${a.threshold_dias}d</div><div style="font-size:10px;color:var(--muted);margin-top:2px">${ultTxt}</div></div>`;
+          html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};text-align:right;flex-shrink:0;margin-left:8px">${diasTxt}</div>`;
+          html += `</div>`;
+        }
         html += `</div>`;
       }
-      html += `</div>`;
+      lista.innerHTML = html;
     }
-    lista.innerHTML = html;
+    // Fantasmas
+    const { fantasmas } = rf;
+    if (!fantasmas.length) {
+      fantasmasEl.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Nenhum fantasma detectado.</div></div>';
+    } else {
+      let fhtml = '';
+      for (const f of fantasmas) {
+        const ultTxt = f.ultimo_movimento ? new Date(String(f.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (f.ultimo_responsavel ? ' (' + f.ultimo_responsavel + ')' : '') : '—';
+        fhtml += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid #a855f7">`;
+        fhtml += `<div><div style="font-size:13px;font-weight:600">${f.nome}</div><div style="font-size:11px;color:var(--muted)">${f.categoria} | entrada: ${f.total_entradas} ${f.unidade} | saída: 0</div><div style="font-size:10px;color:var(--muted);margin-top:2px">último: ${ultTxt}</div></div>`;
+        fhtml += `<div style="font-size:11px;font-weight:700;color:#a855f7;text-align:right;flex-shrink:0;margin-left:8px">sem saída</div>`;
+        fhtml += `</div>`;
+      }
+      fantasmasEl.innerHTML = fhtml;
+    }
   } catch(e) { lista.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar alertas.</div></div>'; }
 }
 
