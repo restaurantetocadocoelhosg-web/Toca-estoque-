@@ -421,6 +421,31 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null)
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
 
+  // Detecção de anomalia para Saída/Perda
+  if ((tipo === 'Saída' || tipo === 'Perda') && !req.body.forcar) {
+    const trintaDias = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+    const { data: hist } = await supabase.from('movimentacoes')
+      .select('qtd').eq('produto_id', prod.id)
+      .in('tipo', ['Saída', 'Perda']).gte('created_at', trintaDias);
+    if (hist && hist.length >= 5) {
+      const totalConsumo = hist.reduce((s, m) => s + Number(m.qtd), 0);
+      const mediaDiaria = totalConsumo / 30;
+      if (mediaDiaria > 0 && qtd > mediaDiaria * 3) {
+        if (req.user.role === 'operador') {
+          return res.status(409).json({
+            alerta: true, codigo: 'QUANTIDADE_SUSPEITA',
+            media_diaria: Number(mediaDiaria.toFixed(2)), qtd_lancada: qtd, unidade: prod.unidade,
+            msg: `Quantidade ${qtd} ${prod.unidade} é ${(qtd/mediaDiaria).toFixed(1)}× acima da média diária (${mediaDiaria.toFixed(1)} ${prod.unidade}). Chame o gerente para confirmar.`
+          });
+        } else {
+          req.body.obs = (req.body.obs ? req.body.obs + ' | ' : '') +
+            `⚠️ Anomalia: ${qtd} ${prod.unidade} = ${(qtd/mediaDiaria).toFixed(1)}× média diária`;
+          obs = sanitizeText(req.body.obs, 200);
+        }
+      }
+    }
+  }
+
   let novaQtd = Number(prod.qtd);
   if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
   else if (tipo === 'Saída' || tipo === 'Perda') {
@@ -491,8 +516,28 @@ app.get('/api/movimentacoes', auth, async (req, res) => {
   res.json(data || []);
 });
 
+// ==================== SNAPSHOT DIÁRIO ====================
+async function ensureSnapshotDiario() {
+  try {
+    const hoje = nowSP().slice(0, 10);
+    const { count } = await supabase.from('snapshots_diarios')
+      .select('id', { count: 'exact', head: true }).eq('data', hoje);
+    if (count > 0) return;
+    const { data: prods } = await supabase.from('produtos')
+      .select('id, nome, categoria, qtd, unidade').or('ativo.eq.1,ativo.is.null');
+    if (!prods?.length) return;
+    const rows = prods.map(p => ({
+      produto_id: p.id, produto_nome: p.nome, categoria: p.categoria,
+      qtd: p.qtd, unidade: p.unidade, data: hoje,
+    }));
+    await supabase.from('snapshots_diarios').upsert(rows,
+      { onConflict: 'produto_id,data', ignoreDuplicates: true });
+  } catch(e) { console.error('Snapshot diario erro:', e.message); }
+}
+
 // ==================== DASHBOARD ====================
 app.get('/api/dashboard', auth, async (req, res) => {
+  ensureSnapshotDiario().catch(() => {});
   const { data: produtos } = await supabase.from('produtos').select('qtd, minimo, custo');
   const all = produtos || [];
   const zerados = all.filter(p => Number(p.qtd) === 0).length;

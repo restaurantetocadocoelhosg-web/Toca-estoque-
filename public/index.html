@@ -1450,7 +1450,7 @@ function clearProd() {
 
 function closeAc() { document.getElementById('ac-list').classList.remove('open'); }
 
-async function lancar() {
+async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
   const qtd = parseFloat(document.getElementById('f-qtd').value);
   if ((!qtd&&qtd!==0)||qtd<0||(tipoAtual!=='Ajuste'&&qtd<=0)) {
@@ -1469,8 +1469,13 @@ async function lancar() {
   try {
     const resultado = await apiPost('/api/movimentacoes', {
       produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: prodAtual.custo,
-      motivo: document.getElementById('f-motivo').value, obs: ''
+      motivo: document.getElementById('f-motivo').value, obs: '', forcar
     });
+    if (resultado._alerta409) {
+      btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
+      if (confirm('⚠️ ' + resultado.msg + '\n\nConfirmar mesmo assim?')) lancar(true);
+      return;
+    }
     // Atualiza prodAtual com qtd nova para próximo lançamento
     if (resultado.produto) prodAtual = resultado.produto;
     const sinal = tipoAtual==='Entrada'?'+':tipoAtual==='Ajuste'?'=':'-';
@@ -1663,9 +1668,10 @@ async function api(url) {
   return data;
 }
 
-async function apiPost(url, body, method='POST') {
+async async function apiPost(url, body, method='POST') {
   const res = await fetch(API + url, {method, headers:{'Content-Type':'application/json',...authHeaders()}, body:JSON.stringify(body)});
   const data = await res.json();
+  if (res.status === 409 && data.alerta) return { ...data, _alerta409: true };
   if (!res.ok) throw new Error(data.erro||'Erro');
   return data;
 }
