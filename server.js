@@ -629,31 +629,41 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
     const { data: sinonimosData } = await supabase.from('sinonimos').select('termo, produto_nome').in('termo', termos);
     const sinoMap = Object.fromEntries((sinonimosData || []).map(s => [s.termo, s.produto_nome]));
 
+    // 1 query: todos os produtos ativos — matching feito em JS, sem queries no loop
+    const { data: prodPool } = await supabase.from('produtos')
+      .select('id, nome, categoria, unidade, qtd, minimo, custo, nome_search')
+      .or('ativo.eq.1,ativo.is.null');
+    const todosProds = prodPool || [];
+    const prodByNomeLower = Object.fromEntries(todosProds.map(p => [p.nome.toLowerCase(), p]));
+
     const itens = [];
     for (const item of (parsed.itens || [])) {
       const qNorm = normalizeSearch(item.nome);
-      let candidatos = [], produtoExato = null;
+      let candidatos = [], via_sinonimo = false;
       const prodNomeSinonimo = sinoMap[qNorm];
       if (prodNomeSinonimo) {
-        const { data: p } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome', prodNomeSinonimo).single();
-        if (p) { produtoExato = p; candidatos = [p]; }
+        const sp = prodByNomeLower[prodNomeSinonimo.toLowerCase()];
+        if (sp) { candidatos = [sp]; via_sinonimo = true; }
       }
-      if (!produtoExato) {
-        const palavras = qNorm.split(/\s+/).filter(p => p.length > 2);
-        if (palavras.length > 1) {
-          const scoreMap = new Map();
-          for (const palavra of palavras) {
-            const { data: matches } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${palavra}%`).order('nome').limit(10);
-            for (const m of (matches || [])) { const e = scoreMap.get(m.id) || { produto: m, score: 0 }; e.score++; scoreMap.set(m.id, e); }
-          }
-          if (scoreMap.size > 0) candidatos = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
+      if (!candidatos.length) {
+        const palavras = qNorm.split(/\s+/).filter(w => w.length > 2);
+        const scoreMap = new Map();
+        for (const p of todosProds) {
+          const ns = (p.nome_search || p.nome || '').toLowerCase();
+          let score = 0;
+          for (const w of palavras) if (ns.includes(w)) score++;
+          if (score > 0) scoreMap.set(p.id, { produto: p, score });
         }
-        if (!candidatos.length) {
-          const { data: fallback } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${qNorm}%`).order('nome').limit(3);
-          candidatos = fallback || [];
+        if (scoreMap.size > 0) {
+          candidatos = Array.from(scoreMap.values())
+            .sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
+        } else {
+          candidatos = todosProds
+            .filter(p => (p.nome_search || p.nome || '').toLowerCase().includes(qNorm))
+            .slice(0, 3);
         }
       }
-      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo: !!produtoExato });
+      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo });
     }
     await audit('ler_cupom', { total_itens: itens.length }, req.user, getClientIp(req));
     res.json({ itens });
