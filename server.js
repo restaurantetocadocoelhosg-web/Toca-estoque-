@@ -581,53 +581,31 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
     const { data: sinonimosData } = await supabase.from('sinonimos').select('termo, produto_nome').in('termo', termos);
     const sinoMap = Object.fromEntries((sinonimosData || []).map(s => [s.termo, s.produto_nome]));
 
-    // Batch lookup: 1 query for synonym products + 1 OR query for all remaining words
-    const sinoNomes = [...new Set(Object.values(sinoMap))];
-    const { data: sinoProdos } = sinoNomes.length
-      ? await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').in('nome', sinoNomes)
-      : { data: [] };
-    const sinoProdMap = Object.fromEntries((sinoProdos || []).map(p => [p.nome.toLowerCase(), p]));
-
-    // Collect all unique words from items without synonym match
-    const semSino = (parsed.itens || []).filter(i => !sinoMap[normalizeSearch(i.nome)]);
-    const allWords = [...new Set(semSino.flatMap(i =>
-      normalizeSearch(i.nome).split(/\s+/).filter(w => w.length > 2)
-    ))];
-    let poolProds = [];
-    if (allWords.length) {
-      const orFilter = allWords.map(w => `nome_search.ilike.%${w}%`).join(',');
-      const { data: pool } = await supabase.from('produtos')
-        .select('id, nome, categoria, unidade, qtd, minimo, custo, nome_search')
-        .or(orFilter).order('nome').limit(200);
-      poolProds = pool || [];
-    }
-
     const itens = [];
     for (const item of (parsed.itens || [])) {
       const qNorm = normalizeSearch(item.nome);
-      let candidatos = [], via_sinonimo = false;
+      let candidatos = [], produtoExato = null;
       const prodNomeSinonimo = sinoMap[qNorm];
       if (prodNomeSinonimo) {
-        const sp = sinoProdMap[prodNomeSinonimo.toLowerCase()];
-        if (sp) { candidatos = [sp]; via_sinonimo = true; }
+        const { data: p } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome', prodNomeSinonimo).single();
+        if (p) { produtoExato = p; candidatos = [p]; }
       }
-      if (!candidatos.length) {
-        const palavras = qNorm.split(/\s+/).filter(w => w.length > 2);
-        const scoreMap = new Map();
-        for (const p of poolProds) {
-          const ns = (p.nome_search || p.nome || '').toLowerCase();
-          let score = 0;
-          for (const w of palavras) if (ns.includes(w)) score++;
-          if (score > 0) { const e = scoreMap.get(p.id) || { produto: p, score: 0 }; e.score = score; scoreMap.set(p.id, e); }
+      if (!produtoExato) {
+        const palavras = qNorm.split(/\s+/).filter(p => p.length > 2);
+        if (palavras.length > 1) {
+          const scoreMap = new Map();
+          for (const palavra of palavras) {
+            const { data: matches } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${palavra}%`).order('nome').limit(10);
+            for (const m of (matches || [])) { const e = scoreMap.get(m.id) || { produto: m, score: 0 }; e.score++; scoreMap.set(m.id, e); }
+          }
+          if (scoreMap.size > 0) candidatos = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
         }
-        if (scoreMap.size > 0) {
-          candidatos = Array.from(scoreMap.values()).sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
-        } else {
-          // Fallback: substring match on full term
-          candidatos = poolProds.filter(p => (p.nome_search||p.nome||'').toLowerCase().includes(qNorm)).slice(0, 3);
+        if (!candidatos.length) {
+          const { data: fallback } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo').ilike('nome_search', `%${qNorm}%`).order('nome').limit(3);
+          candidatos = fallback || [];
         }
       }
-      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo });
+      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo: !!produtoExato });
     }
     await audit('ler_cupom', { total_itens: itens.length }, req.user, getClientIp(req));
     res.json({ itens });
@@ -656,7 +634,7 @@ app.post('/api/chat', auth, async (req, res) => {
   const prodAtencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).slice(0, 30);
   const hojeSP = nowSP().slice(0, 10);
   const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59').order('created_at', { ascending: false }).limit(200);
+  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').order('id', { ascending: false }).limit(50);
   const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
   const { data: movConsumo } = await supabase.from('movimentacoes').select('produto_nome, qtd, unidade').in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
   const consumoMap = {};
@@ -685,7 +663,7 @@ app.post('/api/chat', auth, async (req, res) => {
     catMap[p.categoria].prods.push(`[${st}] ${p.nome}: ${p.qtd} ${p.unidade}`);
   }
   const cats = Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0]));
-  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados fornecidos. NUNCA invente, estime ou suponha valores.\n2. "Itens em falta" = APENAS os de ZERADOS e CRÍTICOS.\n3. Ao listar produtos: nome + quantidade atual + mínimo.\n4. Produto não encontrado nos dados = diga "não há registro" (nunca "está OK" sem confirmar).\n5. Se houver itens em ALERTA GIRO PARADO, mencione os mais críticos proativamente.\n6. Ao executar lançamentos: confirme nome exato + tipo + quantidade ANTES do ACAO_JSON.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== MOVIMENTAÇÕES HOJE (${(ultimosMov||[]).length}) ===\n${(ultimosMov || []).map(m => `• [${new Date(String(m.created_at).replace(' ','T')).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}\n\n=== ⚠️ ALERTA GIRO PARADO (verificar urgente) ===\n${alertasParadosIA.length === 0 ? 'Todos os itens de alto giro estão com movimentão normal.' : alertasParadosIA.map(a => `• ${a.nome} (${a.cat}): ${a.dias} dias sem mov. | Estoque: ${a.qtd} ${a.unidade}`).join('\n')}`;
+  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados fornecidos. NUNCA invente, estime ou suponha valores.\n2. "Itens em falta" = APENAS os de ZERADOS e CRÍTICOS.\n3. Ao listar produtos: nome + quantidade atual + mínimo.\n4. Produto não encontrado nos dados = diga "não há registro" (nunca "está OK" sem confirmar).\n5. Se houver itens em ALERTA GIRO PARADO, mencione os mais críticos proativamente.\n6. Ao executar lançamentos: confirme nome exato + tipo + quantidade ANTES do ACAO_JSON.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== ÚLTIMAS MOVIMENTAÇÕES ===\n${(ultimosMov || []).map(m => `• [${m.created_at}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}\n\n=== ⚠️ ALERTA GIRO PARADO (verificar urgente) ===\n${alertasParadosIA.length === 0 ? 'Todos os itens de alto giro estão com movimentão normal.' : alertasParadosIA.map(a => `• ${a.nome} (${a.cat}): ${a.dias} dias sem mov. | Estoque: ${a.qtd} ${a.unidade}`).join('\n')}`;
   try {
     const messages = [...historico.map(h => ({ role: h.role, content: h.content })), { role: 'user', content: pergunta }];
     const response = await fetch('https://api.anthropic.com/v1/messages', {
