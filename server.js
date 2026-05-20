@@ -437,10 +437,13 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   const { error: updateErr } = await supabase.from('produtos').update(updateData).eq('id', prod.id);
   if (updateErr) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
 
+  const qtdAntes = Number(prod.qtd);
   const { error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
-    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs, created_at: nowSP(),
+    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs,
+    qtd_antes: qtdAntes, qtd_depois: novaQtd,
+    created_at: nowSP(),
   });
   if (movErr) {
     await supabase.from('produtos').update({ qtd: prod.qtd, custo: prod.custo }).eq('id', prod.id);
@@ -705,6 +708,7 @@ app.post('/api/chat', auth, async (req, res) => {
             custo: Number(prod.custo || 0), valor: Number((Number(prod.custo || 0) * qtdMov).toFixed(2)),
             motivo: tipo === 'Entrada' ? 'Compra (IA chat)' : 'Lançamento IA chat',
             responsavel: req.user.nome, obs: `via chat IA: ${pergunta.slice(0, 80)}`,
+            qtd_antes: Number(prod.qtd), qtd_depois: novaQtd,
             created_at: nowSP(),
           });
           movimentosExecutados.push({ nome: prod.nome, tipo, qtd: qtdMov, unidade: prod.unidade, ok: true });
