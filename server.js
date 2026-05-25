@@ -403,7 +403,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   const tipo = sanitizeText(req.body?.tipo, 20);
   const motivo = sanitizeText(req.body?.motivo, 80);
-  const obs = sanitizeText(req.body?.obs, 200);
+  let obs = sanitizeText(req.body?.obs, 200);
   const qtdInput = req.body?.qtd;
 
   if (!produto_nome || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
