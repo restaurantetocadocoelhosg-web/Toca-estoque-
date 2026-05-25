@@ -616,7 +616,11 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
         ]}]
       })
     });
-    if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 300) });
+    if (!response.ok) {
+      const errBody = (await response.text()).slice(0, 500);
+      console.error('Anthropic API error [ler-cupom]:', response.status, errBody);
+      return res.status(502).json({ erro: 'Erro na API (' + response.status + '): ' + errBody });
+    }
     const data = await response.json();
     const text = (data.content || []).map(b => b.text || '').join('');
     let parsed;
@@ -729,7 +733,11 @@ app.post('/api/chat', auth, async (req, res) => {
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: contexto, messages })
     });
-    if (!response.ok) return res.status(502).json({ erro: 'Erro na API: ' + (await response.text()).slice(0, 200) });
+    if (!response.ok) {
+      const errBody = (await response.text()).slice(0, 500);
+      console.error('Anthropic API error [chat]:', response.status, errBody);
+      return res.status(502).json({ erro: 'Erro na API (' + response.status + '): ' + errBody });
+    }
     const data = await response.json();
     const respostaRaw = (data.content||[]).map(b => b.text||'').join('').trim();
 
