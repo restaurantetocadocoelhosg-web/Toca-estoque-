@@ -677,119 +677,398 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
   }
 });
 
-// ==================== ASSISTENTE IA ====================
+// ==================== ASSISTENTE IA AGÊNTICO ====================
+
+const IA_TOOLS = [
+  {
+    name: 'buscar_produto',
+    description: 'Busca produtos pelo nome. Retorna nome, categoria, qtd atual, mínimo, custo, unidade e status.',
+    input_schema: {
+      type: 'object',
+      properties: { nome: { type: 'string', description: 'Nome ou parte do nome do produto' } },
+      required: ['nome']
+    }
+  },
+  {
+    name: 'listar_produtos',
+    description: 'Lista produtos com filtros opcionais. Status: zerado, critico, atencao, ok.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['zerado', 'critico', 'atencao', 'ok'] },
+        categoria: { type: 'string', description: 'Filtrar por categoria' },
+        limite: { type: 'number', description: 'Máximo de resultados (padrão 50)' }
+      }
+    }
+  },
+  {
+    name: 'ver_historico',
+    description: 'Histórico de movimentações de um produto específico.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        produto_nome: { type: 'string', description: 'Nome do produto' },
+        dias: { type: 'number', description: 'Quantos dias atrás buscar (padrão 30)' },
+        limite: { type: 'number', description: 'Máximo de registros (padrão 20)' }
+      },
+      required: ['produto_nome']
+    }
+  },
+  {
+    name: 'ver_movimentacoes',
+    description: 'Ver movimentações recentes, filtradas por data, tipo ou produto.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hoje: { type: 'boolean', description: 'Se true, retorna apenas movimentações de hoje' },
+        tipo: { type: 'string', enum: ['Entrada', 'Saída', 'Perda', 'Ajuste'] },
+        dias: { type: 'number', description: 'Quantos dias atrás buscar' },
+        produto_nome: { type: 'string', description: 'Filtrar por nome do produto' },
+        limite: { type: 'number', description: 'Máximo de registros (padrão 50)' }
+      }
+    }
+  },
+  {
+    name: 'ver_dashboard',
+    description: 'Resumo geral do estoque: totais, zerados, críticos, valor total, lançamentos de hoje.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'alertas_giro_parado',
+    description: 'Produtos de alto giro (perecíveis, carnes) sem movimentação além do esperado.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'listar_categorias',
+    description: 'Lista categorias com resumo de quantidade de produtos e status.',
+    input_schema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'registrar_movimentacao',
+    description: 'Registra entrada, saída, perda ou ajuste de estoque para um produto.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        produto_nome: { type: 'string', description: 'Nome do produto' },
+        tipo: { type: 'string', enum: ['Entrada', 'Saída', 'Perda', 'Ajuste'] },
+        qtd: { type: 'number', description: 'Quantidade' },
+        motivo: { type: 'string', description: 'Motivo da movimentação' },
+        custo: { type: 'number', description: 'Custo unitário (opcional, Entrada)' }
+      },
+      required: ['produto_nome', 'tipo', 'qtd']
+    }
+  },
+  {
+    name: 'atualizar_produto',
+    description: 'Atualiza custo ou estoque mínimo de um produto. Requer role gerente ou admin.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        produto_nome: { type: 'string' },
+        custo: { type: 'number', description: 'Novo custo unitário' },
+        minimo: { type: 'number', description: 'Novo estoque mínimo' }
+      },
+      required: ['produto_nome']
+    }
+  },
+  {
+    name: 'registrar_nota_agenda',
+    description: 'Registra observação, erro, melhoria ou alerta na agenda da IA.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tipo: { type: 'string', enum: ['observacao', 'melhoria', 'erro', 'alerta', 'elogio'] },
+        texto: { type: 'string', description: 'Conteúdo da nota' },
+        produto_nome: { type: 'string', description: 'Produto relacionado (se houver)' }
+      },
+      required: ['tipo', 'texto']
+    }
+  },
+  {
+    name: 'ver_agenda',
+    description: 'Lê notas recentes da agenda da IA: observações, melhorias sugeridas, erros detectados.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tipo: { type: 'string', enum: ['observacao', 'melhoria', 'erro', 'alerta', 'elogio'] },
+        limite: { type: 'number', description: 'Quantidade de notas (padrão 20)' },
+        dias: { type: 'number', description: 'Quantos dias atrás (padrão 30)' }
+      }
+    }
+  }
+];
+
+async function executarFerramenta(nome, input, user) {
+  try {
+    switch (nome) {
+
+      case 'buscar_produto': {
+        const q = sanitizeText(input.nome, 100);
+        const { data } = await supabase.from('produtos')
+          .select('id, nome, categoria, qtd, minimo, custo, unidade')
+          .ilike('nome_search', `%${normalizeSearch(q)}%`)
+          .or('ativo.eq.1,ativo.is.null').order('nome').limit(10);
+        return {
+          encontrados: (data || []).length,
+          produtos: (data || []).map(p => {
+            const st = Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK';
+            return { ...p, status: st, valor_em_estoque: Number((Number(p.qtd) * Number(p.custo)).toFixed(2)) };
+          })
+        };
+      }
+
+      case 'listar_produtos': {
+        let q = supabase.from('produtos').select('id, nome, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+        if (input.categoria) q = q.eq('categoria', sanitizeText(input.categoria, 80));
+        const { data } = await q.limit(500);
+        let res = (data || []).map(p => {
+          const st = Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK';
+          return { ...p, status: st };
+        });
+        if (input.status === 'zerado') res = res.filter(p => p.status === 'ZERADO');
+        else if (input.status === 'critico') res = res.filter(p => p.status === 'CRITICO');
+        else if (input.status === 'atencao') res = res.filter(p => p.status === 'ATENCAO');
+        else if (input.status === 'ok') res = res.filter(p => p.status === 'OK');
+        const limite = Math.min(Number(input.limite) || 50, 200);
+        return { total: res.length, produtos: res.slice(0, limite) };
+      }
+
+      case 'ver_historico': {
+        const nomeBusca = sanitizeText(input.produto_nome, 120);
+        const { data: prod } = await supabase.from('produtos').select('id, nome, qtd, unidade, minimo').ilike('nome', nomeBusca).single();
+        if (!prod) return { erro: `Produto "${nomeBusca}" não encontrado` };
+        const dias = Math.min(Number(input.dias) || 30, 365);
+        const desde = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+        const { data: movs } = await supabase.from('movimentacoes')
+          .select('tipo, qtd, unidade, motivo, responsavel, obs, created_at, qtd_antes, qtd_depois')
+          .eq('produto_id', prod.id).gte('created_at', desde)
+          .order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 20, 100));
+        return { produto: prod.nome, qtd_atual: prod.qtd, unidade: prod.unidade, minimo: prod.minimo, periodo_dias: dias, movimentacoes: movs || [] };
+      }
+
+      case 'ver_movimentacoes': {
+        let q = supabase.from('movimentacoes').select('produto_nome, categoria, tipo, qtd, unidade, motivo, responsavel, obs, created_at');
+        if (input.hoje) {
+          const hSP = nowSP().slice(0, 10);
+          q = q.gte('created_at', hSP).lte('created_at', hSP + 'T23:59:59');
+        } else if (input.dias) {
+          q = q.gte('created_at', new Date(Date.now() - Number(input.dias) * 86400000).toISOString().slice(0, 10));
+        }
+        if (input.tipo) q = q.eq('tipo', input.tipo);
+        if (input.produto_nome) q = q.ilike('produto_nome', `%${sanitizeText(input.produto_nome, 100)}%`);
+        const { data } = await q.order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 50, 200));
+        return { total: (data || []).length, movimentacoes: data || [] };
+      }
+
+      case 'ver_dashboard': {
+        const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
+        const prods = all || [];
+        const zerados = prods.filter(p => Number(p.qtd) === 0).length;
+        const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
+        const atencao = prods.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+        const valor = Number(prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0).toFixed(2));
+        const hSP = nowSP().slice(0, 10);
+        const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hSP).lte('created_at', hSP + 'T23:59:59');
+        const { data: ultimos } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, responsavel, created_at').order('id', { ascending: false }).limit(5);
+        return { total_produtos: prods.length, zerados, criticos, atencao, ok: prods.length - zerados - criticos - atencao, valor_total: valor, lancamentos_hoje: lancHoje || 0, ultimos_lancamentos: ultimos || [] };
+      }
+
+      case 'alertas_giro_parado': {
+        const CATS = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
+        const THR = { 'Hortifruti': 7, 'Aves': 7, 'Massa Fresca': 7, 'Carnes Bovinas': 10, 'Carnes Suínas': 10, 'Pescados': 10, 'Laticínios': 10, 'Outras Proteínas': 10, 'Bebidas': 15 };
+        const { data: prods } = await supabase.from('produtos').select('id, nome, categoria, qtd, unidade').in('categoria', CATS).or('ativo.eq.1,ativo.is.null');
+        const ids = (prods || []).map(p => p.id);
+        if (!ids.length) return { total_alertas: 0, alertas: [] };
+        const { data: movs } = await supabase.from('movimentacoes').select('produto_id, created_at').in('produto_id', ids).order('created_at', { ascending: false });
+        const lastMov = {};
+        for (const m of (movs || [])) { if (!lastMov[m.produto_id]) lastMov[m.produto_id] = m.created_at; }
+        const alertas = [];
+        for (const p of (prods || [])) {
+          const thr = THR[p.categoria] || 10;
+          const last = lastMov[p.id];
+          const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
+          if (dias === null || dias >= thr) {
+            alertas.push({ nome: p.nome, categoria: p.categoria, dias_parado: dias !== null ? dias : 'sem histórico', qtd: p.qtd, unidade: p.unidade, urgencia: dias === null ? 'SEM_HISTORICO' : dias >= thr * 2 ? 'CRITICO' : 'ATENCAO' });
+          }
+        }
+        alertas.sort((a, b) => { const o = { SEM_HISTORICO: 0, CRITICO: 1, ATENCAO: 2 }; return o[a.urgencia] - o[b.urgencia]; });
+        return { total_alertas: alertas.length, alertas };
+      }
+
+      case 'listar_categorias': {
+        const { data } = await supabase.from('produtos').select('categoria, qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
+        const catMap = {};
+        for (const p of (data || [])) {
+          if (!catMap[p.categoria]) catMap[p.categoria] = { total: 0, zerados: 0, criticos: 0, atencao: 0, ok: 0, valor: 0 };
+          const c = catMap[p.categoria];
+          c.total++;
+          c.valor += Number(p.qtd) * Number(p.custo);
+          const st = Number(p.qtd) === 0 ? 'zerados' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'criticos' : Number(p.qtd) < Number(p.minimo) ? 'atencao' : 'ok';
+          c[st]++;
+        }
+        return { categorias: Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0])).map(([cat, d]) => ({ categoria: cat, ...d, valor: Number(d.valor.toFixed(2)) })) };
+      }
+
+      case 'registrar_movimentacao': {
+        const nomeBusca = sanitizeText(input.produto_nome, 120);
+        const tipo = ['Entrada','Saída','Perda','Ajuste'].includes(input.tipo) ? input.tipo : null;
+        if (!tipo) return { sucesso: false, erro: 'Tipo inválido. Use: Entrada, Saída, Perda ou Ajuste' };
+        const qtd = tipo === 'Ajuste' ? parseNonNegativeNumber(input.qtd) : parsePositiveNumber(input.qtd);
+        if (qtd === null) return { sucesso: false, erro: 'Quantidade inválida' };
+        const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
+        if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado. Use buscar_produto para ver nomes exatos.` };
+        let novaQtd = Number(prod.qtd);
+        if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
+        else if (tipo === 'Saída' || tipo === 'Perda') {
+          if (qtd > novaQtd) return { sucesso: false, erro: `Estoque insuficiente: disponível ${prod.qtd} ${prod.unidade}` };
+          novaQtd = Number((novaQtd - qtd).toFixed(3));
+        } else novaQtd = Number(qtd.toFixed(3));
+        const custoUnit = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || Number(prod.custo || 0)) : Number(prod.custo || 0);
+        const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - Number(prod.qtd)) : qtd;
+        const valor = Number((custoUnit * valorBase).toFixed(2));
+        const updateData = { qtd: novaQtd };
+        if (tipo === 'Entrada' && input.custo !== undefined) updateData.custo = custoUnit;
+        const { error: updErr } = await supabase.from('produtos').update(updateData).eq('id', prod.id);
+        if (updErr) return { sucesso: false, erro: 'Erro ao atualizar estoque' };
+        const { error: movErr } = await supabase.from('movimentacoes').insert({
+          produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+          tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
+          custo: custoUnit, valor, motivo: sanitizeText(input.motivo || 'Via assistente IA', 80),
+          responsavel: user && user.nome ? user.nome : 'IA', obs: 'Registrado pelo assistente IA',
+          qtd_antes: Number(prod.qtd), qtd_depois: novaQtd, created_at: nowSP(),
+        });
+        if (movErr) { await supabase.from('produtos').update({ qtd: prod.qtd }).eq('id', prod.id); return { sucesso: false, erro: 'Erro ao registrar movimentação' }; }
+        await audit('movimentacao_ia', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd }, user, '');
+        return { sucesso: true, produto: prod.nome, tipo, qtd, qtd_antes: Number(prod.qtd), qtd_depois: novaQtd, unidade: prod.unidade };
+      }
+
+      case 'atualizar_produto': {
+        if (!['admin','gerente'].includes(user && user.role)) return { sucesso: false, erro: 'Permissão insuficiente. Requer gerente ou admin.' };
+        const nomeBusca = sanitizeText(input.produto_nome, 120);
+        const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
+        if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado` };
+        const updates = {};
+        if (input.custo !== undefined) { const c = parseNonNegativeNumber(input.custo); if (c !== null) updates.custo = c; }
+        if (input.minimo !== undefined) { const m = parseNonNegativeNumber(input.minimo); if (m !== null) updates.minimo = m; }
+        if (!Object.keys(updates).length) return { sucesso: false, erro: 'Nenhum campo válido para atualizar' };
+        await supabase.from('produtos').update(updates).eq('id', prod.id);
+        await audit('produto_update_ia', { produto: prod.nome, updates }, user, '');
+        return { sucesso: true, produto: prod.nome, atualizacoes: updates };
+      }
+
+      case 'registrar_nota_agenda': {
+        const tipo = ['observacao','melhoria','erro','alerta','elogio'].includes(input.tipo) ? input.tipo : 'observacao';
+        const texto = sanitizeText(input.texto, 500);
+        if (!texto) return { sucesso: false, erro: 'Texto é obrigatório' };
+        const { error } = await supabase.from('ia_agenda').insert({
+          tipo, texto,
+          produto_nome: input.produto_nome ? sanitizeText(input.produto_nome, 120) : null,
+          usuario_nome: user && user.nome ? user.nome : null, criado_em: nowSP()
+        });
+        if (error) return { sucesso: false, erro: error.message };
+        return { sucesso: true, tipo, resumo: texto.slice(0, 60) };
+      }
+
+      case 'ver_agenda': {
+        let q = supabase.from('ia_agenda').select('*');
+        if (input.tipo) q = q.eq('tipo', input.tipo);
+        const dias = Math.min(Number(input.dias) || 30, 365);
+        q = q.gte('criado_em', new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10));
+        const { data } = await q.order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 20, 100));
+        return { total: (data || []).length, notas: data || [] };
+      }
+
+      default:
+        return { erro: `Ferramenta desconhecida: ${nome}` };
+    }
+  } catch(e) {
+    console.error(`Erro na ferramenta ${nome}:`, e.message);
+    return { erro: `Erro interno: ${e.message}` };
+  }
+}
+
 app.post('/api/chat', auth, async (req, res) => {
-  const pergunta = sanitizeText(req.body?.pergunta, 500);
-  const historico = Array.isArray(req.body?.historico) ? req.body.historico.slice(-8) : [];
+  const pergunta = sanitizeText(req.body && req.body.pergunta, 1000);
+  const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
   if (!pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'API não configurada.' });
-  const { data: allProd } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
-  const all = allProd || [];
-  const totalProd = all.length;
-  const zerados = all.filter(p => Number(p.qtd) === 0).length;
-  const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
-  const atencao_count = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
-  const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
-  const prodZerados = all.filter(p => Number(p.qtd) === 0).slice(0, 50);
-  const prodCriticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).slice(0, 50);
-  const prodAtencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).slice(0, 30);
-  const hojeSP = nowSP().slice(0, 10);
-  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
-  const { data: ultimosMov } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, motivo, responsavel, created_at').gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59').order('created_at', { ascending: false }).limit(200);
-  const thirtyDaysAgo = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
-  const { data: movConsumo } = await supabase.from('movimentacoes').select('produto_nome, qtd, unidade').in('tipo', ['Saída', 'Perda']).gte('created_at', thirtyDaysAgo);
-  const consumoMap = {};
-  for (const m of (movConsumo || [])) { if (!consumoMap[m.produto_nome]) consumoMap[m.produto_nome] = { total: 0, unidade: m.unidade }; consumoMap[m.produto_nome].total += Number(m.qtd); }
-  const maisConsumidos = Object.entries(consumoMap).sort((a, b) => b[1].total - a[1].total).slice(0, 10);
-  // Alertas de giro parado para IA
-  const CATS_ALTO_GIRO_IA = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
-  const THRESHOLDS_IA = { 'Hortifruti': 7, 'Aves': 7, 'Massa Fresca': 7, 'Carnes Bovinas': 10, 'Carnes Suínas': 10, 'Pescados': 10, 'Laticínios': 10, 'Outras Proteínas': 10, 'Bebidas': 15 };
-  const { data: lastMovGiro } = await supabase.from('movimentacoes')
-    .select('produto_nome, created_at').in('categoria', CATS_ALTO_GIRO_IA).order('created_at', { ascending: false });
-  const lastMovByNomeIA = {};
-  for (const m of (lastMovGiro || [])) { if (!lastMovByNomeIA[m.produto_nome]) lastMovByNomeIA[m.produto_nome] = m.created_at; }
-  const alertasParadosIA = all.filter(p => THRESHOLDS_IA[p.categoria]).reduce((acc, p) => {
-    const last = lastMovByNomeIA[p.nome];
-    const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
-    if (dias === null || dias >= THRESHOLDS_IA[p.categoria])
-      acc.push({ nome: p.nome, cat: p.categoria, dias: dias !== null ? dias : 'sem histórico', qtd: p.qtd, unidade: p.unidade });
-    return acc;
-  }, []);
-  const catMap = {};
-  for (const p of all) {
-    if (!catMap[p.categoria]) catMap[p.categoria] = { n: 0, valor: 0, prods: [] };
-    catMap[p.categoria].n++;
-    catMap[p.categoria].valor += Number(p.qtd) * Number(p.custo);
-    const st = Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK';
-    catMap[p.categoria].prods.push(`[${st}] ${p.nome}: ${p.qtd} ${p.unidade}`);
-  }
-  const cats = Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0]));
-  const contexto = `Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\nResponda SEMPRE em português brasileiro. Seja direto e preciso.\nHoje é ${hojeSP}.\n\nREGRAS CRÍTICAS — NUNCA VIOLE:\n1. Use SOMENTE os dados fornecidos. NUNCA invente, estime ou suponha valores.\n2. "Itens em falta" = APENAS os de ZERADOS e CRÍTICOS.\n3. Ao listar produtos: nome + quantidade atual + mínimo.\n4. Produto não encontrado nos dados = diga "não há registro" (nunca "está OK" sem confirmar).\n5. Se houver itens em ALERTA GIRO PARADO, mencione os mais críticos proativamente.\n6. Ao executar lançamentos: confirme nome exato + tipo + quantidade ANTES do ACAO_JSON.\n\nCAPACIDADE DE LAN\u00c7AMENTO EM LOTE:\nQuando o usu\u00e1rio pedir para dar ENTRADA, SA\u00cdDA ou PERDA de itens (lista de texto), voc\u00ea DEVE:\n1. Identificar cada produto pelo nome EXATO conforme TODOS OS PRODUTOS POR CATEGORIA.\n2. Responder com confirma\u00e7\u00e3o clara em texto (liste os itens que vai lan\u00e7ar).\n3. Na \u00daltima linha da resposta incluir: ACAO_JSON:{\"movimentos\":[{\"produto_nome\":\"Nome Exato\",\"tipo\":\"Entrada\",\"qtd\":5.0}]}\nTipos v\u00e1lidos: Entrada, Sa\u00edda, Perda\nSe n\u00e3o encontrar o nome exato, use o mais parecido e informe.\nSem pedido de lan\u00e7amento \u2192 N\u00c3O inclua ACAO_JSON.\n\nRESUMO DO ESTOQUE:\n- Total: ${totalProd} | Zerados: ${zerados} | Críticos: ${criticos} | Atenção: ${atencao_count}\n- Valor total: R$ ${Number(valorTotal).toFixed(2)} | Lançamentos hoje: ${lancHoje || 0}\n\n=== ZERADOS (${prodZerados.length}) ===\n${prodZerados.map(p => `• ${p.nome} | ${p.categoria}`).join('\n') || 'Nenhum.'}\n\n=== CRÍTICOS (${prodCriticos.length}) ===\n${prodCriticos.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== ATENÇÃO (${prodAtencao.length}) ===\n${prodAtencao.map(p => `• ${p.nome} | qtd: ${p.qtd} | mínimo: ${p.minimo} ${p.unidade}`).join('\n') || 'Nenhum.'}\n\n=== MAIS CONSUMIDOS (30 dias) ===\n${maisConsumidos.map(([nome, d]) => `• ${nome}: ${d.total.toFixed(2)} ${d.unidade}`).join('\n') || 'Sem dados.'}\n\n=== MOVIMENTAÇÕES HOJE (${(ultimosMov||[]).length}) ===\n${(ultimosMov || []).map(m => `• [${m.created_at.slice(11,16)}] ${m.tipo} — ${m.produto_nome} ${m.qtd} ${m.unidade||''} (${m.responsavel||''})`).join('\n')}\n\n=== TODOS OS PRODUTOS POR CATEGORIA ===\n${cats.map(([cat, d]) => `[${cat}] (${d.n} itens):\n${d.prods.join('\n')}`).join('\n\n')}\n\n=== ⚠️ ALERTA GIRO PARADO (verificar urgente) ===\n${alertasParadosIA.length === 0 ? 'Todos os itens de alto giro estão com movimentão normal.' : alertasParadosIA.map(a => `• ${a.nome} (${a.cat}): ${a.dias} dias sem mov. | Estoque: ${a.qtd} ${a.unidade}`).join('\n')}`;
+
+  const systemPrompt = 'Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\n' +
+    'Você é o CÉREBRO do sistema — não apenas responde perguntas, mas toma decisões, registra observações e gera melhorias contínuas.\n\n' +
+    'Data/hora atual: ' + nowSP() + '. Usuário: ' + req.user.nome + ' (' + req.user.role + ').\n\n' +
+    'COMO AGIR:\n' +
+    '1. Responda SEMPRE em português brasileiro, de forma direta e precisa.\n' +
+    '2. Para qualquer dado de estoque: use as ferramentas — NUNCA invente valores.\n' +
+    '3. Seja proativo: se perceber algo importante ao buscar dados (produto zerado urgente, giro parado, anomalia), mencione e registre na agenda.\n' +
+    '4. Para lançamentos de movimentação: confirme com o usuário qual produto e quantidade antes de registrar, a menos que já esteja claramente confirmado.\n' +
+    '5. Ao completar tarefas, resuma o que foi feito.\n' +
+    '6. Use registrar_nota_agenda para documentar: erros detectados, melhorias sugeridas, anomalias, boas práticas.\n\n' +
+    'AGENDA — registre sempre que:\n' +
+    '- Usuário lançou quantidade muito alta (possível erro) → tipo: alerta\n' +
+    '- Produto crítico/zerado há muitos dias → tipo: alerta\n' +
+    '- Sugestão de melhoria no processo → tipo: melhoria\n' +
+    '- Erro do sistema detectado → tipo: erro\n' +
+    '- Observação importante do dia → tipo: observacao';
+
   try {
-    const messages = [...historico.map(h => ({ role: h.role, content: h.content })), { role: 'user', content: pergunta }];
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: contexto, messages })
-    });
-    if (!response.ok) {
-      const errBody = (await response.text()).slice(0, 500);
-      console.error('Anthropic API error [chat]:', response.status, errBody);
-      return res.status(502).json({ erro: 'Erro na API (' + response.status + '): ' + errBody });
-    }
-    const data = await response.json();
-    const respostaRaw = (data.content||[]).map(b => b.text||'').join('').trim();
+    const messages = [
+      ...historico.map(h => ({ role: h.role, content: h.content })),
+      { role: 'user', content: pergunta }
+    ];
 
-    // Detecta e executa lançamentos em lote
-    const acaoMatch = respostaRaw.match(/ACAO_JSON:(\{[\s\S]*?\})\s*$/);
-    let textoFinal = respostaRaw;
     let movimentosExecutados = [];
+    let textoFinal = '';
+    const MAX_ITER = 12;
 
-    if (acaoMatch) {
-      textoFinal = respostaRaw.replace(/ACAO_JSON:[\s\S]*$/, '').trim();
-      try {
-        const acao = JSON.parse(acaoMatch[1]);
-        for (const mov of (acao.movimentos || [])) {
-          const nomeBusca = String(mov.produto_nome || '');
-          const tipo = ['Entrada','Saída','Perda'].includes(mov.tipo) ? mov.tipo : 'Entrada';
-          const qtdMov = Number(mov.qtd) || 0;
-          if (!nomeBusca || qtdMov <= 0) continue;
-          const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
-          if (!prod) { movimentosExecutados.push({ nome: nomeBusca, ok: false, erro: 'Produto não encontrado' }); continue; }
-          let novaQtd = Number(prod.qtd);
-          if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtdMov).toFixed(3));
-          else if (tipo === 'Saída' || tipo === 'Perda') {
-            if (qtdMov > novaQtd) { movimentosExecutados.push({ nome: prod.nome, ok: false, erro: `Estoque insuficiente (${prod.qtd} ${prod.unidade})` }); continue; }
-            novaQtd = Number((novaQtd - qtdMov).toFixed(3));
-          }
-          const { error: updErr } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
-          if (updErr) { movimentosExecutados.push({ nome: prod.nome, ok: false, erro: 'Erro ao atualizar' }); continue; }
-          await supabase.from('movimentacoes').insert({
-            produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-            tipo, qtd: qtdMov, unidade: prod.unidade,
-            custo: Number(prod.custo || 0), valor: Number((Number(prod.custo || 0) * qtdMov).toFixed(2)),
-            motivo: tipo === 'Entrada' ? 'Compra (IA chat)' : 'Lançamento IA chat',
-            responsavel: req.user.nome, obs: `via chat IA: ${pergunta.slice(0, 80)}`,
-            qtd_antes: Number(prod.qtd), qtd_depois: novaQtd,
-            created_at: nowSP(),
-          });
-          movimentosExecutados.push({ nome: prod.nome, tipo, qtd: qtdMov, unidade: prod.unidade, ok: true });
-        }
-        if (movimentosExecutados.length > 0) {
-          const okCount = movimentosExecutados.filter(m => m.ok).length;
-          const linhas = movimentosExecutados.map(m => m.ok
-            ? `✅ ${m.tipo} — ${m.nome}: ${m.qtd} ${m.unidade}`
-            : `❌ ${m.nome}: ${m.erro}`
-          );
-          textoFinal += `\n\n**Lançamentos executados (${okCount}/${movimentosExecutados.length}):**\n${linhas.join('\n')}`;
-        }
-      } catch(eAcao) { console.error('Erro ao executar acao chat:', eAcao.message); }
+    for (let iter = 0; iter < MAX_ITER; iter++) {
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, system: systemPrompt, tools: IA_TOOLS, messages })
+      });
+
+      if (!response.ok) {
+        const errBody = (await response.text()).slice(0, 500);
+        console.error('Anthropic API error [chat]:', response.status, errBody);
+        return res.status(502).json({ erro: 'Erro na API (' + response.status + '): ' + errBody });
+      }
+
+      const data = await response.json();
+      messages.push({ role: 'assistant', content: data.content });
+
+      if (data.stop_reason !== 'tool_use') {
+        textoFinal = data.content.filter(b => b.type === 'text').map(b => b.text).join('').trim();
+        break;
+      }
+
+      const toolResults = [];
+      for (const block of data.content.filter(b => b.type === 'tool_use')) {
+        const resultado = await executarFerramenta(block.name, block.input || {}, req.user);
+        if (block.name === 'registrar_movimentacao' && resultado.sucesso) movimentosExecutados.push(resultado);
+        toolResults.push({ type: 'tool_result', tool_use_id: block.id, content: JSON.stringify(resultado) });
+      }
+      messages.push({ role: 'user', content: toolResults });
     }
 
-    await audit('chat_ia', { pergunta: pergunta.slice(0,100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
+    await audit('chat_ia', { pergunta: pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) {
+    res.status(500).json({ erro: 'Erro interno: ' + e.message });
+  }
+});
+
+// ==================== AGENDA IA ====================
+app.get('/api/agenda', auth, async (req, res) => {
+  const tipo = sanitizeText(req.query && req.query.tipo || '', 20);
+  const dias = Math.min(Math.max(parseInt((req.query && req.query.dias) || '30', 10), 1), 365);
+  const limite = Math.min(Math.max(parseInt((req.query && req.query.limite) || '50', 10), 1), 200);
+  const desde = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+  let query = supabase.from('ia_agenda').select('*').gte('criado_em', desde);
+  if (tipo && ['observacao','melhoria','erro','alerta','elogio'].includes(tipo)) query = query.eq('tipo', tipo);
+  query = query.order('id', { ascending: false }).limit(limite);
+  const { data } = await query;
+  res.json(data || []);
 });
 
 // ==================== ALERTAS ====================
