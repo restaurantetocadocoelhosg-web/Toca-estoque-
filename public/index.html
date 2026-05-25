@@ -1290,7 +1290,7 @@ async function processarCupom(input) {
   try {
     // Reduz tamanho da imagem antes de enviar
     const base64 = await resizeImage(file, 1200);
-    const mediaType = file.type || 'image/jpeg';
+    const mediaType = 'image/jpeg'; // canvas.toDataURL always outputs JPEG
     const imagemData = base64.split(',')[1];
 
     const result = await apiPost('/api/ler-cupom', { imagem: imagemData, mediaType });
