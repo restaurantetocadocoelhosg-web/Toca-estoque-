@@ -612,7 +612,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
         model: 'claude-sonnet-4-6', max_tokens: 4096,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
-          { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
+          { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\n\nATENÇÃO — multiplicador "X N": quando o item tiver formato "PRODUTO xN UN" ou "PRODUTO X N U" ou "PRODUTO * N", a quantidade é N (o número APÓS o x). O tamanho/volume do produto (ex: 350ML, 500ML, 2L) NÃO é quantidade.\nExemplos: "COCA-COLA 350ML X 12 UN" → qtd:12 | "AGUA 500ML X 24 UN" → qtd:24 | "REFRI 2L X 6 UN" → qtd:6\n\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
         ]}]
       })
     });

@@ -1414,7 +1414,11 @@ function renderCupomItens() {
           <button class="ci-ignore${ignorado?' active':''}" onclick="toggleIgnorar(${idx})">Ignorar</button>
         </div>
         ${item.via_sinonimo ? `<div style="font-size:11px;color:var(--green);margin-top:4px">✓ Reconhecido por sinônimo salvo</div>`
-          : item.produto ? `<div style="margin-top:6px"><button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar vínculo</button></div>`
+          : item.produto ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              <button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar</button>
+              <button class="btn-sm" onclick="abrirProdModal(${idx}, 'buscar')">🔄 Trocar item</button>
+              <button class="btn-sm" onclick="abrirProdModal(${idx}, 'cadastrar')">➕ Item novo</button>
+            </div>`
           : `<div style="display:flex;gap:8px;margin-top:8px">
               <button class="btn-sm success" onclick="abrirProdModal(${idx}, 'buscar')">🔍 Já existe</button>
               <button class="btn-sm" onclick="abrirProdModal(${idx}, 'cadastrar')">➕ Cadastrar novo</button>
