@@ -1193,6 +1193,7 @@ function goPage(id, btn) {
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
   if (id === 'agenda') loadAgenda();
+  if (id === 'chat') iniciarChatBoot();
 }
 
 async function loadDash() {
@@ -1925,6 +1926,7 @@ async function salvarSinonimoCupom(nomeCupom, nomeProd) {
 
 // ==================== CHAT IA ====================
 let chatHistorico = JSON.parse(localStorage.getItem('toca_chat') || '[]');
+let chatBootTime = 0;
 
 function salvarChatLocal() {
   localStorage.setItem('toca_chat', JSON.stringify(chatHistorico.slice(-20)));
@@ -1948,8 +1950,34 @@ function restaurarChatUI() {
   msgs.scrollTop = msgs.scrollHeight;
 }
 
+async function iniciarChatBoot() {
+  const agora = Date.now();
+  if (agora - chatBootTime < 5 * 60 * 1000) return;
+  chatBootTime = agora;
+  const bv = document.getElementById('chat-boas-vindas');
+  if (bv) bv.style.display = 'none';
+  const sugs = document.getElementById('chat-sugestoes');
+  if (sugs) sugs.style.display = 'none';
+  const loading = adicionarBolha('📊 Verificando o estado do sistema...', 'ia loading');
+  const btn = document.getElementById('btn-send');
+  if (btn) btn.disabled = true;
+  try {
+    const result = await apiPost('/api/chat', { init: true, historico: [] });
+    loading.className = 'chat-bubble ia';
+    loading.textContent = result.resposta;
+    chatHistorico.push({ role: 'assistant', content: result.resposta });
+    if (chatHistorico.length > 20) chatHistorico = chatHistorico.slice(-20);
+    salvarChatLocal();
+  } catch(e) {
+    loading.className = 'chat-bubble ia';
+    loading.textContent = '📊 Erro ao carregar status: ' + (e.message || '?');
+  }
+  if (btn) btn.disabled = false;
+}
+
 function limparChat() {
   chatHistorico = [];
+  chatBootTime = 0;
   salvarChatLocal();
   const msgs = document.getElementById('chat-msgs');
   msgs.innerHTML = `<div class="chat-boas-vindas" id="chat-boas-vindas">

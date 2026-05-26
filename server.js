@@ -988,11 +988,16 @@ async function executarFerramenta(nome, input, user) {
 }
 
 app.post('/api/chat', auth, async (req, res) => {
-  const pergunta = sanitizeText(req.body && req.body.pergunta, 1000);
+  const isInit = !!(req.body && req.body.init);
+  const pergunta = isInit ? null : sanitizeText(req.body && req.body.pergunta, 1000);
   const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
-  if (!pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
+  if (!isInit && !pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'API não configurada.' });
+
+  const bootExtra = isInit
+    ? '\n\nMODO VARREDURA AUTOMÁTICA: O usuário acabou de abrir o assistente. Faça AGORA uma varredura completa do sistema chamando em sequência: ver_dashboard, depois ver_movimentacoes (com hoje=true), depois alertas_giro_parado, depois ver_agenda. Apresente os resultados como um relatório de status compacto: o que está normal, o que precisa de atenção, últimas movimentações do dia, alertas ativos e últimas notas da agenda. Seja direto, máximo 20 linhas. Não peça permissão — execute agora.'
+    : '';
 
   const systemPrompt = 'Você é o assistente de estoque do restaurante "Toca do Coelho" em São Gonçalo, Rio de Janeiro.\n' +
     'Você é o CÉREBRO do sistema — não apenas responde perguntas, mas toma decisões, registra observações e gera melhorias contínuas.\n\n' +
@@ -1009,12 +1014,13 @@ app.post('/api/chat', auth, async (req, res) => {
     '- Produto crítico/zerado há muitos dias → tipo: alerta\n' +
     '- Sugestão de melhoria no processo → tipo: melhoria\n' +
     '- Erro do sistema detectado → tipo: erro\n' +
-    '- Observação importante do dia → tipo: observacao';
+    '- Observação importante do dia → tipo: observacao' +
+    bootExtra;
 
   try {
     const messages = [
       ...historico.map(h => ({ role: h.role, content: h.content })),
-      { role: 'user', content: pergunta }
+      { role: 'user', content: isInit ? 'Faça a varredura automática do sistema agora.' : pergunta }
     ];
 
     let movimentosExecutados = [];
@@ -1051,7 +1057,7 @@ app.post('/api/chat', auth, async (req, res) => {
       messages.push({ role: 'user', content: toolResults });
     }
 
-    await audit('chat_ia', { pergunta: pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
+    await audit('chat_ia', { pergunta: isInit ? '__boot__' : pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) {
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
