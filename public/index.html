@@ -343,6 +343,30 @@ select.big-input { font-size: 14px; }
 .hist-mini { background: var(--s2); border-radius: 10px; padding: 10px 12px; margin-bottom: 7px; }
 .hist-mini-top { display: flex; justify-content: space-between; font-size: 13px; font-weight: 600; margin-bottom: 3px; color: var(--text); }
 .hist-mini-sub { font-size: 11px; color: var(--muted); }
+
+.tag-btn {
+  background: var(--s2); border: 1px solid var(--border); border-radius: 20px;
+  padding: 5px 12px; font-size: 12px; font-weight: 600; color: var(--muted);
+  cursor: pointer; transition: all 0.15s; white-space: nowrap;
+}
+.tag-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.agenda-item {
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;
+  margin-bottom: 10px; background: var(--s1);
+}
+.agenda-item-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.agenda-badge {
+  font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 20px;
+  text-transform: uppercase; letter-spacing: 0.3px;
+}
+.badge-alerta  { background: #fef3c7; color: #92400e; }
+.badge-melhoria{ background: #dbeafe; color: #1e40af; }
+.badge-erro    { background: #fee2e2; color: #991b1b; }
+.badge-observacao{ background: #f3f4f6; color: #374151; }
+.badge-elogio  { background: #d1fae5; color: #065f46; }
+.agenda-meta { font-size: 11px; color: var(--muted); }
+.agenda-produto { font-size: 11px; color: var(--blue); font-weight: 600; }
+.agenda-texto { font-size: 13px; color: var(--text); line-height: 1.5; }
 </style>
 </head>
 <body>
@@ -812,6 +836,26 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <div id="p-agenda" class="page">
+    <div class="admin-section">
+      <div class="admin-card">
+        <div class="admin-card-title">📓 Agenda da IA</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:14px">
+          Observações, alertas, melhorias e erros registrados automaticamente pelo assistente.
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px" id="agenda-filtros">
+          <button class="tag-btn active" onclick="filtrarAgenda('')" data-tipo="">Todos</button>
+          <button class="tag-btn" onclick="filtrarAgenda('alerta')" data-tipo="alerta">⚠️ Alertas</button>
+          <button class="tag-btn" onclick="filtrarAgenda('melhoria')" data-tipo="melhoria">💡 Melhorias</button>
+          <button class="tag-btn" onclick="filtrarAgenda('erro')" data-tipo="erro">🔴 Erros</button>
+          <button class="tag-btn" onclick="filtrarAgenda('observacao')" data-tipo="observacao">📝 Obs</button>
+          <button class="tag-btn" onclick="filtrarAgenda('elogio')" data-tipo="elogio">✨ Elogios</button>
+        </div>
+        <div id="agenda-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <nav>
@@ -822,6 +866,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
   <button class="nav-btn" id="nav-alertas" onclick="goPage('alertas', this)" style="position:relative"><span class="icon">⚠️</span>Alertas<span id="alertas-badge" style="display:none;position:absolute;top:3px;right:2px;background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:8px;font-weight:700;align-items:center;justify-content:center;line-height:1"></span></button>
+  <button class="nav-btn" id="nav-agenda" onclick="goPage('agenda', this)"><span class="icon">📓</span>Agenda</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -1147,6 +1192,7 @@ function goPage(id, btn) {
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); }
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
+  if (id === 'agenda') loadAgenda();
 }
 
 async function loadDash() {
@@ -2427,6 +2473,56 @@ function renderAuditoria() {
 }
 
 init();
+
+// ==================== AGENDA IA ====================
+let agendaTipoAtual = '';
+
+function filtrarAgenda(tipo) {
+  agendaTipoAtual = tipo;
+  document.querySelectorAll('#agenda-filtros .tag-btn').forEach(b => {
+    b.classList.toggle('active', b.dataset.tipo === tipo);
+  });
+  renderAgenda();
+}
+
+let agendaDados = [];
+
+async function loadAgenda() {
+  const lista = document.getElementById('agenda-lista');
+  lista.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div>';
+  try {
+    agendaDados = await api('/api/agenda?dias=60&limite=100');
+    renderAgenda();
+  } catch(e) {
+    lista.innerHTML = '<div class="empty"><div class="empty-icon">❌</div><div class="empty-text">Erro ao carregar: ' + (e.message||'?') + '</div></div>';
+  }
+}
+
+function renderAgenda() {
+  const lista = document.getElementById('agenda-lista');
+  const dados = agendaTipoAtual ? agendaDados.filter(n => n.tipo === agendaTipoAtual) : agendaDados;
+  if (!dados.length) {
+    const msg = agendaTipoAtual ? 'Nenhuma nota do tipo selecionado.' : 'Nenhuma nota registrada ainda. Converse com a IA para ela começar a aprender!';
+    lista.innerHTML = '<div class="empty"><div class="empty-icon">📭</div><div class="empty-text">' + msg + '</div></div>';
+    return;
+  }
+  const ICONS = { alerta:'⚠️', melhoria:'💡', erro:'🔴', observacao:'📝', elogio:'✨' };
+  lista.innerHTML = dados.map(n => {
+    const icon = ICONS[n.tipo] || '📝';
+    const dt = (n.criado_em||'').slice(0,16).replace('T',' ');
+    const prod = n.produto_nome ? '<span class="agenda-produto">📦 ' + n.produto_nome + '</span>' : '';
+    const user = n.usuario_nome ? ' · ' + n.usuario_nome : '';
+    return '<div class="agenda-item">' +
+      '<div class="agenda-item-header">' +
+        '<span class="agenda-badge badge-' + n.tipo + '">' + icon + ' ' + n.tipo + '</span>' +
+        (prod ? prod : '') +
+        '<span class="agenda-meta" style="margin-left:auto">' + dt + user + '</span>' +
+      '</div>' +
+      '<div class="agenda-texto">' + (n.texto||'').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
 </script>
 </body>
 </html>
