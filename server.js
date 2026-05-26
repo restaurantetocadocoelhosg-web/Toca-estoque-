@@ -26,16 +26,27 @@ app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ==================== HELPERS ====================
-function nowIso() { return new Date().toISOString(); }
-
 function nowSP() {
+  // Returns ISO 8601 with -03:00 so PostgreSQL TIMESTAMPTZ stores correct UTC
   const partes = new Intl.DateTimeFormat('sv-SE', {
     timeZone: 'America/Sao_Paulo',
     year: 'numeric', month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
   }).formatToParts(new Date());
   const get = (type) => partes.find(p => p.type === type)?.value || '';
-  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}:${get('second')}`;
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:${get('second')}-03:00`;
+}
+
+function dateSP() { return nowSP().slice(0, 10); }
+
+function dateAgoDias(dias) {
+  const d = new Date(Date.now() - dias * 86400000);
+  const partes = new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'America/Sao_Paulo',
+    year: 'numeric', month: '2-digit', day: '2-digit'
+  }).formatToParts(d);
+  const get = (type) => partes.find(p => p.type === type)?.value || '';
+  return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
 function normalizeSearch(str) {
@@ -423,10 +434,10 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
 
   // Detecção de anomalia para Saída/Perda
   if ((tipo === 'Saída' || tipo === 'Perda') && !req.body.forcar) {
-    const trintaDias = new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
+    const trintaDias = dateAgoDias(30);
     const { data: hist } = await supabase.from('movimentacoes')
       .select('qtd').eq('produto_id', prod.id)
-      .in('tipo', ['Saída', 'Perda']).gte('created_at', trintaDias);
+      .in('tipo', ['Saída', 'Perda']).gte('created_at', trintaDias + 'T00:00:00-03:00');
     if (hist && hist.length >= 5) {
       const totalConsumo = hist.reduce((s, m) => s + Number(m.qtd), 0);
       const mediaDiaria = totalConsumo / 30;
@@ -509,8 +520,8 @@ app.get('/api/movimentacoes', auth, async (req, res) => {
   if (q) query = query.or(`produto_nome.ilike.%${q}%,motivo.ilike.%${q}%,obs.ilike.%${q}%,responsavel.ilike.%${q}%`);
   const dataInicio = req.query?.data_inicio;
   const dataFim = req.query?.data_fim;
-  if (dataInicio) query = query.gte('created_at', dataInicio);
-  if (dataFim) query = query.lte('created_at', dataFim + 'T23:59:59');
+  if (dataInicio) query = query.gte('created_at', dataInicio + 'T00:00:00-03:00');
+  if (dataFim) query = query.lte('created_at', dataFim + 'T23:59:59-03:00');
   query = query.order('id', { ascending: false }).limit(limit);
   const { data } = await query;
   res.json(data || []);
@@ -519,7 +530,7 @@ app.get('/api/movimentacoes', auth, async (req, res) => {
 // ==================== SNAPSHOT DIÁRIO ====================
 async function ensureSnapshotDiario() {
   try {
-    const hoje = nowSP().slice(0, 10);
+    const hoje = dateSP();
     const { count } = await supabase.from('snapshots_diarios')
       .select('id', { count: 'exact', head: true }).eq('data', hoje);
     if (count > 0) return;
@@ -544,9 +555,9 @@ app.get('/api/dashboard', auth, async (req, res) => {
   const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
   const atencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
   const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
-  const hojeSP = nowSP().slice(0, 10);
+  const hojeSP = dateSP();
   const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
-    .gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+    .gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
   const { data: ultimos } = await supabase.from('movimentacoes').select('*').order('id', { ascending: false }).limit(8);
   res.json({ zerados, criticos, atencao, valorTotal, lancHoje: lancHoje || 0, ultimos: ultimos || [] });
 });
@@ -838,10 +849,10 @@ async function executarFerramenta(nome, input, user) {
         const { data: prod } = await supabase.from('produtos').select('id, nome, qtd, unidade, minimo').ilike('nome', nomeBusca).single();
         if (!prod) return { erro: `Produto "${nomeBusca}" não encontrado` };
         const dias = Math.min(Number(input.dias) || 30, 365);
-        const desde = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+        const desde = dateAgoDias(dias);
         const { data: movs } = await supabase.from('movimentacoes')
           .select('tipo, qtd, unidade, motivo, responsavel, obs, created_at, qtd_antes, qtd_depois')
-          .eq('produto_id', prod.id).gte('created_at', desde)
+          .eq('produto_id', prod.id).gte('created_at', desde + 'T00:00:00-03:00')
           .order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 20, 100));
         return { produto: prod.nome, qtd_atual: prod.qtd, unidade: prod.unidade, minimo: prod.minimo, periodo_dias: dias, movimentacoes: movs || [] };
       }
@@ -849,10 +860,10 @@ async function executarFerramenta(nome, input, user) {
       case 'ver_movimentacoes': {
         let q = supabase.from('movimentacoes').select('produto_nome, categoria, tipo, qtd, unidade, motivo, responsavel, obs, created_at');
         if (input.hoje) {
-          const hSP = nowSP().slice(0, 10);
-          q = q.gte('created_at', hSP).lte('created_at', hSP + 'T23:59:59');
+          const hSP = dateSP();
+          q = q.gte('created_at', hSP + 'T00:00:00-03:00').lte('created_at', hSP + 'T23:59:59-03:00');
         } else if (input.dias) {
-          q = q.gte('created_at', new Date(Date.now() - Number(input.dias) * 86400000).toISOString().slice(0, 10));
+          q = q.gte('created_at', dateAgoDias(Number(input.dias)) + 'T00:00:00-03:00');
         }
         if (input.tipo) q = q.eq('tipo', input.tipo);
         if (input.produto_nome) q = q.ilike('produto_nome', `%${sanitizeText(input.produto_nome, 100)}%`);
@@ -867,8 +878,8 @@ async function executarFerramenta(nome, input, user) {
         const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
         const atencao = prods.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
         const valor = Number(prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0).toFixed(2));
-        const hSP = nowSP().slice(0, 10);
-        const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hSP).lte('created_at', hSP + 'T23:59:59');
+        const hSP = dateSP();
+        const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hSP + 'T00:00:00-03:00').lte('created_at', hSP + 'T23:59:59-03:00');
         const { data: ultimos } = await supabase.from('movimentacoes').select('produto_nome, tipo, qtd, unidade, responsavel, created_at').order('id', { ascending: false }).limit(5);
         return { total_produtos: prods.length, zerados, criticos, atencao, ok: prods.length - zerados - criticos - atencao, valor_total: valor, lancamentos_hoje: lancHoje || 0, ultimos_lancamentos: ultimos || [] };
       }
@@ -973,7 +984,7 @@ async function executarFerramenta(nome, input, user) {
         let q = supabase.from('ia_agenda').select('*');
         if (input.tipo) q = q.eq('tipo', input.tipo);
         const dias = Math.min(Number(input.dias) || 30, 365);
-        q = q.gte('criado_em', new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10));
+        q = q.gte('criado_em', dateAgoDias(dias));
         const { data } = await q.order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 20, 100));
         return { total: (data || []).length, notas: data || [] };
       }
@@ -1069,7 +1080,7 @@ app.get('/api/agenda', auth, async (req, res) => {
   const tipo = sanitizeText(req.query && req.query.tipo || '', 20);
   const dias = Math.min(Math.max(parseInt((req.query && req.query.dias) || '30', 10), 1), 365);
   const limite = Math.min(Math.max(parseInt((req.query && req.query.limite) || '50', 10), 1), 200);
-  const desde = new Date(Date.now() - dias * 86400000).toISOString().slice(0, 10);
+  const desde = dateAgoDias(dias);
   let query = supabase.from('ia_agenda').select('*').gte('criado_em', desde);
   if (tipo && ['observacao','melhoria','erro','alerta','elogio'].includes(tipo)) query = query.eq('tipo', tipo);
   query = query.order('id', { ascending: false }).limit(limite);
@@ -1232,10 +1243,10 @@ app.get('/api/manutencao/normalizar', auth, requireRole('admin'), async (req, re
 
 // ==================== AUDITORIA DE DIVERGÊNCIAS ====================
 app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), async (req, res) => {
-  const dataInicio = req.query?.data_inicio || new Date(Date.now() - 30*24*60*60*1000).toISOString().slice(0,10);
-  const dataFim = req.query?.data_fim || nowSP().slice(0,10);
+  const dataInicio = req.query?.data_inicio || dateAgoDias(30);
+  const dataFim = req.query?.data_fim || dateSP();
   const categoria = sanitizeText(req.query?.categoria || '', 80);
-  let movQuery = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio).lte('created_at', dataFim + 'T23:59:59');
+  let movQuery = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
   if (categoria) movQuery = movQuery.eq('categoria', categoria);
   const { data: allMovs } = await movQuery;
   const groups = {};
@@ -1339,8 +1350,8 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
   if (acao === 'resumo') {
     const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
     const prods = all || [];
-    const hojeSP = nowSP().slice(0, 10);
-    const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+    const hojeSP = dateSP();
+    const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
     return res.json({ resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n📦 Total: ${prods.length}\n🔴 Zerados: ${prods.filter(p=>Number(p.qtd)===0).length}\n🟠 Críticos: ${prods.filter(p=>Number(p.qtd)>0&&Number(p.qtd)<=Number(p.minimo)*0.5).length}\n🟡 Atenção: ${prods.filter(p=>Number(p.qtd)>Number(p.minimo)*0.5&&Number(p.qtd)<Number(p.minimo)).length}\n💰 Valor total: R$ ${prods.reduce((s,p)=>s+Number(p.qtd)*Number(p.custo),0).toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje||0}` });
   }
 
@@ -1399,8 +1410,8 @@ app.get('/api/webhook/relatorio-diario', async (req, res) => {
   const zerados = prods.filter(p => Number(p.qtd) === 0);
   const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
   const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
-  const hojeSP = nowSP().slice(0, 10);
-  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP).lte('created_at', hojeSP + 'T23:59:59');
+  const hojeSP = dateSP();
+  const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
   let msg = `📊 *RELATÓRIO DIÁRIO — ${hojeSP}*\n🐰 Toca do Coelho\n\n📦 ${prods.length} produtos | 💰 R$ ${valor.toFixed(2)}\n📋 ${lancHoje||0} lançamentos hoje\n\n`;
   if (zerados.length) { msg += `🔴 *ZERADOS (${zerados.length})*\n${zerados.slice(0,15).map(p=>`• ${p.nome}`).join('\n')}${zerados.length>15?`\n... e mais ${zerados.length-15}`:''}\n\n`; }
   if (criticos.length) { msg += `🟠 *CRÍTICOS (${criticos.length})*\n${criticos.slice(0,10).map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}\n\n`; }
