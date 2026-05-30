@@ -1525,7 +1525,49 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     return res.json({ resposta: msg, total: lista.length, entradas: totEnt, saidas: totSai, perdas: totPerda, ajustes: totAjuste, valor: Number(valor.toFixed(2)), por_responsavel: porResp, anomalias });
   }
 
-  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento` });
+  if (acao === 'conferencia') {
+    const dias = Math.min(Math.max(parseInt(req.body?.dias) || 7, 1), 60);
+    const desde = dateAgoDias(dias);
+    const { data: movs } = await supabase.from('movimentacoes')
+      .select('produto_nome, categoria, tipo, qtd, qtd_antes, qtd_depois, custo')
+      .in('tipo', ['Ajuste','Perda']).gte('created_at', desde + 'T00:00:00-03:00');
+    const lista = movs || [];
+    const sumido = {}; let totalValor = 0; let nAjustes = 0; let totalPerdaValor = 0;
+    for (const m of lista) {
+      if (m.tipo === 'Ajuste') {
+        nAjustes++;
+        const delta = Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0);
+        if (delta < 0) {
+          const k = m.produto_nome || '?';
+          if (!sumido[k]) sumido[k] = { qtd: 0, valor: 0 };
+          sumido[k].qtd += Math.abs(delta);
+          sumido[k].valor += Math.abs(delta) * Number(m.custo || 0);
+          totalValor += Math.abs(delta) * Number(m.custo || 0);
+        }
+      } else if (m.tipo === 'Perda') {
+        totalPerdaValor += Number(m.qtd || 0) * Number(m.custo || 0);
+      }
+    }
+    const dataBR = dateSP().split('-').reverse().join('/');
+    if (nAjustes === 0) {
+      return res.json({ resposta: `🔎 *CONFERÊNCIA DE ESTOQUE — últimos ${dias} dias*\n📅 ${dataBR}\n\n⚠️ Nenhuma contagem física (ajuste) foi feita no período.\n\nSem contagem, não dá para saber se está sumindo item. Faça a contagem dos itens de alto giro (carnes, refrigerantes, ovos) e lance os ajustes no app.`, total_sumido: 0, contagens: 0 });
+    }
+    const top = Object.entries(sumido).sort((a,b)=>b[1].valor-a[1].valor).slice(0,12);
+    let msg = `🔎 *CONFERÊNCIA DE ESTOQUE — últimos ${dias} dias*\n📅 ${dataBR}\n\n`;
+    if (!top.length) {
+      msg += `✅ Tudo bateu! ${nAjustes} contagem(ns) feita(s) e nenhum item sumido. 👏`;
+    } else {
+      msg += `💸 *Itens que sumiram* (contagem achou MENOS que o sistema):\n\n`;
+      msg += top.map(([nome, d]) => `• ${nome}: -${Number(d.qtd).toFixed(d.qtd % 1 === 0 ? 0 : 1)} (R$ ${d.valor.toFixed(2)})`).join('\n');
+      msg += `\n\n💰 *Total sumido: R$ ${totalValor.toFixed(2)}*`;
+      msg += `\n📋 ${nAjustes} contagem(ns) no período.`;
+      msg += `\n\n_Causa comum: saída não lançada. Cobre a equipe no fechamento diário._`;
+    }
+    if (totalPerdaValor > 0) msg += `\n🗑️ Perdas declaradas: R$ ${totalPerdaValor.toFixed(2)}`;
+    return res.json({ resposta: msg, total_sumido: Number(totalValor.toFixed(2)), contagens: nAjustes, perdas_valor: Number(totalPerdaValor.toFixed(2)), itens: top.map(([n,d])=>({nome:n,qtd:d.qtd,valor:Number(d.valor.toFixed(2))})) });
+  }
+
+  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | conferencia` });
 });
 
 app.get('/api/webhook/relatorio-diario', async (req, res) => {
