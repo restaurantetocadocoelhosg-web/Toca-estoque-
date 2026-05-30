@@ -86,6 +86,18 @@ function getClientIp(req) {
   return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.ip || '';
 }
 
+// Registra erros REAIS do app na agenda da IA (tipo 'erro') para o gestor acompanhar.
+async function logErroAgenda(contexto, err, user) {
+  try {
+    await supabase.from('ia_agenda').insert({
+      tipo: 'erro',
+      texto: `[${contexto}] ${String((err && err.message) || err || 'erro desconhecido').slice(0, 400)}`,
+      usuario_nome: (user && user.nome) ? user.nome : 'sistema',
+      criado_em: nowSP()
+    });
+  } catch(e) {}
+}
+
 // ==================== SESSÕES ====================
 // Usa Supabase se a tabela 'sessions' existir, caso contrário usa memória.
 // Para ativar persistência: crie a tabela no dashboard Supabase:
@@ -690,6 +702,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
     res.json({ itens });
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
+    await logErroAgenda('ler-cupom', e, req.user);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
 });
@@ -1000,6 +1013,7 @@ async function executarFerramenta(nome, input, user) {
     }
   } catch(e) {
     console.error(`Erro na ferramenta ${nome}:`, e.message);
+    await logErroAgenda('ferramenta:' + nome, e, user);
     return { erro: `Erro interno: ${e.message}` };
   }
 }
@@ -1077,6 +1091,7 @@ app.post('/api/chat', auth, async (req, res) => {
     await audit('chat_ia', { pergunta: isInit ? '__boot__' : pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) {
+    await logErroAgenda('chat', e, req.user);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
   }
 });
