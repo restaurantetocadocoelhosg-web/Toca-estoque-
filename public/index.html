@@ -1153,6 +1153,12 @@ async function loadSession() {
   gate('nav-agenda', P.agenda);
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.ia);
+  // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
+  if (currentUser.role === 'admin') {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-alertas','nav-agenda'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.style.display = 'flex';
+    });
+  }
 }
 
 async function afterLogin() { showLogin(false); hideLoading(); await loadDash(); await loadCats(); restaurarChatUI(); startIdleWatch(); }
@@ -2217,8 +2223,12 @@ async function confirmarCadastro() {
   } catch(e) { toast(e.message, 'err'); }
 }
 
+// Service worker DESLIGADO: causava cache de versao antiga. Remove qualquer SW e limpa caches.
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+  navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => {});
+}
+if (window.caches && caches.keys) {
+  caches.keys().then(ks => ks.forEach(k => caches.delete(k))).catch(() => {});
 }
 
 // ==================== GESTÃO DE PRODUTOS (ADMIN) ====================

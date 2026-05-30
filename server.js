@@ -23,7 +23,11 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || true }));
 app.use(express.json({ limit: '15mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders: (res, p) => {
+    if (p.endsWith('index.html') || p.endsWith('sw.js')) res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  }
+}));
 
 // ==================== HELPERS ====================
 function nowSP() {
@@ -1546,7 +1550,7 @@ app.get('/api/webhook/relatorio-diario', async (req, res) => {
   res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
 
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 
 // ==================== START ====================
 seed().then(async () => {
