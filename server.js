@@ -103,7 +103,7 @@ const PERM_KEYS = ['lancar','exportar','ia','auditoria','alertas','agenda','admi
 function permsPorRole(role) {
   if (role === 'admin')   return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:true };
   if (role === 'gerente') return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:false };
-  return { lancar:true, exportar:false, ia:false, auditoria:false, alertas:false, agenda:false, admin:false }; // operador
+  return { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria por pessoa)
 }
 function permsEfetivas(role, permissoes) {
   const base = permsPorRole(role);
