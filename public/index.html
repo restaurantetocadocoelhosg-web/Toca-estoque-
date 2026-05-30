@@ -77,9 +77,18 @@ header { background: var(--s1); border-bottom: 1px solid var(--border); padding:
 .logo span { color: var(--accent); }
 #clock { font-size: 11px; color: var(--muted); font-weight: 500; }
 nav { order: 999; background: var(--s1); border-top: 1px solid var(--border); display: flex; flex-shrink: 0; padding-bottom: var(--safe-bottom); box-shadow: 0 -1px 0 var(--border); }
-.nav-btn { flex: 1; background: none; border: none; color: var(--muted); font-family: var(--font); font-size: 10px; font-weight: 600; padding: 10px 4px 8px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; text-transform: uppercase; letter-spacing: 0.3px; transition: color 0.15s; }
+.nav-btn { flex: 1; min-width: 0; overflow: hidden; background: none; border: none; color: var(--muted); font-family: var(--font); font-size: 10px; font-weight: 600; padding: 10px 4px 8px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; text-transform: uppercase; letter-spacing: 0.3px; transition: color 0.15s; white-space: nowrap; }
 .nav-btn .icon { font-size: 20px; }
 .nav-btn.active { color: var(--accent); }
+/* iPhone / telas estreitas: os 9 botoes sempre cabem (sem cortar o Admin) */
+@media (max-width: 430px) {
+  .nav-btn { font-size: 8px; padding: 9px 2px 7px; letter-spacing: 0; gap: 2px; }
+  .nav-btn .icon { font-size: 18px; }
+}
+@media (max-width: 350px) {
+  .nav-btn { font-size: 0; padding: 11px 2px 9px; }
+  .nav-btn .icon { font-size: 20px; }
+}
 main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
 .page { display: none; padding: 0; }
 .page.active { display: block; }
