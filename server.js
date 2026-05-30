@@ -323,7 +323,7 @@ app.get('/api/produtos', auth, async (req, res) => {
   let query = supabase.from('produtos').select('*');
   if (arquivados === '1' && req.user.role === 'admin') query = query.eq('ativo', 0);
   else query = query.or('ativo.eq.1,ativo.is.null');
-  if (q) query = query.ilike('nome', `%${sanitizeText(q, 100)}%`);
+  if (q) query = query.ilike('nome_search', `%${normalizeSearch(sanitizeText(q, 100))}%`);
   if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
   query = query.order('categoria').order('nome');
   const { data: rows, error } = await query;
@@ -457,23 +457,29 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     }
   }
 
-  let novaQtd = Number(prod.qtd);
-  if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
-  else if (tipo === 'Saída' || tipo === 'Perda') {
-    if (qtd > novaQtd) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prod.qtd} ${prod.unidade}.` });
-    novaQtd = Number((novaQtd - qtd).toFixed(3));
-  } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
+  // Blindagem de concorrência: trava otimista com retry — duas baixas/entradas
+  // simultâneas do mesmo produto não se sobrescrevem (sem perda de dado).
+  let novaQtd, valor, qtdAntes, custoUnit, prodAtual = prod, sucesso = false;
+  for (let tent = 0; tent < 4 && !sucesso; tent++) {
+    qtdAntes = Number(prodAtual.qtd);
+    if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
+    else if (tipo === 'Saída' || tipo === 'Perda') {
+      if (qtd > qtdAntes) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}.` });
+      novaQtd = Number((qtdAntes - qtd).toFixed(3));
+    } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
+    custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
+    const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
+    valor = Number((custoUnit * valorBase).toFixed(2));
+    const updateData = { qtd: novaQtd };
+    if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
+    const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+    if (upd && upd.length) { sucesso = true; break; }
+    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+    prodAtual = re;
+  }
+  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
 
-  const custoUnit = custoBody !== null ? custoBody : Number(prod.custo || 0);
-  const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - Number(prod.qtd)) : qtd;
-  const valor = Number((custoUnit * valorBase).toFixed(2));
-  const updateData = { qtd: novaQtd };
-  if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
-
-  const { error: updateErr } = await supabase.from('produtos').update(updateData).eq('id', prod.id);
-  if (updateErr) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
-
-  const qtdAntes = Number(prod.qtd);
   const { error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
@@ -482,7 +488,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     created_at: nowSP(),
   });
   if (movErr) {
-    await supabase.from('produtos').update({ qtd: prod.qtd, custo: prod.custo }).eq('id', prod.id);
+    await supabase.from('produtos').update({ qtd: qtdAntes, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd);
     return res.status(500).json({ erro: 'Erro ao registrar movimentação.' });
   }
 
@@ -1380,20 +1386,30 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
       const ops = matches.slice(0, 6).map(p => `• ${p.nome}`).join('\n');
       return res.json({ resposta: `Encontrei ${matches.length} produtos com "${produto_nome}". Seja mais especifico:\n\n${ops}` });
     }
-    let novaQtd = Number(prod.qtd);
-    if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
-    else {
-      if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prod.nome}. Disponível: ${prod.qtd} ${prod.unidade}` });
-      novaQtd = Number((novaQtd - qtd).toFixed(3));
+    // Blindagem de concorrência: trava otimista com retry — evita que duas baixas
+    // simultâneas do mesmo produto se sobrescrevam (perda de dado).
+    let novaQtd, prodAtual = prod, sucesso = false;
+    for (let tent = 0; tent < 4 && !sucesso; tent++) {
+      novaQtd = Number(prodAtual.qtd);
+      if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
+      else {
+        if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prodAtual.nome}. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}` });
+        novaQtd = Number((novaQtd - qtd).toFixed(3));
+      }
+      const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+      if (upd && upd.length) { sucesso = true; break; }
+      const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+      if (!re) break;
+      prodAtual = re;
     }
-    const { error: updateErr } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
-    if (updateErr) return res.json({ resposta: `❌ Erro ao atualizar estoque de ${prod.nome}.` });
+    if (!sucesso) return res.json({ resposta: `❌ Não consegui atualizar ${prod.nome} agora (outro lançamento simultâneo). Tente de novo em instantes.` });
+    const qtdAntesW = Number(prodAtual.qtd);
     const { error: movErr } = await supabase.from('movimentacoes').insert({
       produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
       custo: prod.custo, valor: Number((Number(prod.custo)*qtd).toFixed(2)),
       motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
     });
-    if (movErr) { await supabase.from('produtos').update({ qtd: prod.qtd }).eq('id', prod.id); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
+    if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, remetente }, null, '');
     return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}` });
   }
