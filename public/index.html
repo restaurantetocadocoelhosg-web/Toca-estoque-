@@ -1133,13 +1133,22 @@ async function loadSession() {
   const cardReset = document.getElementById('card-reset');
   if (cardReset) cardReset.style.display = permissions.pode_resetar ? '' : 'none';
   document.getElementById('btn-reset').classList.toggle('hidden', !permissions.pode_resetar);
-  // Liberações: mostra/esconde abas conforme as permissões do usuário
-  const P = data.permissoes || {};
+  // Liberações com FALLBACK por papel (à prova de falha — admin sempre vê tudo,
+  // mesmo se /api/me não trouxer as permissões).
+  const ROLE_DEF = {
+    admin:    { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:true },
+    gerente:  { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:false },
+    operador: { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, admin:false }
+  };
+  const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
+  const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
+  const P = {};
+  ['lancar','exportar','ia','auditoria','alertas','agenda','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
   const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
   gate('nav-admin', P.admin);
   gate('nav-chat', P.ia);
   gate('nav-audit', P.auditoria);
-  gate('nav-export', P.exportar !== false);
+  gate('nav-export', P.exportar);
   gate('nav-alertas', P.alertas);
   gate('nav-agenda', P.agenda);
   const btnCupom = document.getElementById('btn-cupom-ia');

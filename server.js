@@ -315,8 +315,9 @@ app.post('/api/logout', auth, async (req, res) => {
 });
 
 app.get('/api/me', auth, async (req, res) => {
-  const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single();
-  const perms = permsEfetivas(req.user.role, u && u.permissoes);
+  let permsCol = null;
+  try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
+  const perms = permsEfetivas(req.user.role, permsCol);
   res.json({
     user: { id: req.user.id, username: req.user.username, nome: req.user.nome, role: req.user.role },
     permissions: {
