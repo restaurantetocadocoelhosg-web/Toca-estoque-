@@ -862,7 +862,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn active" onclick="goPage('lancar', this)"><span class="icon">📝</span>Lançar</button>
   <button class="nav-btn" onclick="goPage('estoque', this)"><span class="icon">📦</span>Estoque</button>
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
-  <button class="nav-btn" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
+  <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
   <button class="nav-btn" id="nav-alertas" onclick="goPage('alertas', this)" style="position:relative"><span class="icon">⚠️</span>Alertas<span id="alertas-badge" style="display:none;position:absolute;top:3px;right:2px;background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:8px;font-weight:700;align-items:center;justify-content:center;line-height:1"></span></button>
@@ -1133,14 +1133,17 @@ async function loadSession() {
   const cardReset = document.getElementById('card-reset');
   if (cardReset) cardReset.style.display = permissions.pode_resetar ? '' : 'none';
   document.getElementById('btn-reset').classList.toggle('hidden', !permissions.pode_resetar);
-  const navAdmin = document.getElementById('nav-admin');
-  if (navAdmin) navAdmin.style.display = currentUser.role === 'admin' ? 'flex' : 'none';
-  const navChat = document.getElementById('nav-chat');
-  if (navChat) navChat.style.display = currentUser.role === 'operador' ? 'none' : 'flex';
-  const navAudit = document.getElementById('nav-audit');
-  if (navAudit) navAudit.style.display = ['admin','gerente'].includes(currentUser.role) ? 'flex' : 'none';
+  // Liberações: mostra/esconde abas conforme as permissões do usuário
+  const P = data.permissoes || {};
+  const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
+  gate('nav-admin', P.admin);
+  gate('nav-chat', P.ia);
+  gate('nav-audit', P.auditoria);
+  gate('nav-export', P.exportar !== false);
+  gate('nav-alertas', P.alertas);
+  gate('nav-agenda', P.agenda);
   const btnCupom = document.getElementById('btn-cupom-ia');
-  if (btnCupom) btnCupom.classList.toggle('hidden', !['admin','gerente'].includes(currentUser.role));
+  if (btnCupom) btnCupom.classList.toggle('hidden', !P.ia);
 }
 
 async function afterLogin() { showLogin(false); hideLoading(); await loadDash(); await loadCats(); restaurarChatUI(); startIdleWatch(); }
@@ -1834,18 +1837,45 @@ async function loadUsers() {
     if (!users.length) { el.innerHTML = '<div style="color:var(--muted);font-size:13px">Nenhum usuário encontrado.</div>'; return; }
     const roleLabel = { admin: 'Admin', gerente: 'Gerente', operador: 'Operador' };
     const roleCls = { admin: 'role-admin', gerente: 'role-gerente', operador: 'role-operador' };
-    el.innerHTML = users.map(u => `
-      <div class="user-row ${!u.active ? 'inactive-user' : ''}">
-        <div class="user-info">
-          <div class="user-name">${escapeHtml(u.nome)} <span class="role-badge ${roleCls[u.role]||''}">${roleLabel[u.role]||u.role}</span></div>
-          <div class="user-meta">@${escapeHtml(u.username)} · ${u.active ? 'Ativo' : 'Inativo'}</div>
+    const PERM_UI = [{k:'lancar',l:'Lançar'},{k:'ia',l:'IA'},{k:'exportar',l:'Exportar'},{k:'auditoria',l:'Auditoria'},{k:'alertas',l:'Alertas'},{k:'agenda',l:'Agenda'},{k:'admin',l:'Admin'}];
+    el.innerHTML = users.map(u => {
+      const pe = u.permissoes_efetivas || {};
+      const chips = PERM_UI.map(p => {
+        const on = !!pe[p.k];
+        return `<span onclick="togglePerm(${u.id},'${p.k}',${on})" title="${on?'Liberado — clique p/ bloquear':'Bloqueado — clique p/ liberar'}" style="cursor:pointer;font-size:10px;padding:4px 8px;border-radius:11px;margin:3px 4px 0 0;display:inline-block;background:${on?'#16a34a':'#333'};color:${on?'#fff':'#999'}">${on?'✓':'✕'} ${p.l}</span>`;
+      }).join('');
+      return `
+      <div class="user-row ${!u.active ? 'inactive-user' : ''}" style="flex-direction:column;align-items:stretch">
+        <div style="display:flex;justify-content:space-between;align-items:center;width:100%;gap:8px">
+          <div class="user-info">
+            <div class="user-name">${escapeHtml(u.nome)} <span class="role-badge ${roleCls[u.role]||''}">${roleLabel[u.role]||u.role}</span></div>
+            <div class="user-meta">@${escapeHtml(u.username)} · ${u.active ? 'Ativo' : 'Inativo'}</div>
+          </div>
+          <div class="user-actions">
+            <button class="btn-sm" onclick="resetSenha(${u.id}, '${escapeHtml(u.username)}')">🔑 Senha</button>
+            <button class="btn-sm ${u.active ? 'danger' : 'success'}" onclick="toggleUser(${u.id}, ${u.active})">${u.active ? 'Desativar' : 'Ativar'}</button>
+          </div>
         </div>
-        <div class="user-actions">
-          <button class="btn-sm" onclick="resetSenha(${u.id}, '${escapeHtml(u.username)}')">🔑</button>
-          <button class="btn-sm ${u.active ? 'danger' : 'success'}" onclick="toggleUser(${u.id}, ${u.active})">${u.active ? 'Desativar' : 'Ativar'}</button>
+        <div style="margin-top:8px">
+          <div style="font-size:10px;color:var(--muted);margin-bottom:3px">🔓 Liberações — clique para liberar/bloquear acesso</div>
+          ${chips}
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } catch(e) { handleApiError(e, false); }
+}
+
+async function togglePerm(id, key, atual) {
+  try {
+    const users = await api('/api/users');
+    const u = users.find(x => x.id === id);
+    if (!u) return;
+    const novas = { ...(u.permissoes_efetivas || {}) };
+    novas[key] = !atual;
+    await apiPost(`/api/users/${id}`, { permissoes: novas }, 'PUT');
+    toast(`${key} ${!atual ? 'liberado' : 'bloqueado'}`, 'ok');
+    await loadUsers();
+  } catch(e) { toast(e.message || 'Erro', 'err'); }
 }
 
 async function criarUsuario() {

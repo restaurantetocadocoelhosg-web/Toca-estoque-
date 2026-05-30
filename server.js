@@ -98,6 +98,21 @@ async function logErroAgenda(contexto, err, user) {
   } catch(e) {}
 }
 
+// ==================== PERMISSÕES (liberações por usuário) ====================
+const PERM_KEYS = ['lancar','exportar','ia','auditoria','alertas','agenda','admin'];
+function permsPorRole(role) {
+  if (role === 'admin')   return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:true };
+  if (role === 'gerente') return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:false };
+  return { lancar:true, exportar:false, ia:false, auditoria:false, alertas:false, agenda:false, admin:false }; // operador
+}
+function permsEfetivas(role, permissoes) {
+  const base = permsPorRole(role);
+  if (permissoes && typeof permissoes === 'object') {
+    for (const k of PERM_KEYS) if (typeof permissoes[k] === 'boolean') base[k] = permissoes[k];
+  }
+  return base;
+}
+
 // ==================== SESSÕES ====================
 // Usa Supabase se a tabela 'sessions' existir, caso contrário usa memória.
 // Para ativar persistência: crie a tabela no dashboard Supabase:
@@ -299,14 +314,17 @@ app.post('/api/logout', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/me', auth, (req, res) => {
+app.get('/api/me', auth, async (req, res) => {
+  const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single();
+  const perms = permsEfetivas(req.user.role, u && u.permissoes);
   res.json({
     user: { id: req.user.id, username: req.user.username, nome: req.user.nome, role: req.user.role },
     permissions: {
       pode_resetar: req.user.role === 'admin',
       pode_editar_produto: ['admin', 'gerente'].includes(req.user.role),
-      pode_exportar: true, pode_lancar: true,
+      pode_exportar: perms.exportar, pode_lancar: perms.lancar,
     },
+    permissoes: perms,
   });
 });
 
@@ -1179,8 +1197,9 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
 
 // ==================== GERENCIAR USUÁRIOS ====================
 app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
-  const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at').order('role').order('nome');
-  res.json(data || []);
+  const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at, permissoes').order('role').order('nome');
+  const out = (data || []).map(u => ({ ...u, permissoes_efetivas: permsEfetivas(u.role, u.permissoes) }));
+  res.json(out);
 });
 
 app.post('/api/users', auth, requireRole('admin'), async (req, res) => {
@@ -1213,8 +1232,14 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
     if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
     updates.password_hash = hashPassword(nova_senha);
   }
+  // Liberações: aceita objeto permissoes { lancar, exportar, ia, auditoria, alertas, agenda, admin }
+  if (req.body?.permissoes && typeof req.body.permissoes === 'object') {
+    const limpo = {};
+    for (const k of PERM_KEYS) if (typeof req.body.permissoes[k] === 'boolean') limpo[k] = req.body.permissoes[k];
+    updates.permissoes = limpo;
+  }
   if (Object.keys(updates).length > 0) await supabase.from('users').update(updates).eq('id', id);
-  await audit('editar_usuario', { id, active, role }, req.user, getClientIp(req));
+  await audit('editar_usuario', { id, active, role, permissoes: !!updates.permissoes }, req.user, getClientIp(req));
   res.json({ ok: true });
 });
 
