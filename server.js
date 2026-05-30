@@ -1408,7 +1408,51 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}${nota}` });
   }
 
-  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida` });
+  if (acao === 'fechamento') {
+    const hojeSP = dateSP();
+    const dataBR = hojeSP.split('-').reverse().join('/');
+    const { data: movs } = await supabase.from('movimentacoes')
+      .select('tipo, qtd, valor, responsavel, produto_nome, obs')
+      .gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
+    const lista = movs || [];
+    if (!lista.length) {
+      return res.json({ resposta: `📋 *FECHAMENTO DE ESTOQUE — ${dataBR}*\n\n⚠️ NENHUMA movimentação registrada hoje!\n\nA equipe não lançou entradas/saídas no sistema. Cobre os colaboradores do dia.`, vazio: true, total: 0 });
+    }
+    const porResp = {};
+    let totEnt = 0, totSai = 0, totPerda = 0, totAjuste = 0, valor = 0, anomalias = 0;
+    for (const m of lista) {
+      const r = m.responsavel || 'Não identificado';
+      if (!porResp[r]) porResp[r] = { ent: 0, sai: 0, perda: 0, ajuste: 0 };
+      if (m.tipo === 'Entrada') { porResp[r].ent++; totEnt++; }
+      else if (m.tipo === 'Saída') { porResp[r].sai++; totSai++; }
+      else if (m.tipo === 'Perda') { porResp[r].perda++; totPerda++; }
+      else if (m.tipo === 'Ajuste') { porResp[r].ajuste++; totAjuste++; }
+      valor += Number(m.valor) || 0;
+      if (m.obs && /anomalia/i.test(m.obs)) anomalias++;
+    }
+    const linhasResp = Object.entries(porResp)
+      .sort((a, b) => (b[1].ent+b[1].sai+b[1].perda+b[1].ajuste) - (a[1].ent+a[1].sai+a[1].perda+a[1].ajuste))
+      .map(([r, d]) => {
+        const partes = [];
+        if (d.ent) partes.push(`${d.ent} ent`);
+        if (d.sai) partes.push(`${d.sai} saí`);
+        if (d.perda) partes.push(`${d.perda} perda`);
+        if (d.ajuste) partes.push(`${d.ajuste} ajuste`);
+        return `• ${r}: ${d.ent+d.sai+d.perda+d.ajuste} (${partes.join(', ')})`;
+      }).join('\n');
+    let msg = `📋 *FECHAMENTO DE ESTOQUE — ${dataBR}*\n\n`;
+    msg += `📊 Total: ${lista.length} movimentações\n`;
+    msg += `📥 Entradas: ${totEnt} | 📤 Saídas: ${totSai}`;
+    if (totPerda) msg += ` | 🗑️ Perdas: ${totPerda}`;
+    if (totAjuste) msg += ` | ⚙️ Ajustes: ${totAjuste}`;
+    msg += `\n💰 Valor movimentado: R$ ${valor.toFixed(2)}\n\n`;
+    msg += `👤 *Quem lançou hoje:*\n${linhasResp}`;
+    if (anomalias > 0) msg += `\n\n⚠️ ${anomalias} lançamento(s) com quantidade anômala — revise no app.`;
+    if (totPerda > 0) msg += `\n🗑️ ${totPerda} perda(s) registrada(s) hoje — confira os motivos.`;
+    return res.json({ resposta: msg, total: lista.length, entradas: totEnt, saidas: totSai, perdas: totPerda, ajustes: totAjuste, valor: Number(valor.toFixed(2)), por_responsavel: porResp, anomalias });
+  }
+
+  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento` });
 });
 
 app.get('/api/webhook/relatorio-diario', async (req, res) => {
