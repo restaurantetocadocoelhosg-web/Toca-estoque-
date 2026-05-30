@@ -620,7 +620,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-6', max_tokens: 4096,
+        model: 'claude-sonnet-4-6', max_tokens: 16384,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
           { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nUse unidade KG para peso, UN para unidade, L para litro, CX para caixa.\n\nATENÇÃO — multiplicador "X N": quando o item tiver formato "PRODUTO xN UN" ou "PRODUTO X N U" ou "PRODUTO * N", a quantidade é N (o número APÓS o x). O tamanho/volume do produto (ex: 350ML, 500ML, 2L) NÃO é quantidade.\nExemplos: "COCA-COLA 350ML X 12 UN" → qtd:12 | "AGUA 500ML X 24 UN" → qtd:24 | "REFRI 2L X 6 UN" → qtd:6\n\nSe não conseguir ler: {"itens":[],"erro":"descrição do problema"}` }
@@ -1000,7 +1000,7 @@ async function executarFerramenta(nome, input, user) {
 
 app.post('/api/chat', auth, async (req, res) => {
   const isInit = !!(req.body && req.body.init);
-  const pergunta = isInit ? null : sanitizeText(req.body && req.body.pergunta, 1000);
+  const pergunta = isInit ? null : String((req.body && req.body.pergunta) || '').replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 8000);
   const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
   if (!isInit && !pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
