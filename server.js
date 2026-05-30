@@ -255,6 +255,18 @@ function requireRole(...roles) {
   };
 }
 
+// Enforcement de liberações no servidor (admin sempre passa).
+function requirePerm(key) {
+  return async (req, res, next) => {
+    if (req.user.role === 'admin') return next();
+    let permsCol = null;
+    try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
+    const perms = permsEfetivas(req.user.role, permsCol);
+    if (perms[key]) return next();
+    return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
+  };
+}
+
 // ==================== SEED ====================
 async function seed() {
   const { count } = await supabase.from('users').select('id', { count: 'exact', head: true });
@@ -604,7 +616,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
 });
 
 // ==================== EXPORTAR ====================
-app.get('/api/exportar/:tipo', auth, async (req, res) => {
+app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
   const { tipo } = req.params;
   let rows, headers, filename;
   if (tipo === 'estoque') {
@@ -664,7 +676,7 @@ app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, re
         model: 'claude-sonnet-4-6', max_tokens: 16384,
         messages: [{ role: 'user', content: [
           { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
-          { type: 'text', text: `Você está lendo um cupom fiscal ou nota fiscal de um restaurante brasileiro.\nExtraia TODOS os itens comprados com nome do produto e quantidade.\nResponda SOMENTE com JSON válido, sem texto extra, sem markdown, no formato:\n{"itens":[{"nome":"Nome do produto","qtd":1.0,"unidade":"KG"}]}\nREGRA DE UNIDADE E PESO (MUITO IMPORTANTE — este restaurante compra quase tudo por QUILO):\n- PROTEINAS sao SEMPRE por QUILO (unidade KG), nunca por unidade. Inclui: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha, etc.\n- CAIXA/CX/FARDO COM PESO: quando o item vier em caixa com um peso (ex: "FILE FRANGO CX 20KG", "PEITO CAIXA 18 KG", "CARNE BOI 20KG", "COXA CX 18", "20KG FRANGO"), a quantidade e o PESO em KG (qtd:20, unidade:KG). NAO conte como 1 caixa/unidade!\n- Hortifruti, graos, farinhas a granel: tambem por KG quando vier em peso.\n- Use UN (unidade) APENAS para itens realmente unitarios e fechados: latas, garrafas, vidros, potes, pacotes fechados, descartaveis, caixa de bebida.\n- L para litro (oleo, leite a granel). CX so quando for contagem de caixas SEM peso informado.\n\nMULTIPLICADOR "X N": quando o item tiver formato "PRODUTO xN UN" ou "PRODUTO X N U" ou "PRODUTO * N", a quantidade e N (o numero APOS o x). O tamanho/volume (ex: 350ML, 500ML, 2L) NAO e quantidade.\nExemplos: "COCA-COLA 350ML X 12 UN" -> qtd:12,UN | "AGUA 500ML X 24 UN" -> qtd:24,UN | "REFRI 2L X 6 UN" -> qtd:6,UN | "FILE FRANGO CX 20KG" -> qtd:20,KG | "PEITO FGO 18,5 KG" -> qtd:18.5,KG\n\nLeia com MUITA atencao cada linha. Se houver duvida entre unidade e quilo para uma proteina, escolha KG. Se nao conseguir ler: {"itens":[],"erro":"descricao do problema"}` }
+          { type: 'text', text: `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade e unidade.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. O volume/tamanho no nome (350ML, 500ML, 2L, 1KG, 5KG, 20KG) NUNCA é a quantidade.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- CAIXA/CX/FARDO COM PESO (ex 'FILE FRANGO CX 20KG', 'CARNE 18 KG') -> qtd = o peso em KG, não 1 caixa.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\"}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN'}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN\n'FILE FRANGO CX 20KG' -> qtd:20, KG\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
         ]}]
       })
     });
@@ -1041,7 +1053,7 @@ async function executarFerramenta(nome, input, user) {
   }
 }
 
-app.post('/api/chat', auth, async (req, res) => {
+app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
   const isInit = !!(req.body && req.body.init);
   const pergunta = isInit ? null : String((req.body && req.body.pergunta) || '').replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 8000);
   const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
