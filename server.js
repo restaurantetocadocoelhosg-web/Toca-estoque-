@@ -1372,8 +1372,14 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
     const qtd = parsePositiveNumber(req.body?.qtd);
     if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie: produto, quantidade` });
-    const { data: prod } = await supabase.from('produtos').select('*').ilike('nome_search', `%${normalizeSearch(produto_nome)}%`).single();
-    if (!prod) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+    const buscaNorm = normalizeSearch(produto_nome);
+    const { data: matches } = await supabase.from('produtos').select('*').ilike('nome_search', `%${buscaNorm}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(6);
+    if (!matches || !matches.length) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+    let prod = matches.length === 1 ? matches[0] : matches.find(p => normalizeSearch(p.nome) === buscaNorm);
+    if (!prod) {
+      const ops = matches.slice(0, 6).map(p => `• ${p.nome}`).join('\n');
+      return res.json({ resposta: `Encontrei ${matches.length} produtos com "${produto_nome}". Seja mais especifico:\n\n${ops}` });
+    }
     let novaQtd = Number(prod.qtd);
     if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
     else {
@@ -1394,9 +1400,12 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
 
   if (acao === 'compras') {
     const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
-    const lista = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
-    if (!lista.length) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' });
-    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}` });
+    const todos = data || [];
+    const semMinimo = todos.filter(p => Number(p.minimo) <= 0 && Number(p.qtd) === 0).length;
+    const lista = todos.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+    const nota = semMinimo > 0 ? `\n\n(+ ${semMinimo} zerados sem mínimo definido — defina o mínimo no app para entrarem na lista)` : '';
+    if (!lista.length) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' + nota });
+    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}${nota}` });
   }
 
   res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida` });
