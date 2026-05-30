@@ -2252,17 +2252,25 @@ function selProdFiltro(el, arquivados) {
 }
 
 async function loadProdAdmin() {
-  const q = document.getElementById('prod-admin-search')?.value || '';
+  const q = (document.getElementById('prod-admin-search')?.value || '').trim();
+  const el = document.getElementById('prod-admin-list');
+  // Sem busca: nao despeja os 285 produtos — mostra dica (card curto)
+  if (!q && !prodAdminMostrarArquivados) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:16px">🔍 Digite o nome de um produto para buscar e editar.</div>';
+    return;
+  }
   const params = new URLSearchParams();
   if (q) params.set('q', q);
   if (prodAdminMostrarArquivados) params.set('arquivados', '1');
   try {
-    const items = await api('/api/produtos?' + params);
-    const el = document.getElementById('prod-admin-list');
-    if (!items.length) {
+    const todos = await api('/api/produtos?' + params);
+    if (!todos.length) {
       el.innerHTML = '<div style="font-size:13px;color:var(--muted);text-align:center;padding:20px">Nenhum produto encontrado.</div>';
       return;
     }
+    const LIM = 10;
+    const items = todos.slice(0, LIM);
+    const aviso = todos.length > LIM ? `<div style="font-size:12px;color:var(--muted);text-align:center;padding:10px">Mostrando ${LIM} de ${todos.length}. Refine a busca pelo nome.</div>` : '';
     el.innerHTML = items.map(p => {
       const st = p.qtd === 0 ? 'red' : p.qtd <= p.minimo * 0.5 ? 'yellow' : p.qtd < p.minimo ? 'accent' : 'green';
       return `<div class="prod-admin-row${p.ativo===0?' arquivado':''}" onclick='abrirEditProd(${JSON.stringify(JSON.stringify(p))})'>
@@ -2275,7 +2283,7 @@ async function loadProdAdmin() {
           <div style="font-size:11px;color:var(--muted);text-align:right">${escapeHtml(p.unidade)}</div>
         </div>
       </div>`;
-    }).join('');
+    }).join('') + aviso;
   } catch(e) { handleApiError(e, false); }
 }
 
