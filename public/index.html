@@ -1451,7 +1451,11 @@ function toggleIgnorar(idx) {
 
 async function lancarLote() {
   const ativos = cupomItens.filter(i => !i._ignorar && i.produto);
-  if (!ativos.length) { toast('Nenhum item para lançar', 'err'); return; }
+  const semProduto = cupomItens.filter(i => !i._ignorar && !i.produto);
+  if (!ativos.length) {
+    if (semProduto.length) { toast(`${semProduto.length} item(ns) da nota sem produto vinculado — vincule antes de lançar`, 'err'); return; }
+    toast('Nenhum item para lançar', 'err'); return;
+  }
 
   const btn = document.getElementById('btn-lancar-lote');
   btn.disabled = true; btn.textContent = '⏳ Lançando...';
@@ -1472,8 +1476,18 @@ async function lancarLote() {
 
   fecharCupom();
   await loadDash();
-  if (erros.length) toast(`${ok} lançados · ${erros.length} com erro`, 'err');
-  else toast(`✓ ${ok} entrada${ok!==1?'s':''} lançada${ok!==1?'s':''} com sucesso!`, 'ok');
+  if (semProduto.length || erros.length) {
+    let aviso = `✓ ${ok} lançado${ok!==1?'s':''}`;
+    if (erros.length) aviso += ` · ${erros.length} com erro`;
+    if (semProduto.length) aviso += ` · ⚠️ ${semProduto.length} item(ns) SEM produto vinculado NÃO foram salvos`;
+    toast(aviso, 'err');
+    if (semProduto.length) {
+      const nomes = semProduto.map(i => '• ' + i.nome_cupom).join('\n');
+      setTimeout(() => alert(`⚠️ ${semProduto.length} item(ns) da nota NÃO foram salvos (sem produto vinculado no cadastro):\n\n${nomes}\n\nCadastre/vincule esses produtos e lance novamente, ou lance manualmente.`), 300);
+    }
+  } else {
+    toast(`✓ ${ok} entrada${ok!==1?'s':''} lançada${ok!==1?'s':''} com sucesso!`, 'ok');
+  }
 }
 
 // ==================== LANÇAMENTO INDIVIDUAL ====================
