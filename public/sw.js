@@ -1,4 +1,4 @@
-const CACHE = 'toca-estoque-v1';
+const CACHE = 'toca-estoque-v2';
 const STATIC = ['/'];
 
 self.addEventListener('install', e => {
@@ -18,13 +18,13 @@ self.addEventListener('activate', e => {
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
 
-  // API sempre vai para a rede — nunca cacheia dados dinâmicos
-  if (url.pathname.startsWith('/api/')) {
+  // API e o proprio sw.js sempre vao para a rede — nunca cacheia dados dinamicos
+  if (url.pathname.startsWith('/api/') || url.pathname === '/sw.js') {
     e.respondWith(fetch(e.request));
     return;
   }
 
-  // Para o resto: rede primeiro, cache como fallback
+  // Para o resto: rede primeiro, cache como fallback (garante versao nova quando online)
   e.respondWith(
     fetch(e.request)
       .then(res => {
