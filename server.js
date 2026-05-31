@@ -663,7 +663,10 @@ app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
 });
 
 // ==================== LER CUPOM (IA) ====================
-app.post('/api/ler-cupom', auth, requireRole('admin', 'gerente'), async (req, res) => {
+// Ler nota fiscal é parte do LANÇAMENTO de estoque (não da IA). Todo quem lança (operador
+// inclusive) pode usar o leitor. NÃO acoplar à permissão 'ia' — senão desligar a varredura
+// automática (ia) bloqueia o leitor junto.
+app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
   const { imagem, mediaType } = req.body;
   if (!imagem) return res.status(400).json({ erro: 'Imagem não enviada.' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -1053,8 +1056,19 @@ async function executarFerramenta(nome, input, user) {
   }
 }
 
+// Varredura automática (init): roda no MÁXIMO 1x por dia e SOMENTE para o admin.
+// Resultado do dia fica em cache p/ não reprocessar a cada abertura da aba IA.
+let varreduraCache = { dia: null, resposta: null };
 app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
-  const isInit = !!(req.body && req.body.init);
+  let isInit = !!(req.body && req.body.init);
+  // Só o admin dispara a varredura automática; outros usuários não rodam análise ao abrir.
+  if (isInit && req.user.role !== 'admin') {
+    return res.json({ resposta: '', movimentos_executados: [], pulado: 'nao_admin' });
+  }
+  // Admin: se já rodou hoje, devolve o resultado em cache (não reprocessa).
+  if (isInit && varreduraCache.dia === dateSP() && varreduraCache.resposta) {
+    return res.json({ resposta: varreduraCache.resposta, movimentos_executados: [], cache: true });
+  }
   const pergunta = isInit ? null : String((req.body && req.body.pergunta) || '').replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 8000);
   const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
   if (!isInit && !pergunta) return res.status(400).json({ erro: 'Pergunta não informada.' });
@@ -1123,6 +1137,7 @@ app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
       messages.push({ role: 'user', content: toolResults });
     }
 
+    if (isInit) varreduraCache = { dia: dateSP(), resposta: textoFinal };
     await audit('chat_ia', { pergunta: isInit ? '__boot__' : pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) {

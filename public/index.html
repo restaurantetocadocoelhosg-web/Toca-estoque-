@@ -1160,8 +1160,10 @@ async function loadSession() {
   gate('nav-export', P.exportar);
   gate('nav-alertas', P.alertas);
   gate('nav-agenda', P.agenda);
+  // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
+  // NÃO atrelar ao 'ia' — senão desligar a varredura automática esconde o leitor junto.
   const btnCupom = document.getElementById('btn-cupom-ia');
-  if (btnCupom) btnCupom.classList.toggle('hidden', !P.ia);
+  if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
     ['nav-admin','nav-chat','nav-audit','nav-export','nav-alertas','nav-agenda'].forEach(id => {
@@ -2023,6 +2025,12 @@ function restaurarChatUI() {
 }
 
 async function iniciarChatBoot() {
+  // Varredura automática: SÓ para o admin e no MÁXIMO 1x por dia.
+  // Operadores/gerentes abrem a IA sem disparar análise (podem perguntar manualmente).
+  if (!currentUser || currentUser.role !== 'admin') return;
+  const hojeStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' }); // AAAA-MM-DD
+  if (localStorage.getItem('toca_varredura_dia') === hojeStr) return; // já rodou hoje neste aparelho
+  localStorage.setItem('toca_varredura_dia', hojeStr);
   const agora = Date.now();
   if (agora - chatBootTime < 5 * 60 * 1000) return;
   chatBootTime = agora;
