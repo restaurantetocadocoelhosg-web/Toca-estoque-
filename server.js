@@ -1278,10 +1278,22 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
   const active = req.body?.active !== undefined ? (req.body.active ? 1 : 0) : null;
   const nova_senha = String(req.body?.nova_senha || '');
   const role = sanitizeText(req.body?.role, 20);
+  const nome = req.body?.nome !== undefined ? sanitizeText(req.body.nome, 60) : null;
+  const novoUsername = req.body?.username !== undefined ? sanitizeText(req.body.username, 40).toLowerCase() : null;
   if (Number(id) === req.user.id && active === 0) return res.status(400).json({ erro: 'Você não pode desativar sua própria conta.' });
   const updates = {};
   if (active !== null) updates.active = active;
   if (role && ['admin','gerente','operador'].includes(role)) updates.role = role;
+  if (nome !== null) {
+    if (!nome) return res.status(400).json({ erro: 'O nome não pode ficar vazio.' });
+    updates.nome = nome;
+  }
+  if (novoUsername !== null) {
+    if (!novoUsername) return res.status(400).json({ erro: 'O login não pode ficar vazio.' });
+    const { data: jaExiste } = await supabase.from('users').select('id').ilike('username', novoUsername).neq('id', id).maybeSingle();
+    if (jaExiste) return res.status(400).json({ erro: 'Já existe um usuário com esse login.' });
+    updates.username = novoUsername;
+  }
   if (nova_senha) {
     if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
     updates.password_hash = hashPassword(nova_senha);

@@ -1878,6 +1878,7 @@ async function loadUsers() {
             <div class="user-meta">@${escapeHtml(u.username)} · ${u.active ? 'Ativo' : 'Inativo'}</div>
           </div>
           <div class="user-actions">
+            <button class="btn-sm" onclick="renomearUser(${u.id}, '${escapeHtml(u.nome)}', '${escapeHtml(u.username)}')">✏️ Renomear</button>
             <button class="btn-sm" onclick="resetSenha(${u.id}, '${escapeHtml(u.username)}')">🔑 Senha</button>
             <button class="btn-sm ${u.active ? 'danger' : 'success'}" onclick="toggleUser(${u.id}, ${u.active})">${u.active ? 'Desativar' : 'Ativar'}</button>
           </div>
@@ -1930,6 +1931,19 @@ async function resetSenha(id, username) {
   const nova = prompt(`Nova senha para @${username} (mín. 6 caracteres):`);
   if (!nova) return;
   try { await apiPost(`/api/users/${id}`, { nova_senha: nova }, 'PUT'); toast('Senha alterada!', 'ok'); }
+  catch(e) { toast(e.message, 'err'); }
+}
+
+async function renomearUser(id, nomeAtual, usernameAtual) {
+  const nome = prompt('Nome de exibição (o que aparece na tela):', nomeAtual);
+  if (nome === null) return;
+  const username = prompt('Login (usado para entrar). Deixe igual se não quiser mudar:', usernameAtual);
+  if (username === null) return;
+  const body = {};
+  if (nome.trim() && nome.trim() !== nomeAtual) body.nome = nome.trim();
+  if (username.trim() && username.trim().toLowerCase() !== usernameAtual.toLowerCase()) body.username = username.trim();
+  if (!Object.keys(body).length) { toast('Nada mudou', 'ok'); return; }
+  try { await apiPost(`/api/users/${id}`, body, 'PUT'); toast('Usuário renomeado!', 'ok'); await loadUsers(); }
   catch(e) { toast(e.message, 'err'); }
 }
 
