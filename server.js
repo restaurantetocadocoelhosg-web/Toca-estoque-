@@ -646,6 +646,145 @@ app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) =
   res.send('﻿' + csv);
 });
 
+// ==================== RELATÓRIOS HTML (imprimíveis / PDF) ====================
+function escHtml(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c])); }
+const STATUS_INFO = {
+  ZERADO:  { cor: '#ef4444', bg: '#fee2e2', label: 'Zerado' },
+  CRITICO: { cor: '#f97316', bg: '#ffedd5', label: 'Crítico' },
+  ATENCAO: { cor: '#ca8a04', bg: '#fef9c3', label: 'Atenção' },
+  OK:      { cor: '#16a34a', bg: '#dcfce7', label: 'OK' },
+};
+function statusDe(qtd, minimo) {
+  const q = Number(qtd), m = Number(minimo);
+  return q === 0 ? 'ZERADO' : q <= m * 0.5 ? 'CRITICO' : q < m ? 'ATENCAO' : 'OK';
+}
+const CAT_CORES = ['#7c3aed','#db2777','#ea580c','#0891b2','#16a34a','#2563eb','#b45309','#be123c','#4f46e5','#0d9488'];
+function corCategoria(nome) { let h = 0; for (const c of String(nome||'')) h = (h * 31 + c.charCodeAt(0)) % 997; return CAT_CORES[h % CAT_CORES.length]; }
+function fmtBRL(n) { return 'R$ ' + Number(n || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+function fmtQtd(n) { const x = Number(n || 0); return (x % 1 === 0 ? x.toString() : x.toFixed(3).replace(/\.?0+$/, '')); }
+
+function paginaRelatorio(titulo, subtitulo, corpo) {
+  const dataBR = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo', dateStyle: 'short', timeStyle: 'short' });
+  return `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(titulo)} — Toca do Coelho</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif; margin: 0; background: #f1f5f9; color: #0f172a; }
+  .wrap { max-width: 920px; margin: 0 auto; padding: 18px; }
+  .head { background: linear-gradient(135deg,#7c3aed,#db2777); color: #fff; border-radius: 16px; padding: 20px 22px; margin-bottom: 16px; }
+  .head h1 { margin: 0; font-size: 22px; }
+  .head .sub { opacity: .92; font-size: 13px; margin-top: 4px; }
+  .head .meta { opacity: .85; font-size: 12px; margin-top: 8px; }
+  .barra { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+  .chip { background:#fff; border-radius:10px; padding:8px 12px; font-size:12px; font-weight:600; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+  .chip b { font-size:15px; display:block; }
+  .cat { background:#fff; border-radius:14px; overflow:hidden; margin-bottom:14px; box-shadow:0 1px 4px rgba(0,0,0,.07); }
+  .cat-h { color:#fff; padding:10px 16px; font-weight:700; font-size:14px; display:flex; justify-content:space-between; align-items:center; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:9px 16px; font-size:13px; border-bottom:1px solid #f1f5f9; }
+  th { font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:#64748b; background:#f8fafc; }
+  td.num, th.num { text-align:right; font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom:none; }
+  .badge { display:inline-block; padding:2px 9px; border-radius:20px; font-size:11px; font-weight:700; }
+  .sub-row td { background:#fafafa; font-weight:700; font-size:12px; }
+  .check { width:16px; height:16px; border:2px solid #94a3b8; border-radius:4px; display:inline-block; }
+  .foot { text-align:center; color:#94a3b8; font-size:11px; margin:20px 0; }
+  .print-btn { position:sticky; top:10px; float:right; background:#0f172a; color:#fff; border:none; padding:10px 16px; border-radius:10px; font-weight:700; cursor:pointer; font-size:13px; box-shadow:0 2px 8px rgba(0,0,0,.2); }
+  @media print { body { background:#fff; } .print-btn { display:none; } .wrap { max-width:none; padding:0; } .cat, .head { box-shadow:none; } .cat { break-inside: avoid; } }
+</style></head>
+<body><div class="wrap">
+  <button class="print-btn" onclick="window.print()">🖨️ Imprimir / Salvar PDF</button>
+  <div class="head"><h1>🐰 ${escHtml(titulo)}</h1><div class="sub">${escHtml(subtitulo)}</div><div class="meta">Toca do Coelho · São Gonçalo/RJ · gerado em ${dataBR}</div></div>
+  ${corpo}
+  <div class="foot">Toca do Coelho — relatório gerado pelo app de estoque</div>
+</div></body></html>`;
+}
+
+app.get('/api/relatorio/:tipo', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const tipo = req.params.tipo;
+    let html;
+
+    if (tipo === 'estoque' || tipo === 'compras') {
+      const ehCompras = tipo === 'compras';
+      const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo')
+        .or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+      let prods = data || [];
+      if (ehCompras) prods = prods.filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);  // zerados + críticos
+      const porCat = {};
+      for (const p of prods) (porCat[p.categoria || 'Sem categoria'] = porCat[p.categoria || 'Sem categoria'] || []).push(p);
+      const cont = { ZERADO: 0, CRITICO: 0, ATENCAO: 0, OK: 0 };
+      let totalGeral = 0;
+      let corpo = '';
+      for (const cat of Object.keys(porCat).sort((a, b) => a.localeCompare(b))) {
+        const itens = porCat[cat]; const cor = corCategoria(cat);
+        let subtotal = 0; let linhas = '';
+        for (const p of itens) {
+          const st = statusDe(p.qtd, p.minimo); cont[st]++;
+          const si = STATUS_INFO[st];
+          if (ehCompras) {
+            const sugerido = Math.max(0, Number(p.minimo) * 2 - Number(p.qtd));
+            const custoEst = sugerido * Number(p.custo || 0); subtotal += custoEst;
+            linhas += `<tr><td><span class="check"></span></td><td>${escHtml(p.nome)}</td>` +
+              `<td class="num">${fmtQtd(p.qtd)} ${escHtml(p.unidade)}</td><td class="num">${fmtQtd(p.minimo)}</td>` +
+              `<td class="num"><b>${fmtQtd(sugerido)} ${escHtml(p.unidade)}</b></td><td class="num">${fmtBRL(custoEst)}</td>` +
+              `<td><span class="badge" style="background:${si.bg};color:${si.cor}">${si.label}</span></td></tr>`;
+          } else {
+            const valor = Number(p.qtd) * Number(p.custo || 0); subtotal += valor; totalGeral += valor;
+            linhas += `<tr><td>${escHtml(p.nome)}</td><td class="num">${fmtQtd(p.qtd)} ${escHtml(p.unidade)}</td>` +
+              `<td class="num">${fmtQtd(p.minimo)}</td><td class="num">${fmtBRL(p.custo)}</td><td class="num">${fmtBRL(valor)}</td>` +
+              `<td><span class="badge" style="background:${si.bg};color:${si.cor}">${si.label}</span></td></tr>`;
+          }
+        }
+        if (ehCompras) totalGeral += subtotal;
+        const cabec = ehCompras
+          ? `<tr><th></th><th>Produto</th><th class="num">Atual</th><th class="num">Mín</th><th class="num">Comprar</th><th class="num">Custo est.</th><th>Status</th></tr>`
+          : `<tr><th>Produto</th><th class="num">Qtd</th><th class="num">Mín</th><th class="num">Custo un.</th><th class="num">Valor</th><th>Status</th></tr>`;
+        const colspanLabel = ehCompras ? 5 : 4;
+        corpo += `<div class="cat"><div class="cat-h" style="background:${cor}"><span>${escHtml(cat)}</span><span>${itens.length} ${itens.length === 1 ? 'item' : 'itens'}</span></div>` +
+          `<table>${cabec}${linhas}` +
+          `<tr class="sub-row"><td colspan="${colspanLabel}">Subtotal ${escHtml(cat)}</td><td class="num">${fmtBRL(subtotal)}</td><td></td></tr>` +
+          `</table></div>`;
+      }
+      const chips = ehCompras
+        ? `<div class="chip" style="color:#ef4444">Zerados<b>${cont.ZERADO}</b></div><div class="chip" style="color:#f97316">Críticos<b>${cont.CRITICO}</b></div><div class="chip">Itens a comprar<b>${prods.length}</b></div><div class="chip" style="color:#16a34a">Custo estimado<b>${fmtBRL(totalGeral)}</b></div>`
+        : `<div class="chip" style="color:#ef4444">Zerados<b>${cont.ZERADO}</b></div><div class="chip" style="color:#f97316">Críticos<b>${cont.CRITICO}</b></div><div class="chip" style="color:#ca8a04">Atenção<b>${cont.ATENCAO}</b></div><div class="chip" style="color:#16a34a">OK<b>${cont.OK}</b></div><div class="chip">Valor total<b>${fmtBRL(totalGeral)}</b></div>`;
+      const titulo = ehCompras ? 'Lista de Compras' : 'Posição do Estoque';
+      const sub = ehCompras ? 'Itens zerados e críticos, organizados por categoria, com sugestão de reposição.' : 'Estoque atual por categoria, com valor e status.';
+      html = paginaRelatorio(titulo, sub, `<div class="barra">${chips}</div>${corpo || '<div class="cat"><div style="padding:24px;text-align:center;color:#16a34a;font-weight:600">✅ Nada para comprar — tudo acima do mínimo!</div></div>'}`);
+
+    } else if (tipo === 'movimentacoes') {
+      const { data } = await supabase.from('movimentacoes').select('*').order('created_at', { ascending: false }).limit(400);
+      const movs = data || [];
+      const TIPO_COR = { 'Entrada': '#16a34a', 'Saída': '#ea580c', 'Perda': '#ef4444', 'Ajuste': '#2563eb' };
+      const porDia = {};
+      for (const m of movs) { const dia = String(m.created_at || '').slice(0, 10); (porDia[dia] = porDia[dia] || []).push(m); }
+      let corpo = '';
+      for (const dia of Object.keys(porDia).sort((a, b) => b.localeCompare(a))) {
+        const itens = porDia[dia]; const diaBR = dia.split('-').reverse().join('/');
+        let linhas = '';
+        for (const m of itens) {
+          const cor = TIPO_COR[m.tipo] || '#64748b';
+          const hora = String(m.created_at || '').slice(11, 16);
+          linhas += `<tr><td>${hora}</td><td>${escHtml(m.produto_nome)}</td>` +
+            `<td><span class="badge" style="background:${cor}22;color:${cor}">${escHtml(m.tipo)}</span></td>` +
+            `<td class="num">${fmtQtd(m.qtd)} ${escHtml(m.unidade)}</td><td class="num">${fmtBRL(m.valor)}</td>` +
+            `<td>${escHtml(m.responsavel || '')}</td><td>${escHtml(m.motivo || '')}</td></tr>`;
+        }
+        corpo += `<div class="cat"><div class="cat-h" style="background:#334155"><span>📅 ${diaBR}</span><span>${itens.length} lançamentos</span></div>` +
+          `<table><tr><th>Hora</th><th>Produto</th><th>Tipo</th><th class="num">Qtd</th><th class="num">Valor</th><th>Por</th><th>Motivo</th></tr>${linhas}</table></div>`;
+      }
+      html = paginaRelatorio('Movimentações', 'Últimos lançamentos agrupados por dia (até 400).', corpo || '<div class="cat"><div style="padding:24px;text-align:center;color:#64748b">Sem movimentações.</div></div>');
+
+    } else return res.status(400).send('Tipo inválido');
+
+    await audit('relatorio_html', { tipo }, req.user, getClientIp(req));
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch(e) { res.status(500).send('Erro ao gerar relatório: ' + escHtml(e.message)); }
+});
+
 // ==================== RESETAR ====================
 // Sincroniza a qtd de um produto SEMPRE registrando uma movimentação de Ajuste.
 // Antes, reset/restauração sobrescreviam produtos.qtd direto, sem deixar rastro —

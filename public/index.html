@@ -663,19 +663,22 @@ select.big-input { font-size: 14px; }
   <div id="p-export" class="page">
     <div class="export-list">
       <div class="export-card">
+        <div class="export-title">🛒 Lista de compras</div>
+        <div class="export-desc">Itens zerados e críticos, <b>organizados por categoria</b> e com sugestão de reposição. O relatório é colorido e dá pra imprimir ou salvar como PDF.</div>
+        <button class="btn-export btn-success" onclick="relatorio('compras')">🖨️ Relatório por categoria (PDF)</button>
+        <button class="btn-export" style="background:var(--s2);color:var(--text);margin-top:8px" onclick="exportar('compras')">⬇️ Baixar CSV (Excel)</button>
+      </div>
+      <div class="export-card">
         <div class="export-title">📦 Posição atual do estoque</div>
-        <div class="export-desc">Todos os produtos com quantidade atual, mínimo, custo unitário, valor total e status. Abre direto no Excel.</div>
-        <button class="btn-export btn-primary" onclick="exportar('estoque')">⬇️ Baixar CSV — Estoque completo</button>
+        <div class="export-desc">Todos os produtos por categoria, com valor, status colorido e subtotais. Imprimível / PDF.</div>
+        <button class="btn-export btn-primary" onclick="relatorio('estoque')">🖨️ Relatório por categoria (PDF)</button>
+        <button class="btn-export" style="background:var(--s2);color:var(--text);margin-top:8px" onclick="exportar('estoque')">⬇️ Baixar CSV (Excel)</button>
       </div>
       <div class="export-card">
         <div class="export-title">📋 Histórico de movimentações</div>
-        <div class="export-desc">Todas as entradas, saídas, perdas e ajustes com data/hora, responsável, motivo e valor movimentado.</div>
-        <button class="btn-export btn-primary" onclick="exportar('movimentacoes')">⬇️ Baixar CSV — Movimentações</button>
-      </div>
-      <div class="export-card">
-        <div class="export-title">🛒 Lista de compras</div>
-        <div class="export-desc">Somente itens zerados e críticos (≤50% do mínimo), com quantidade sugerida de reposição.</div>
-        <button class="btn-export btn-success" onclick="exportar('compras')">⬇️ Baixar CSV — Lista de compras</button>
+        <div class="export-desc">Entradas, saídas, perdas e ajustes <b>agrupados por dia</b>, com tipo colorido, responsável e motivo. Imprimível / PDF.</div>
+        <button class="btn-export btn-primary" onclick="relatorio('movimentacoes')">🖨️ Relatório por dia (PDF)</button>
+        <button class="btn-export" style="background:var(--s2);color:var(--text);margin-top:8px" onclick="exportar('movimentacoes')">⬇️ Baixar CSV (Excel)</button>
       </div>
       <div class="export-card" id="card-reset" style="border-color:rgba(239,68,68,0.2);display:none">
         <div class="export-title" style="color:var(--red)">⚠️ Resetar estoque</div>
@@ -1802,6 +1805,21 @@ async function exportar(tipo) {
     a.download = tipo==='estoque'?'estoque_toca_coelho.csv':tipo==='movimentacoes'?'movimentacoes_toca_coelho.csv':'lista_compras_toca_coelho.csv';
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   } catch(e) { handleApiError(e); }
+}
+
+async function relatorio(tipo) {
+  const win = window.open('', '_blank');
+  if (win) win.document.write('<p style="font-family:sans-serif;padding:24px;color:#475569">Gerando relatório…</p>');
+  try {
+    const res = await fetch(API + '/api/relatorio/' + tipo, {headers: authHeaders()});
+    if (!res.ok) { const t = await res.text(); throw new Error((t||'').slice(0,180) || 'Erro ao gerar relatório'); }
+    const html = await res.text();
+    if (win) { win.document.open(); win.document.write(html); win.document.close(); }
+    else { const blob = new Blob([html], {type:'text/html'}); window.location.href = URL.createObjectURL(blob); }
+  } catch(e) {
+    if (win) win.document.write('<p style="color:#dc2626;font-family:sans-serif;padding:24px">Erro: ' + (e.message||'?') + '</p>');
+    handleApiError(e);
+  }
 }
 
 async function resetar() {
