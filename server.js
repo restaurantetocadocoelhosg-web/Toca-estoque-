@@ -1226,13 +1226,17 @@ async function executarFerramenta(nome, input, user) {
 let varreduraCache = { dia: null, resposta: null };
 app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
   let isInit = !!(req.body && req.body.init);
+  const tsVarredura = nowSP();
+  const forcar = !!(req.body && req.body.forcar);
   // Só o admin dispara a varredura automática; outros usuários não rodam análise ao abrir.
   if (isInit && req.user.role !== 'admin') {
     return res.json({ resposta: '', movimentos_executados: [], pulado: 'nao_admin' });
   }
-  // Admin: se já rodou hoje, devolve o resultado em cache (não reprocessa).
-  if (isInit && varreduraCache.dia === dateSP() && varreduraCache.resposta) {
-    return res.json({ resposta: varreduraCache.resposta, movimentos_executados: [], cache: true });
+  // Admin: usa o cache do dia SÓ se nada mudou desde que ele foi gerado.
+  // (Antes ficava preso o dia todo: um inventário no meio do dia deixava o relatório defasado.)
+  if (isInit && !forcar && varreduraCache.dia === dateSP() && varreduraCache.resposta && varreduraCache.geradoEm) {
+    const { count } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gt('created_at', varreduraCache.geradoEm);
+    if (!count) return res.json({ resposta: varreduraCache.resposta, movimentos_executados: [], cache: true });
   }
   const pergunta = isInit ? null : String((req.body && req.body.pergunta) || '').replace(/[^\S\n]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim().slice(0, 8000);
   const historico = Array.isArray(req.body && req.body.historico) ? req.body.historico.slice(-10) : [];
@@ -1324,7 +1328,7 @@ app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
       messages.push({ role: 'user', content: toolResults });
     }
 
-    if (isInit) varreduraCache = { dia: dateSP(), resposta: textoFinal };
+    if (isInit) varreduraCache = { dia: dateSP(), resposta: textoFinal, geradoEm: tsVarredura };
     await audit('chat_ia', { pergunta: isInit ? '__boot__' : pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) {
