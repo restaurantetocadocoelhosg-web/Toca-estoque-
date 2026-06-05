@@ -1266,7 +1266,8 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
       else if (m.tipo === 'Ajuste') {
         g.nAjuste++;
         const reducao = g.bal - q;                       // quanto a contagem tirou
-        if (reducao > 0.001 && m.obs !== 'sincronização automática') g.contagemDown += reducao;
+        // Ajuste de sincronização (reset) ou de inventário já é contabilizado — não é sumiço.
+        if (reducao > 0.001 && m.obs !== 'sincronização automática' && m.obs !== 'inventario') g.contagemDown += reducao;
         g.bal = q;                                        // Ajuste define o saldo
       }
       g.ultimo = m.created_at; g.ultimo_responsavel = m.responsavel;   // ascendente: último fica no fim
@@ -1347,6 +1348,197 @@ app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'geren
     }
     await audit('reconciliar_fantasmas', { reconciliados, alvo: alvoId || 'todos' }, req.user, getClientIp(req));
     res.json({ reconciliados });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Lista as categorias distintas (para escolher o escopo do inventário).
+app.get('/api/categorias', auth, async (req, res) => {
+  try {
+    const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null');
+    const cats = [...new Set((data || []).map(p => p.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+    res.json(cats);
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// ==================== INVENTÁRIO SEMANAL ====================
+// Abre um inventário (foto do estoque) — geral ou de uma categoria. Captura, por
+// item, a qtd que o sistema acha e há quantos dias está parado (sem movimento).
+app.post('/api/inventario/abrir', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const categoria = sanitizeText(req.body?.categoria || '', 80) || null;
+    const { data: aberto } = await supabase.from('inventarios').select('id, categoria').eq('status', 'aberto').limit(1);
+    if (aberto && aberto.length) return res.status(400).json({ erro: `Já existe um inventário aberto (${aberto[0].categoria || 'geral'}). Feche-o antes de abrir outro.` });
+    let pq = supabase.from('produtos').select('id, nome, categoria, unidade, qtd, custo').or('ativo.eq.1,ativo.is.null');
+    if (categoria) pq = pq.eq('categoria', categoria);
+    const { data: produtos } = await pq.order('categoria').order('nome');
+    if (!produtos || !produtos.length) return res.status(400).json({ erro: 'Nenhum produto encontrado para inventariar.' });
+    const ids = produtos.map(p => p.id);
+    const { data: movs } = await supabase.from('movimentacoes').select('produto_id, created_at').in('produto_id', ids).order('created_at', { ascending: false });
+    const ultimo = {};
+    for (const m of (movs || [])) { if (!ultimo[m.produto_id]) ultimo[m.produto_id] = m.created_at; }
+    const agora = Date.now();
+    const { data: inv, error: invErr } = await supabase.from('inventarios')
+      .insert({ data: dateSP(), categoria, status: 'aberto', responsavel: req.user.nome, total_itens: produtos.length, criado_em: nowSP() })
+      .select().single();
+    if (invErr) return res.status(500).json({ erro: 'Erro ao abrir inventário.' });
+    const itens = produtos.map(p => {
+      const last = ultimo[p.id];
+      const dias = last ? Math.floor((agora - new Date(last).getTime()) / 86400000) : null;
+      return { inventario_id: inv.id, produto_id: p.id, produto_nome: p.nome, categoria: p.categoria,
+        unidade: p.unidade, custo: Number(p.custo || 0), qtd_sistema: Number(p.qtd), qtd_contada: null,
+        dias_parado: dias };
+    });
+    for (let i = 0; i < itens.length; i += 200) await supabase.from('inventario_itens').insert(itens.slice(i, i + 200));
+    await audit('inventario_abrir', { inventario_id: inv.id, categoria, total: produtos.length }, req.user, getClientIp(req));
+    res.json({ ok: true, inventario: inv, total_itens: produtos.length });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Retorna o inventário aberto (se houver) com seus itens para contagem.
+app.get('/api/inventario/aberto', auth, async (req, res) => {
+  try {
+    const { data: inv } = await supabase.from('inventarios').select('*').eq('status', 'aberto').order('id', { ascending: false }).limit(1).maybeSingle();
+    if (!inv) return res.json({ inventario: null });
+    const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', inv.id).order('categoria').order('produto_nome');
+    res.json({ inventario: inv, itens: itens || [] });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Salva contagens parciais (a equipe vai preenchendo). Não altera estoque ainda.
+app.post('/api/inventario/contar', auth, async (req, res) => {
+  try {
+    const invId = Number(req.body?.inventario_id);
+    const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
+    if (!invId || !itens.length) return res.status(400).json({ erro: 'Dados de contagem inválidos.' });
+    const { data: inv } = await supabase.from('inventarios').select('id, status').eq('id', invId).maybeSingle();
+    if (!inv || inv.status !== 'aberto') return res.status(400).json({ erro: 'Inventário não está aberto.' });
+    let salvos = 0;
+    for (const it of itens) {
+      const pid = Number(it.produto_id);
+      const q = it.qtd_contada === null || it.qtd_contada === '' ? null : parseNonNegativeNumber(it.qtd_contada);
+      if (!pid) continue;
+      await supabase.from('inventario_itens').update({ qtd_contada: q }).eq('inventario_id', invId).eq('produto_id', pid);
+      salvos++;
+    }
+    res.json({ ok: true, salvos });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Fecha o inventário: aplica a contagem como verdade (Ajustes marcados obs='inventario'),
+// categoriza divergências, levanta os "parados suspeitos" (consta mas não foi contado e
+// não se mexe) e grava o log na agenda.
+app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const invId = Number(req.body?.inventario_id);
+    const causas = (req.body && typeof req.body.causas === 'object') ? req.body.causas : {};
+    const zerarSuspeitos = Array.isArray(req.body?.zerar_suspeitos) ? req.body.zerar_suspeitos.map(Number) : [];
+    const { data: inv } = await supabase.from('inventarios').select('*').eq('id', invId).maybeSingle();
+    if (!inv || inv.status !== 'aberto') return res.status(400).json({ erro: 'Inventário não está aberto.' });
+    const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', invId);
+    const dataBR = (inv.data || dateSP()).split('-').reverse().join('/');
+    let divergentes = 0, suspeitos = 0, valorSumico = 0, valorSobra = 0;
+    const topSumico = [], suspeitosList = [], errosLanc = [];
+
+    for (const it of (itens || [])) {
+      const sistema = Number(it.qtd_sistema);
+      const custo = Number(it.custo || 0);
+      const thr = THRESHOLDS_ALERTA[it.categoria] || THRESHOLD_PADRAO;
+      const parado = it.dias_parado !== null && it.dias_parado >= thr;
+
+      if (it.qtd_contada === null) {
+        // Não contado. Se consta com estoque E está parado → suspeito (caso da alcatra).
+        if (sistema > 0 && parado) {
+          if (zerarSuspeitos.includes(Number(it.produto_id))) {
+            // Operador confirmou que acabou: zera via Ajuste de inventário.
+            await aplicarAjusteInventario(it, 0, inv, req.user.nome, 'sumico');
+            valorSumico += sistema * custo; divergentes++;
+            topSumico.push({ nome: it.produto_nome, qtd: sistema, valor: Number((sistema * custo).toFixed(2)) });
+          } else {
+            suspeitos++;
+            suspeitosList.push({ produto_id: it.produto_id, nome: it.produto_nome, categoria: it.categoria,
+              qtd_sistema: sistema, unidade: it.unidade, dias_parado: it.dias_parado });
+            await supabase.from('inventario_itens').update({ causa: 'nao_contado',
+              obs: `parado ${it.dias_parado}d — confira se ainda existe` }).eq('id', it.id);
+          }
+        } else {
+          await supabase.from('inventario_itens').update({ causa: 'nao_contado' }).eq('id', it.id);
+        }
+        continue;
+      }
+
+      const contada = Number(it.qtd_contada);
+      const div = Number((contada - sistema).toFixed(3));
+      const valorDiv = Number((Math.abs(div) * custo).toFixed(2));
+      let causa = sanitizeText(causas[it.produto_id] || '', 20);
+      if (!causa) causa = div < 0 ? 'sumico' : div > 0 ? 'sobra' : 'ok';
+
+      if (Math.abs(div) > 0.001) {
+        await aplicarAjusteInventario(it, contada, inv, req.user.nome, causa);
+        divergentes++;
+        if (div < 0) { valorSumico += valorDiv; topSumico.push({ nome: it.produto_nome, qtd: Math.abs(div), valor: valorDiv }); }
+        else valorSobra += valorDiv;
+        if (causa === 'erro_lancamento') errosLanc.push({ nome: it.produto_nome, div, unidade: it.unidade });
+      }
+      await supabase.from('inventario_itens').update({ qtd_contada: contada, divergencia: div, valor_divergencia: valorDiv, causa }).eq('id', it.id);
+    }
+
+    await supabase.from('inventarios').update({ status: 'fechado', fechado_em: nowSP(),
+      itens_contados: (itens || []).filter(i => i.qtd_contada !== null).length,
+      itens_divergentes: divergentes, itens_suspeitos: suspeitos,
+      valor_sumico: Number(valorSumico.toFixed(2)), valor_sobra: Number(valorSobra.toFixed(2)) }).eq('id', invId);
+
+    // Log na agenda — observação (resumo), erro (erros de lançamento) e alerta (suspeitos).
+    topSumico.sort((a, b) => b.valor - a.valor);
+    const resumoTxt = `Inventário ${dataBR}${inv.categoria ? ' ('+inv.categoria+')' : ''} fechado por ${req.user.nome}: ` +
+      `${(itens||[]).filter(i=>i.qtd_contada!==null).length}/${(itens||[]).length} contados, ${divergentes} divergências, ` +
+      `R$ ${valorSumico.toFixed(2)} sumido, R$ ${valorSobra.toFixed(2)} sobra, ${suspeitos} parados suspeitos.` +
+      (topSumico.length ? ` Top sumiço: ${topSumico.slice(0,5).map(t=>`${t.nome} (R$${t.valor.toFixed(2)})`).join(', ')}.` : '');
+    await supabase.from('ia_agenda').insert({ tipo: 'observacao', texto: resumoTxt.slice(0, 500), usuario_nome: req.user.nome, criado_em: nowSP() });
+    if (errosLanc.length) await supabase.from('ia_agenda').insert({ tipo: 'erro',
+      texto: `Inventário ${dataBR}: ${errosLanc.length} erro(s) de lançamento detectado(s): ${errosLanc.slice(0,8).map(e=>`${e.nome} (${e.div>0?'+':''}${e.div} ${e.unidade})`).join(', ')}.`.slice(0,500),
+      usuario_nome: req.user.nome, criado_em: nowSP() });
+    if (suspeitosList.length) await supabase.from('ia_agenda').insert({ tipo: 'alerta',
+      texto: `Inventário ${dataBR}: ${suspeitosList.length} item(ns) constam no estoque mas não foram contados e estão parados — confira se ainda existem: ${suspeitosList.slice(0,8).map(s=>`${s.nome} (${s.qtd_sistema} ${s.unidade}, ${s.dias_parado}d)`).join(', ')}.`.slice(0,500),
+      usuario_nome: req.user.nome, criado_em: nowSP() });
+
+    await audit('inventario_fechar', { inventario_id: invId, divergentes, suspeitos, valor_sumico: valorSumico }, req.user, getClientIp(req));
+    res.json({ ok: true, divergentes, suspeitos, valor_sumico: Number(valorSumico.toFixed(2)),
+      valor_sobra: Number(valorSobra.toFixed(2)), top_sumico: topSumico.slice(0, 10), suspeitos_lista: suspeitosList });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Aplica a contagem de um item como Ajuste rastreável (obs='inventario'): a conferência
+// reconhece esse ajuste como "acertado no inventário", não como sumiço misterioso.
+async function aplicarAjusteInventario(item, novaQtd, inv, responsavel, causa) {
+  const antes = Number(item.qtd_sistema);
+  const alvo = Number(Number(novaQtd).toFixed(3));
+  const custo = Number(item.custo || 0);
+  await supabase.from('produtos').update({ qtd: alvo }).eq('id', item.produto_id);
+  await supabase.from('movimentacoes').insert({
+    produto_id: item.produto_id, produto_nome: item.produto_nome, categoria: item.categoria,
+    tipo: 'Ajuste', qtd: alvo, unidade: item.unidade,
+    custo, valor: Number((custo * Math.abs(alvo - antes)).toFixed(2)),
+    motivo: `Inventário #${inv.id} (${inv.data})${causa ? ' — ' + causa : ''}`,
+    responsavel: responsavel || 'Inventário', obs: 'inventario',
+    qtd_antes: antes, qtd_depois: alvo, created_at: nowSP(),
+  });
+}
+
+// Histórico de inventários fechados (para tendência semana a semana).
+app.get('/api/inventario/historico', auth, async (req, res) => {
+  try {
+    const { data } = await supabase.from('inventarios').select('*').order('id', { ascending: false }).limit(30);
+    res.json(data || []);
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Detalhe de um inventário (itens + divergências).
+app.get('/api/inventario/:id', auth, async (req, res) => {
+  try {
+    const { data: inv } = await supabase.from('inventarios').select('*').eq('id', req.params.id).maybeSingle();
+    if (!inv) return res.status(404).json({ erro: 'Inventário não encontrado.' });
+    const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', inv.id).order('valor_divergencia', { ascending: true });
+    res.json({ inventario: inv, itens: itens || [] });
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 

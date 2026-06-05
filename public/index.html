@@ -865,6 +865,22 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <div id="p-inventario" class="page">
+    <div class="admin-section">
+      <div class="admin-card">
+        <div class="admin-card-title">🧮 Inventário — Contagem física</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
+          Toda semana (ou quando quiser) a contagem física <b>fecha a conta</b>: corrige o estoque com ajustes rastreáveis e registra a causa de cada divergência. Itens que constam mas não foram contados e estão parados aparecem como <b>suspeitos</b>.
+        </div>
+        <div id="inv-conteudo"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
+      </div>
+      <div class="admin-card" style="margin-top:16px">
+        <div class="admin-card-title">📚 Inventários anteriores</div>
+        <div id="inv-historico"><div class="empty"><div class="empty-text">—</div></div></div>
+      </div>
+    </div>
+  </div>
+
 </main>
 
 <nav>
@@ -874,6 +890,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
+  <button class="nav-btn" id="nav-inventario" onclick="goPage('inventario', this)"><span class="icon">🧮</span>Inventário</button>
   <button class="nav-btn" id="nav-alertas" onclick="goPage('alertas', this)" style="position:relative"><span class="icon">⚠️</span>Alertas<span id="alertas-badge" style="display:none;position:absolute;top:3px;right:2px;background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:8px;font-weight:700;align-items:center;justify-content:center;line-height:1"></span></button>
   <button class="nav-btn" id="nav-agenda" onclick="goPage('agenda', this)"><span class="icon">📓</span>Agenda</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
@@ -1222,6 +1239,7 @@ function goPage(id, btn) {
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
   if (id === 'agenda') loadAgenda();
+  if (id === 'inventario') loadInventario();
   if (id === 'chat') iniciarChatBoot();
 }
 
@@ -2673,6 +2691,139 @@ function renderAgenda() {
         '<span class="agenda-meta" style="margin-left:auto">' + dt + user + '</span>' +
       '</div>' +
       '<div class="agenda-texto">' + (n.texto||'').replace(/</g,'&lt;').replace(/>/g,'&gt;') + '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// ==================== INVENTÁRIO ====================
+let invAberto = null, invItens = [], invCats = [];
+
+function invPodeGerir() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'gerente'); }
+
+async function loadInventario() {
+  const el = document.getElementById('inv-conteudo');
+  el.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div>';
+  try {
+    const [ab, hist] = await Promise.all([
+      api('/api/inventario/aberto'),
+      api('/api/inventario/historico').catch(() => [])
+    ]);
+    invAberto = ab.inventario;
+    invItens = ab.itens || [];
+    await renderInventario();
+    renderInvHistorico(hist);
+  } catch(e) {
+    el.innerHTML = '<div class="empty"><div class="empty-text">Erro: ' + (e.message||'?') + '</div></div>';
+  }
+}
+
+async function renderInventario() {
+  const el = document.getElementById('inv-conteudo');
+  if (!invAberto) {
+    if (!invPodeGerir()) { el.innerHTML = '<div class="empty"><div class="empty-icon">🧮</div><div class="empty-text">Nenhum inventário aberto. Peça a um gerente para abrir.</div></div>'; return; }
+    if (!invCats.length) { try { invCats = await api('/api/categorias'); } catch(e) {} }
+    el.innerHTML =
+      '<div style="background:var(--s1);border-radius:10px;padding:14px">' +
+        '<div style="font-size:13px;font-weight:600;margin-bottom:10px">Abrir novo inventário</div>' +
+        '<label style="font-size:12px;color:var(--muted)">Escopo da contagem</label>' +
+        '<select id="inv-cat" style="width:100%;padding:10px;margin:6px 0 12px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border)">' +
+          '<option value="">Geral (todos os produtos)</option>' +
+          invCats.map(c => '<option value="' + escapeHtml(c) + '">' + escapeHtml(c) + '</option>').join('') +
+        '</select>' +
+        '<button onclick="abrirInventario()" style="width:100%;padding:12px;border:none;border-radius:8px;background:var(--accent);color:#fff;font-weight:700;cursor:pointer">🧮 Abrir inventário</button>' +
+        '<div style="font-size:11px;color:var(--muted);margin-top:8px">Dica: contar uma categoria por vez (ex.: Carnes) é mais rápido e preciso.</div>' +
+      '</div>';
+    return;
+  }
+  const contados = invItens.filter(i => i.qtd_contada !== null && i.qtd_contada !== '').length;
+  const porCat = {};
+  for (const it of invItens) { (porCat[it.categoria] = porCat[it.categoria] || []).push(it); }
+  let html =
+    '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">' +
+      '<div><div style="font-size:14px;font-weight:700">📋 ' + escapeHtml(invAberto.categoria || 'Geral') + ' · ' + invAberto.data.split('-').reverse().join('/') + '</div>' +
+      '<div style="font-size:11px;color:var(--muted)">' + contados + '/' + invItens.length + ' contados · aberto por ' + escapeHtml(invAberto.responsavel||'') + '</div></div>' +
+      '<div style="display:flex;gap:6px">' +
+        '<button onclick="salvarContagem()" style="padding:9px 12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer">💾 Salvar</button>' +
+        (invPodeGerir() ? '<button onclick="fecharInventario()" style="padding:9px 12px;border:none;border-radius:8px;background:#16a34a;color:#fff;font-weight:700;cursor:pointer">✅ Fechar</button>' : '') +
+      '</div>' +
+    '</div>';
+  for (const cat of Object.keys(porCat)) {
+    html += '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;padding:10px 0 4px">' + escapeHtml(cat) + '</div>';
+    for (const it of porCat[cat]) {
+      const parado = it.dias_parado !== null && it.dias_parado >= 7;
+      const badge = it.dias_parado === null ? '<span style="color:#b8860b">sem histórico</span>' :
+        parado ? '<span style="color:#e85d26">⚠️ parado ' + it.dias_parado + 'd</span>' : '<span style="color:var(--muted)">' + it.dias_parado + 'd</span>';
+      const val = (it.qtd_contada !== null && it.qtd_contada !== '') ? it.qtd_contada : '';
+      html +=
+        '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
+            '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + badge + '</div>' +
+          '</div>' +
+          '<input type="number" step="0.001" min="0" inputmode="decimal" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
+            'style="width:84px;padding:8px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);text-align:right;font-size:14px">' +
+          '<span style="font-size:11px;color:var(--muted);width:24px">' + it.unidade + '</span>' +
+        '</div>';
+    }
+  }
+  el.innerHTML = html;
+}
+
+async function abrirInventario() {
+  const cat = document.getElementById('inv-cat') ? document.getElementById('inv-cat').value : '';
+  if (!confirm('Abrir inventário' + (cat ? ' de ' + cat : ' geral') + '?')) return;
+  try { await apiPost('/api/inventario/abrir', { categoria: cat }); toast('✓ Inventário aberto','ok'); loadInventario(); }
+  catch(e) { toast(e.message || 'Erro', 'err'); }
+}
+
+function coletarContagem() {
+  const itens = [];
+  document.querySelectorAll('.inv-input').forEach(inp => {
+    const v = inp.value.trim();
+    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : Number(v) });
+  });
+  return itens;
+}
+
+async function salvarContagem() {
+  if (!invAberto) return;
+  try {
+    const itens = coletarContagem();
+    await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens });
+    const map = {}; itens.forEach(i => map[i.produto_id] = i.qtd_contada);
+    invItens.forEach(it => { if (it.produto_id in map) it.qtd_contada = map[it.produto_id]; });
+    toast('✓ Contagem salva','ok');
+    renderInventario();
+  } catch(e) { toast(e.message || 'Erro ao salvar', 'err'); }
+}
+
+async function fecharInventario() {
+  if (!invAberto) return;
+  if (!confirm('Fechar o inventário?\n\nA contagem vira o estoque oficial (com ajustes rastreáveis). O que não foi contado mas está parado vira "suspeito". Não dá pra desfazer.')) return;
+  try {
+    await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens: coletarContagem() });
+    const r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
+    let msg = 'Inventário fechado.\n\nDivergências: ' + r.divergentes + '\nSumiço: R$ ' + (r.valor_sumico||0).toFixed(2) +
+      '\nSobra: R$ ' + (r.valor_sobra||0).toFixed(2) + '\nSuspeitos (parados não contados): ' + r.suspeitos;
+    if (r.suspeitos_lista && r.suspeitos_lista.length) {
+      msg += '\n\nConfira se ainda existem:\n' + r.suspeitos_lista.slice(0,10).map(s => '• ' + s.nome + ' (' + s.qtd_sistema + ' ' + s.unidade + ', ' + s.dias_parado + 'd)').join('\n');
+    }
+    alert(msg);
+    invAberto = null; invItens = [];
+    loadInventario();
+  } catch(e) { toast(e.message || 'Erro ao fechar', 'err'); }
+}
+
+function renderInvHistorico(list) {
+  const el = document.getElementById('inv-historico');
+  if (!list || !list.length) { el.innerHTML = '<div class="empty"><div class="empty-text">Nenhum inventário ainda.</div></div>'; return; }
+  el.innerHTML = list.map(inv => {
+    const dt = (inv.data||'').split('-').reverse().join('/');
+    const st = inv.status === 'aberto' ? '🟡 aberto' : inv.status === 'fechado' ? '🟢 fechado' : '⚪ ' + inv.status;
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 11px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+      '<div><div style="font-size:13px;font-weight:600">' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + '</div>' +
+      '<div style="font-size:10px;color:var(--muted)">' + st + ' · ' + (inv.itens_divergentes||0) + ' diverg. · ' + (inv.itens_suspeitos||0) + ' suspeitos</div></div>' +
+      '<div style="text-align:right"><div style="font-size:13px;font-weight:700;color:#e85d26">R$ ' + Number(inv.valor_sumico||0).toFixed(2) + '</div><div style="font-size:9px;color:var(--muted)">sumido</div></div>' +
     '</div>';
   }).join('');
 }
