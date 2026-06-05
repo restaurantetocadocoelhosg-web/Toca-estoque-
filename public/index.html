@@ -836,9 +836,9 @@ select.big-input { font-size: 14px; }
         <div id="alertas-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
       </div>
       <div class="admin-card" style="margin-top:16px">
-        <div class="admin-card-title">👻 Fantasmas — Entrada sem Saída</div>
+        <div class="admin-card-title">👻 Fantasmas — Conferência cruzada</div>
         <div style="font-size:12px;color:var(--muted);margin-bottom:12px">
-          Produtos zerados com entradas registradas mas nenhuma saída no histórico. Alguém usou sem lançar?
+          Itens zerados em que o histórico não fecha. 🔴 <b>sumiu sem baixa</b> = contagem zerou sem saída lançada (cobrar equipe). 🟡 <b>dado furado</b> = qtd zerada por fora do app (reset/importação), não por uso.
         </div>
         <div id="fantasmas-lista"><div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando...</div></div></div>
       </div>
@@ -1302,16 +1302,34 @@ async function loadAlertas() {
       fantasmasEl.innerHTML = '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Nenhum fantasma detectado.</div></div>';
     } else {
       let fhtml = '';
+      const nDesync = fantasmas.filter(f => f.classe === 'desync').length;
+      if (nDesync > 1) {
+        fhtml += `<div style="text-align:right;margin-bottom:8px"><button onclick="reconciliarTodosFantasmas()" style="font-size:11px;font-weight:700;border:none;background:#b8860b;color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer">✓ Reconciliar todos (${nDesync} dado furado)</button></div>`;
+      }
       for (const f of fantasmas) {
         const ultTxt = f.ultimo_movimento ? new Date(String(f.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (f.ultimo_responsavel ? ' (' + f.ultimo_responsavel + ')' : '') : '—';
-        fhtml += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid #a855f7">`;
-        fhtml += `<div><div style="font-size:13px;font-weight:600">${f.nome}</div><div style="font-size:11px;color:var(--muted)">${f.categoria} | entrada: ${f.total_entradas} ${f.unidade} | saída: 0</div><div style="font-size:10px;color:var(--muted);margin-top:2px">último: ${ultTxt}</div></div>`;
-        fhtml += `<div style="font-size:11px;font-weight:700;color:#a855f7;text-align:right;flex-shrink:0;margin-left:8px">sem saída</div>`;
+        const cor = f.classe === 'sumico' ? '#e85d26' : '#b8860b';
+        const acao = f.classe === 'desync' ? `<button onclick="reconciliarFantasma(${f.produto_id})" style="margin-top:6px;font-size:10px;font-weight:700;border:none;background:#b8860b;color:#fff;padding:4px 8px;border-radius:6px;cursor:pointer">✓ reconciliar</button>` : '';
+        fhtml += `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${cor}">`;
+        fhtml += `<div style="flex:1"><div style="font-size:13px;font-weight:600">${f.nome}</div><div style="font-size:11px;color:var(--muted)">${f.categoria} | entrada: ${f.total_entradas} ${f.unidade} | saída: ${f.total_saidas} ${f.unidade}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${f.explica}</div><div style="font-size:10px;color:var(--muted);margin-top:2px">último: ${ultTxt}</div></div>`;
+        fhtml += `<div style="text-align:right;flex-shrink:0;margin-left:8px"><div style="font-size:11px;font-weight:700;color:${cor}">${f.label}</div>${acao}</div>`;
         fhtml += `</div>`;
       }
       fantasmasEl.innerHTML = fhtml;
     }
   } catch(e) { lista.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar alertas.</div></div>'; }
+}
+
+async function reconciliarFantasma(id) {
+  if (!confirm('Reconciliar este item?\n\nVai acertar o histórico (NÃO muda o estoque) e tirar da lista. Use só quando você sabe que o item foi zerado por reset/importação, não por consumo.')) return;
+  try { await apiPost('/api/alertas/fantasmas/reconciliar', { produto_id: id }); loadAlertas(); }
+  catch(e) { alert('Erro: ' + (e.message || e)); }
+}
+
+async function reconciliarTodosFantasmas() {
+  if (!confirm('Reconciliar TODOS os itens marcados como "dado furado"?\n\nAcerta o histórico, não muda o estoque.')) return;
+  try { const r = await apiPost('/api/alertas/fantasmas/reconciliar', {}); alert((r.reconciliados || 0) + ' item(ns) reconciliado(s).'); loadAlertas(); }
+  catch(e) { alert('Erro: ' + (e.message || e)); }
 }
 
 function irEstoque(status) {
@@ -2596,6 +2614,8 @@ function renderAuditoria() {
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
           <span>📦 Estoque atual: <b>${r.qtd_atual ?? '?'} ${r.unidade}</b></span>
+          <span title="movimento líquido no período: entrada − saída ± ajustes">📊 Saldo período: <b>${r.saldo > 0 ? '+' : ''}${r.saldo} ${r.unidade}</b></span>
+          ${r.num_ajustes > 0 ? `<span>🧮 Ajustes: <b>${r.num_ajustes}</b> (Δ ${r.total_ajuste_delta > 0 ? '+' : ''}${r.total_ajuste_delta} ${r.unidade})</span>` : ''}
           ${r.total_perda > 0 ? `<span>❌ Perdas: <b>${r.total_perda} ${r.unidade}</b></span>` : ''}
           <span>💰 Saída valor: <b>R$ ${r.valor_saida.toFixed(2)}</b></span>
         </div>

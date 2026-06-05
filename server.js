@@ -647,6 +647,26 @@ app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) =
 });
 
 // ==================== RESETAR ====================
+// Sincroniza a qtd de um produto SEMPRE registrando uma movimentação de Ajuste.
+// Antes, reset/restauração sobrescreviam produtos.qtd direto, sem deixar rastro —
+// a qtd ficava diferente do histórico e a conferência acusava "fantasmas" falsos
+// (entrada registrada, qtd 0, nenhuma saída). Agora qtd e histórico nunca divergem.
+async function sincronizarQtd(prod, novaQtd, motivo, responsavel) {
+  const qtdAntes = Number(prod.qtd);
+  const alvo = Number(Number(novaQtd).toFixed(3));
+  if (!Number.isFinite(alvo) || alvo === qtdAntes) return false;
+  const custoUnit = Number(prod.custo || 0);
+  await supabase.from('produtos').update({ qtd: alvo }).eq('id', prod.id);
+  await supabase.from('movimentacoes').insert({
+    produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+    tipo: 'Ajuste', qtd: alvo, unidade: prod.unidade,
+    custo: custoUnit, valor: Number((custoUnit * Math.abs(alvo - qtdAntes)).toFixed(2)),
+    motivo, responsavel: responsavel || 'Sistema', obs: 'sincronização automática',
+    qtd_antes: qtdAntes, qtd_depois: alvo, created_at: nowSP(),
+  });
+  return true;
+}
+
 app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
   const confirmacao = sanitizeText(req.body?.confirmacao, 20).toUpperCase();
   if (confirmacao !== 'RESTAURAR') return res.status(400).json({ erro: 'Confirmação inválida. Digite RESTAURAR para continuar.' });
@@ -656,8 +676,14 @@ app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
   const seedPath = path.join(__dirname, 'produtos_seed.json');
   if (!fs.existsSync(seedPath)) return res.status(404).json({ erro: 'Seed não encontrado.' });
   const produtos = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
-  for (const p of produtos)
-    await supabase.from('produtos').update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo }).eq('nome', p.nome);
+  const { data: prodsDb } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, custo');
+  const mapDb = {}; for (const pd of (prodsDb || [])) mapDb[pd.nome] = pd;
+  for (const p of produtos) {
+    // custo/mínimo atualizam direto; a QTD vira Ajuste para não desincronizar o histórico
+    await supabase.from('produtos').update({ custo: p.custo, minimo: p.minimo }).eq('nome', p.nome);
+    const pd = mapDb[p.nome];
+    if (pd) await sincronizarQtd({ ...pd, custo: p.custo }, p.qtd, 'Reset de estoque (restaurar seed)', req.user.nome);
+  }
   await audit('resetar_estoque', { total_produtos: produtos.length }, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -1224,28 +1250,97 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ fantasmas: [] });
     const { data: movs } = await supabase.from('movimentacoes')
-      .select('produto_id, tipo, qtd, created_at, responsavel')
+      .select('produto_id, tipo, qtd, qtd_antes, qtd_depois, obs, created_at, responsavel')
       .in('produto_id', ids)
       .order('created_at', { ascending: false });
     const movByProd = {};
     for (const m of (movs || [])) {
-      if (!movByProd[m.produto_id]) movByProd[m.produto_id] = { entradas: 0, saidas: 0, ultimo: null, ultimo_responsavel: null };
-      if (m.tipo === 'Entrada') movByProd[m.produto_id].entradas += Number(m.qtd);
-      else if (m.tipo === 'Saída' || m.tipo === 'Perda') movByProd[m.produto_id].saidas += Number(m.qtd);
-      if (!movByProd[m.produto_id].ultimo) { movByProd[m.produto_id].ultimo = m.created_at; movByProd[m.produto_id].ultimo_responsavel = m.responsavel; }
+      if (!movByProd[m.produto_id]) movByProd[m.produto_id] = { entradas: 0, saidas: 0, ajusteDelta: 0, ajusteDown: 0, nAjuste: 0, ultimo: null, ultimo_responsavel: null };
+      const g = movByProd[m.produto_id];
+      if (m.tipo === 'Entrada') g.entradas += Number(m.qtd);
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') g.saidas += Number(m.qtd);
+      else if (m.tipo === 'Ajuste') {
+        const delta = Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0);
+        g.ajusteDelta += delta; g.nAjuste++;
+        // Ajuste de sincronização (reset/restauração) é administrativo, NÃO contagem física —
+        // entra no saldo (p/ não acusar desync) mas não conta como "sumiço".
+        if (delta < 0 && m.obs !== 'sincronização automática') g.ajusteDown += Math.abs(delta);
+      }
+      if (!g.ultimo) { g.ultimo = m.created_at; g.ultimo_responsavel = m.responsavel; }
     }
+    // Conferência cruzada: reconstrói o saldo pelo histórico (entrada − saída ± ajuste)
+    // e compara com a qtd real. Classifica em vez de acusar todo zerado às cegas.
     const fantasmas = [];
     for (const p of (produtos || [])) {
-      const hist = movByProd[p.id];
-      if (!hist || hist.entradas === 0) continue;
-      if (hist.saidas === 0) {
-        fantasmas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, unidade: p.unidade,
-          total_entradas: Number(hist.entradas.toFixed(3)), total_saidas: 0,
-          ultimo_movimento: hist.ultimo, ultimo_responsavel: hist.ultimo_responsavel });
+      const h = movByProd[p.id];
+      if (!h || h.entradas === 0) continue;            // nunca teve entrada: não é fantasma
+      const saldoHist = Number((h.entradas - h.saidas + h.ajusteDelta).toFixed(3));
+      let classe, label, explica;
+      if (Math.abs(saldoHist) > 0.001) {
+        // Histórico fecha com saldo, mas o estoque está 0: a qtd foi zerada POR FORA
+        // do app (reset/importação/edição em massa) — é dado furado, não consumo.
+        classe = 'desync'; label = '🟡 dado furado';
+        explica = `o histórico fecha em ${saldoHist} ${p.unidade}, mas o estoque está 0 — foi zerado por fora do app (reset/importação), não por uso`;
+      } else if (h.ajusteDown > 0.001 && h.saidas === 0) {
+        // Contagem física zerou o item sem nenhuma saída lançada = uso não registrado.
+        classe = 'sumico'; label = '🔴 sumiu sem baixa';
+        explica = `a contagem zerou ${Number(h.ajusteDown.toFixed(3))} ${p.unidade} sem nenhuma saída lançada — alguém usou sem registrar`;
+      } else {
+        continue;                                       // explicado por saída/contagem normal
       }
+      fantasmas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, unidade: p.unidade,
+        total_entradas: Number(h.entradas.toFixed(3)), total_saidas: Number(h.saidas.toFixed(3)),
+        ajustes: h.nAjuste, saldo_historico: saldoHist, classe, label, explica,
+        ultimo_movimento: h.ultimo, ultimo_responsavel: h.ultimo_responsavel });
     }
-    fantasmas.sort((a, b) => new Date(b.ultimo_movimento) - new Date(a.ultimo_movimento));
+    const ordem = { sumico: 0, desync: 1 };
+    fantasmas.sort((a, b) => (ordem[a.classe] - ordem[b.classe]) || (new Date(b.ultimo_movimento) - new Date(a.ultimo_movimento)));
     res.json({ fantasmas });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
+// Reconcilia "dado furado": grava um Ajuste corretivo que alinha o histórico ao
+// estoque real (qtd não muda) — assim o item para de reaparecer na conferência.
+// É a "memória" da conferência: o que foi reconciliado uma vez não volta inocente.
+app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const alvoId = req.body?.produto_id ? Number(req.body.produto_id) : null;
+    let q = supabase.from('produtos').select('id, nome, categoria, qtd, unidade, custo')
+      .or('ativo.eq.1,ativo.is.null').eq('qtd', 0);
+    if (alvoId) q = q.eq('id', alvoId);
+    const { data: produtos } = await q;
+    const ids = (produtos || []).map(p => p.id);
+    if (!ids.length) return res.json({ reconciliados: 0 });
+    const { data: movs } = await supabase.from('movimentacoes')
+      .select('produto_id, tipo, qtd, qtd_antes, qtd_depois').in('produto_id', ids);
+    const agg = {};
+    for (const m of (movs || [])) {
+      if (!agg[m.produto_id]) agg[m.produto_id] = { entradas: 0, saidas: 0, ajusteDelta: 0 };
+      const g = agg[m.produto_id];
+      if (m.tipo === 'Entrada') g.entradas += Number(m.qtd);
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') g.saidas += Number(m.qtd);
+      else if (m.tipo === 'Ajuste') g.ajusteDelta += (Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0));
+    }
+    let reconciliados = 0;
+    for (const p of (produtos || [])) {
+      const g = agg[p.id];
+      if (!g || g.entradas === 0) continue;
+      const saldoHist = Number((g.entradas - g.saidas + g.ajusteDelta).toFixed(3));
+      if (Math.abs(saldoHist) <= 0.001) continue;       // já fecha — não é dado furado
+      const custoUnit = Number(p.custo || 0);
+      // Ajuste corretivo: delta = (qtd real − saldo do histórico) = −saldoHist. qtd fica igual.
+      await supabase.from('movimentacoes').insert({
+        produto_id: p.id, produto_nome: p.nome, categoria: p.categoria,
+        tipo: 'Ajuste', qtd: Number(p.qtd), unidade: p.unidade,
+        custo: custoUnit, valor: Number((custoUnit * Math.abs(saldoHist)).toFixed(2)),
+        motivo: 'Reconciliação (acerto de histórico)', responsavel: req.user.nome,
+        obs: 'sincronização automática',
+        qtd_antes: saldoHist, qtd_depois: Number(p.qtd), created_at: nowSP(),
+      });
+      reconciliados++;
+    }
+    await audit('reconciliar_fantasmas', { reconciliados, alvo: alvoId || 'todos' }, req.user, getClientIp(req));
+    res.json({ reconciliados });
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
@@ -1364,20 +1459,24 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   const groups = {};
   for (const m of (allMovs || [])) {
     const key = m.produto_nome;
-    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade, total_entrada: 0, total_saida: 0, total_perda: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
+    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade, total_entrada: 0, total_saida: 0, total_perda: 0, total_ajuste_delta: 0, num_ajustes: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
     const g = groups[key];
     if (m.tipo === 'Entrada') { g.total_entrada += Number(m.qtd); g.valor_entrada += Number(m.valor || 0); g.num_entradas++; }
     if (['Saída','Perda'].includes(m.tipo)) { g.total_saida += Number(m.qtd); g.valor_saida += Number(m.valor || 0); g.num_saidas++; }
     if (m.tipo === 'Perda') g.total_perda += Number(m.qtd);
+    if (m.tipo === 'Ajuste') { g.total_ajuste_delta += (Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0)); g.num_ajustes++; }
   }
   const { data: produtos } = await supabase.from('produtos').select('nome, qtd, minimo');
   const estoqueMap = {};
   for (const p of (produtos || [])) estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) };
-  const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0).map(r => {
+  const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0 || g.num_ajustes > 0).map(r => {
     const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
-    const saldo = Number((r.total_entrada - r.total_saida).toFixed(3));
+    // Saldo do PERÍODO = movimento líquido (entrada − saída ± ajustes). NÃO é o estoque
+    // absoluto — só bate com a qtd_atual se o período cobrir desde a última base do item.
+    const saldo = Number((r.total_entrada - r.total_saida + r.total_ajuste_delta).toFixed(3));
     return { ...r, total_entrada: Number(r.total_entrada.toFixed(3)), total_saida: Number(r.total_saida.toFixed(3)),
-      total_perda: Number(r.total_perda.toFixed(3)), valor_entrada: Number(r.valor_entrada.toFixed(2)),
+      total_perda: Number(r.total_perda.toFixed(3)), total_ajuste_delta: Number(r.total_ajuste_delta.toFixed(3)),
+      num_ajustes: r.num_ajustes, valor_entrada: Number(r.valor_entrada.toFixed(2)),
       valor_saida: Number(r.valor_saida.toFixed(2)), saldo, qtd_atual: qtdAtual,
       alerta: r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5,
       sem_entrada: r.total_saida > 0 && r.total_entrada === 0 };
@@ -1432,9 +1531,14 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
   if (!backup) return res.status(404).json({ erro: 'Backup não encontrado.' });
   await criarBackupEstoque('pre_restauracao');
   const produtos = JSON.parse(backup.dados);
+  const { data: prodsDb } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, custo');
+  const mapDb = {}; for (const pd of (prodsDb || [])) mapDb[pd.id] = pd;
   let restaurados = 0;
   for (const p of produtos) {
-    const { error } = await supabase.from('produtos').update({ qtd: p.qtd, custo: p.custo, minimo: p.minimo, ativo: p.ativo }).eq('id', p.id);
+    // custo/mínimo/ativo direto; a QTD vira Ajuste para não desincronizar o histórico
+    const { error } = await supabase.from('produtos').update({ custo: p.custo, minimo: p.minimo, ativo: p.ativo }).eq('id', p.id);
+    const pd = mapDb[p.id];
+    if (pd) await sincronizarQtd({ ...pd, custo: p.custo }, p.qtd, 'Restauração de backup', req.user.nome);
     if (!error) restaurados++;
   }
   await audit('restaurar_backup', { backup_id: backup.id, data_backup: backup.data_backup, restaurados }, req.user, getClientIp(req));
