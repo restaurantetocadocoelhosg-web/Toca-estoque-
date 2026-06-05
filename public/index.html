@@ -2838,14 +2838,14 @@ async function salvarContagem() {
 
 async function fecharInventario() {
   if (!invAberto) return;
-  if (!confirm('Fechar o inventário?\n\nA contagem vira o estoque oficial (com ajustes rastreáveis). O que não foi contado mas está parado vira "suspeito". Não dá pra desfazer.')) return;
+  if (!confirm('Fechar o inventário?\n\nA contagem vira o estoque oficial (com ajustes rastreáveis). O que NÃO foi contado NÃO é zerado — fica pendente de verificação. Não dá pra desfazer.')) return;
   try {
     await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens: coletarContagem() });
     const r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
     let msg = 'Inventário fechado.\n\nDivergências: ' + r.divergentes + '\nSumiço: R$ ' + (r.valor_sumico||0).toFixed(2) +
-      '\nSobra: R$ ' + (r.valor_sobra||0).toFixed(2) + '\nSuspeitos (parados não contados): ' + r.suspeitos;
+      '\nSobra: R$ ' + (r.valor_sobra||0).toFixed(2) + '\nA verificar (não contados, estoque mantido): ' + r.suspeitos;
     if (r.suspeitos_lista && r.suspeitos_lista.length) {
-      msg += '\n\nConfira se ainda existem:\n' + r.suspeitos_lista.slice(0,10).map(s => '• ' + s.nome + ' (' + s.qtd_sistema + ' ' + s.unidade + ', ' + s.dias_parado + 'd)').join('\n');
+      msg += '\n\nPeça verificação destes:\n' + r.suspeitos_lista.slice(0,10).map(s => '• ' + s.nome + ' (' + s.qtd_sistema + ' ' + s.unidade + (s.dias_parado!=null?', '+s.dias_parado+'d':'') + ')').join('\n');
     }
     alert(msg);
     invAberto = null; invItens = [];
@@ -2863,7 +2863,7 @@ function renderInvHistorico(list) {
     return '<div' + click + ' class="inv-hist-row" data-row="1">' +
       '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 11px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
       '<div><div style="font-size:13px;font-weight:600">' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + (inv.status==='fechado'?' ›':'') + '</div>' +
-      '<div style="font-size:10px;color:var(--muted)">' + st + ' · ' + (inv.itens_divergentes||0) + ' diverg. · ' + (inv.itens_suspeitos||0) + ' suspeitos</div></div>' +
+      '<div style="font-size:10px;color:var(--muted)">' + st + ' · ' + (inv.itens_divergentes||0) + ' diverg. · ' + (inv.itens_suspeitos||0) + ' a verificar</div></div>' +
       '<div style="text-align:right"><div style="font-size:13px;font-weight:700;color:#e85d26">R$ ' + Number(inv.valor_sumico||0).toFixed(2) + '</div><div style="font-size:9px;color:var(--muted)">sumido</div></div>' +
       '</div></div>';
   }).join('');
@@ -2885,7 +2885,8 @@ async function abrirRelatorioInventario(id) {
       trend = '<div style="font-size:11px;color:var(--muted);margin-top:4px">vs ' + (ant.data||'').split('-').reverse().join('/') + ': ' + seta + ' R$ ' + Math.abs(dif).toFixed(2) + (dif<0?' a menos':dif>0?' a mais':' igual') + ' de sumiço</div>';
     }
     const diverg = itens.filter(i => i.divergencia !== null && Math.abs(Number(i.divergencia)) > 0.001);
-    const susp = itens.filter(i => i.causa === 'nao_contado' && Number(i.qtd_sistema) > 0 && i.dias_parado !== null && i.dias_parado >= 7);
+    const susp = itens.filter(i => i.causa === 'nao_contado' && Number(i.qtd_sistema) > 0)
+      .sort((a, b) => (b.dias_parado||0) - (a.dias_parado||0));
 
     let html = '<button onclick="loadInventario()" style="background:none;border:none;color:var(--accent);font-weight:700;cursor:pointer;padding:0 0 10px;font-size:13px">← Voltar</button>';
     html += '<div style="font-size:15px;font-weight:800">📋 Inventário ' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + '</div>';
@@ -2916,14 +2917,16 @@ async function abrirRelatorioInventario(id) {
       }
     }
     if (susp.length) {
-      html += '<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:0.6px;margin:12px 0 6px">⚠️ Parados suspeitos (confira se ainda existem)</div>';
+      html += '<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:0.6px;margin:12px 0 6px">⚠️ A verificar — não contados (estoque mantido, peça varredura)</div>';
       for (const it of susp) {
+        const par = (it.dias_parado !== null && it.dias_parado >= 7);
+        const info = it.dias_parado === null ? 'sem histórico' : (par ? '⚠️ parado ' + it.dias_parado + 'd' : 'parado ' + it.dias_parado + 'd');
         html += '<div style="padding:8px 10px;background:rgba(232,93,38,0.06);border:1px solid rgba(232,93,38,0.25);border-radius:8px;margin-bottom:5px">' +
           '<div style="font-size:13px;font-weight:600">' + escapeHtml(it.produto_nome) + '</div>' +
-          '<div style="font-size:10px;color:var(--muted)">consta ' + it.qtd_sistema + ' ' + it.unidade + ' · parado ' + it.dias_parado + 'd · não foi contado</div></div>';
+          '<div style="font-size:10px;color:var(--muted)">consta ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + info + ' · não foi contado</div></div>';
       }
     }
-    if (!diverg.length && !susp.length) html += '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Tudo bateu — sem divergências nem suspeitos.</div></div>';
+    if (!diverg.length && !susp.length) html += '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Tudo bateu — sem divergências nem pendências.</div></div>';
     el.innerHTML = html;
   } catch(e) { el.innerHTML = '<div class="empty"><div class="empty-text">Erro ao abrir relatório: ' + (e.message||'?') + '</div></div>'; }
 }
