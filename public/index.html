@@ -2696,7 +2696,9 @@ function renderAgenda() {
 }
 
 // ==================== INVENTÁRIO ====================
-let invAberto = null, invItens = [], invCats = [];
+let invAberto = null, invItens = [], invCats = [], invHistorico = [];
+const INV_CAUSAS = [['sumico','Uso não lançado'],['perda','Perda/vencido'],['erro_lancamento','Erro de lançamento'],['roubo','Roubo'],['sobra','Sobra'],['ok','OK']];
+function invCausaLabel(c) { const f = INV_CAUSAS.find(x => x[0] === c); return f ? f[1] : (c || '—'); }
 
 function invPodeGerir() { return currentUser && (currentUser.role === 'admin' || currentUser.role === 'gerente'); }
 
@@ -2710,8 +2712,9 @@ async function loadInventario() {
     ]);
     invAberto = ab.inventario;
     invItens = ab.itens || [];
+    invHistorico = hist || [];
     await renderInventario();
-    renderInvHistorico(hist);
+    renderInvHistorico(invHistorico);
   } catch(e) {
     el.innerHTML = '<div class="empty"><div class="empty-text">Erro: ' + (e.message||'?') + '</div></div>';
   }
@@ -2820,12 +2823,78 @@ function renderInvHistorico(list) {
   el.innerHTML = list.map(inv => {
     const dt = (inv.data||'').split('-').reverse().join('/');
     const st = inv.status === 'aberto' ? '🟡 aberto' : inv.status === 'fechado' ? '🟢 fechado' : '⚪ ' + inv.status;
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 11px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
-      '<div><div style="font-size:13px;font-weight:600">' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + '</div>' +
+    const click = inv.status === 'fechado' ? ' onclick="abrirRelatorioInventario(' + inv.id + ')" style="cursor:pointer"' : ' style="opacity:.7"';
+    return '<div' + click + ' class="inv-hist-row" data-row="1">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 11px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+      '<div><div style="font-size:13px;font-weight:600">' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + (inv.status==='fechado'?' ›':'') + '</div>' +
       '<div style="font-size:10px;color:var(--muted)">' + st + ' · ' + (inv.itens_divergentes||0) + ' diverg. · ' + (inv.itens_suspeitos||0) + ' suspeitos</div></div>' +
       '<div style="text-align:right"><div style="font-size:13px;font-weight:700;color:#e85d26">R$ ' + Number(inv.valor_sumico||0).toFixed(2) + '</div><div style="font-size:9px;color:var(--muted)">sumido</div></div>' +
-    '</div>';
+      '</div></div>';
   }).join('');
+}
+
+async function abrirRelatorioInventario(id) {
+  const el = document.getElementById('inv-conteudo');
+  el.innerHTML = '<div class="empty"><div class="empty-icon">⏳</div><div class="empty-text">Carregando relatório...</div></div>';
+  try {
+    const d = await api('/api/inventario/' + id);
+    const inv = d.inventario, itens = d.itens || [];
+    const dt = (inv.data||'').split('-').reverse().join('/');
+    // Tendência: inventário fechado anterior, mesma categoria.
+    const ant = invHistorico.find(h => h.id < inv.id && h.status === 'fechado' && (h.categoria||'') === (inv.categoria||''));
+    let trend = '';
+    if (ant) {
+      const dif = Number(inv.valor_sumico||0) - Number(ant.valor_sumico||0);
+      const seta = dif < -0.01 ? '🟢 ▼' : dif > 0.01 ? '🔴 ▲' : '➖';
+      trend = '<div style="font-size:11px;color:var(--muted);margin-top:4px">vs ' + (ant.data||'').split('-').reverse().join('/') + ': ' + seta + ' R$ ' + Math.abs(dif).toFixed(2) + (dif<0?' a menos':dif>0?' a mais':' igual') + ' de sumiço</div>';
+    }
+    const diverg = itens.filter(i => i.divergencia !== null && Math.abs(Number(i.divergencia)) > 0.001);
+    const susp = itens.filter(i => i.causa === 'nao_contado' && Number(i.qtd_sistema) > 0 && i.dias_parado !== null && i.dias_parado >= 7);
+
+    let html = '<button onclick="loadInventario()" style="background:none;border:none;color:var(--accent);font-weight:700;cursor:pointer;padding:0 0 10px;font-size:13px">← Voltar</button>';
+    html += '<div style="font-size:15px;font-weight:800">📋 Inventário ' + dt + ' · ' + escapeHtml(inv.categoria||'Geral') + '</div>';
+    html += '<div style="font-size:11px;color:var(--muted)">fechado por ' + escapeHtml(inv.responsavel||'') + ' · ' + (inv.itens_contados||0) + '/' + (inv.total_itens||0) + ' contados</div>' + trend;
+    // Cartões de totais
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin:12px 0">' +
+      '<div style="background:rgba(232,93,38,0.08);border-radius:8px;padding:8px;text-align:center"><div style="font-size:15px;font-weight:800;color:#e85d26">R$ ' + Number(inv.valor_sumico||0).toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);font-weight:600">SUMIÇO</div></div>' +
+      '<div style="background:rgba(34,197,94,0.08);border-radius:8px;padding:8px;text-align:center"><div style="font-size:15px;font-weight:800;color:#16a34a">R$ ' + Number(inv.valor_sobra||0).toFixed(2) + '</div><div style="font-size:9px;color:var(--muted);font-weight:600">SOBRA</div></div>' +
+      '<div style="background:var(--s1);border-radius:8px;padding:8px;text-align:center"><div style="font-size:15px;font-weight:800">' + (inv.itens_divergentes||0) + '</div><div style="font-size:9px;color:var(--muted);font-weight:600">DIVERG.</div></div>' +
+      '</div>';
+
+    if (diverg.length) {
+      html += '<div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;margin:10px 0 6px">Divergências — marque a causa</div>';
+      const optExtra = invPodeGerir();
+      for (const it of diverg) {
+        const dv = Number(it.divergencia);
+        const cor = dv < 0 ? '#e85d26' : '#16a34a';
+        let sel = '<span style="font-size:11px;color:var(--muted)">' + invCausaLabel(it.causa) + '</span>';
+        if (optExtra) {
+          sel = '<select onchange="salvarCausa(' + it.id + ', this.value)" style="font-size:11px;padding:5px;border-radius:6px;background:var(--s2);color:var(--text);border:1px solid var(--border)">' +
+            INV_CAUSAS.map(c => '<option value="' + c[0] + '"' + (it.causa===c[0]?' selected':'') + '>' + c[1] + '</option>').join('') + '</select>';
+        }
+        html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+          '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
+          '<div style="font-size:10px;color:var(--muted)">sistema ' + it.qtd_sistema + ' → contado ' + it.qtd_contada + ' ' + it.unidade + '</div></div>' +
+          '<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:' + cor + '">' + (dv>0?'+':'') + dv.toFixed(3).replace(/\.?0+$/,'') + '</div>' + sel + '</div>' +
+          '</div>';
+      }
+    }
+    if (susp.length) {
+      html += '<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:0.6px;margin:12px 0 6px">⚠️ Parados suspeitos (confira se ainda existem)</div>';
+      for (const it of susp) {
+        html += '<div style="padding:8px 10px;background:rgba(232,93,38,0.06);border:1px solid rgba(232,93,38,0.25);border-radius:8px;margin-bottom:5px">' +
+          '<div style="font-size:13px;font-weight:600">' + escapeHtml(it.produto_nome) + '</div>' +
+          '<div style="font-size:10px;color:var(--muted)">consta ' + it.qtd_sistema + ' ' + it.unidade + ' · parado ' + it.dias_parado + 'd · não foi contado</div></div>';
+      }
+    }
+    if (!diverg.length && !susp.length) html += '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Tudo bateu — sem divergências nem suspeitos.</div></div>';
+    el.innerHTML = html;
+  } catch(e) { el.innerHTML = '<div class="empty"><div class="empty-text">Erro ao abrir relatório: ' + (e.message||'?') + '</div></div>'; }
+}
+
+async function salvarCausa(itemId, causa) {
+  try { await apiPost('/api/inventario/item/' + itemId, { causa }, 'PUT'); toast('✓ Causa salva','ok'); }
+  catch(e) { toast(e.message || 'Erro', 'err'); }
 }
 
 </script>

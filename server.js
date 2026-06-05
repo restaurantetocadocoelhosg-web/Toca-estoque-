@@ -1542,6 +1542,28 @@ app.get('/api/inventario/:id', auth, async (req, res) => {
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 
+// Edita a causa/obs de um item já inventariado (classificar a divergência depois do fechamento).
+const CAUSAS_VALIDAS = ['sumico','perda','erro_lancamento','roubo','sobra','ok','nao_contado'];
+app.put('/api/inventario/item/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const causa = sanitizeText(req.body?.causa || '', 20);
+    if (causa && !CAUSAS_VALIDAS.includes(causa)) return res.status(400).json({ erro: 'Causa inválida.' });
+    const obs = req.body?.obs !== undefined ? sanitizeText(req.body.obs, 200) : undefined;
+    const { data: item } = await supabase.from('inventario_itens').select('*').eq('id', req.params.id).maybeSingle();
+    if (!item) return res.status(404).json({ erro: 'Item não encontrado.' });
+    const upd = {}; if (causa) upd.causa = causa; if (obs !== undefined) upd.obs = obs;
+    await supabase.from('inventario_itens').update(upd).eq('id', item.id);
+    // Se reclassificou como erro de lançamento, registra na agenda (log de erros).
+    if (causa === 'erro_lancamento') {
+      await supabase.from('ia_agenda').insert({ tipo: 'erro',
+        texto: `Erro de lançamento confirmado no inventário: ${item.produto_nome} (divergência ${item.divergencia} ${item.unidade}).`.slice(0, 500),
+        produto_nome: item.produto_nome, usuario_nome: req.user.nome, criado_em: nowSP() });
+    }
+    await audit('inventario_item_causa', { item_id: item.id, produto: item.produto_nome, causa }, req.user, getClientIp(req));
+    res.json({ ok: true });
+  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+});
+
 // ==================== GERENCIAR USUÁRIOS ====================
 app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
   const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at, permissoes').order('role').order('nome');
