@@ -1250,47 +1250,50 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ fantasmas: [] });
     const { data: movs } = await supabase.from('movimentacoes')
-      .select('produto_id, tipo, qtd, qtd_antes, qtd_depois, obs, created_at, responsavel')
+      .select('produto_id, tipo, qtd, obs, created_at, responsavel')
       .in('produto_id', ids)
-      .order('created_at', { ascending: false });
+      .order('created_at', { ascending: true });
+    // Reconstrói o saldo CRONOLOGICAMENTE: Entrada soma, Saída/Perda subtrai e
+    // Ajuste DEFINE o saldo absoluto (coluna qtd = novo valor). Assim funciona
+    // mesmo nos Ajustes antigos sem qtd_antes/qtd_depois (que eram null).
     const movByProd = {};
     for (const m of (movs || [])) {
-      if (!movByProd[m.produto_id]) movByProd[m.produto_id] = { entradas: 0, saidas: 0, ajusteDelta: 0, ajusteDown: 0, nAjuste: 0, ultimo: null, ultimo_responsavel: null };
+      if (!movByProd[m.produto_id]) movByProd[m.produto_id] = { entradas: 0, saidas: 0, bal: 0, contagemDown: 0, nAjuste: 0, ultimo: null, ultimo_responsavel: null };
       const g = movByProd[m.produto_id];
-      if (m.tipo === 'Entrada') g.entradas += Number(m.qtd);
-      else if (m.tipo === 'Saída' || m.tipo === 'Perda') g.saidas += Number(m.qtd);
+      const q = Number(m.qtd) || 0;
+      if (m.tipo === 'Entrada') { g.entradas += q; g.bal += q; }
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') { g.saidas += q; g.bal -= q; }
       else if (m.tipo === 'Ajuste') {
-        const delta = Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0);
-        g.ajusteDelta += delta; g.nAjuste++;
-        // Ajuste de sincronização (reset/restauração) é administrativo, NÃO contagem física —
-        // entra no saldo (p/ não acusar desync) mas não conta como "sumiço".
-        if (delta < 0 && m.obs !== 'sincronização automática') g.ajusteDown += Math.abs(delta);
+        g.nAjuste++;
+        const reducao = g.bal - q;                       // quanto a contagem tirou
+        if (reducao > 0.001 && m.obs !== 'sincronização automática') g.contagemDown += reducao;
+        g.bal = q;                                        // Ajuste define o saldo
       }
-      if (!g.ultimo) { g.ultimo = m.created_at; g.ultimo_responsavel = m.responsavel; }
+      g.ultimo = m.created_at; g.ultimo_responsavel = m.responsavel;   // ascendente: último fica no fim
     }
-    // Conferência cruzada: reconstrói o saldo pelo histórico (entrada − saída ± ajuste)
-    // e compara com a qtd real. Classifica em vez de acusar todo zerado às cegas.
+    // Conferência cruzada: compara o saldo reconstruído com a qtd real e classifica.
     const fantasmas = [];
     for (const p of (produtos || [])) {
       const h = movByProd[p.id];
       if (!h || h.entradas === 0) continue;            // nunca teve entrada: não é fantasma
-      const saldoHist = Number((h.entradas - h.saidas + h.ajusteDelta).toFixed(3));
+      const balHist = Number(h.bal.toFixed(3));
+      const desyncGap = Number((Number(p.qtd) - balHist).toFixed(3));   // p.qtd é 0 aqui
       let classe, label, explica;
-      if (Math.abs(saldoHist) > 0.001) {
-        // Histórico fecha com saldo, mas o estoque está 0: a qtd foi zerada POR FORA
-        // do app (reset/importação/edição em massa) — é dado furado, não consumo.
+      if (Math.abs(desyncGap) > 0.001) {
+        // O histórico fecha com saldo, mas o estoque está 0: a qtd foi mexida POR FORA
+        // do log (reset/importação antiga) — é dado furado, não consumo.
         classe = 'desync'; label = '🟡 dado furado';
-        explica = `o histórico fecha em ${saldoHist} ${p.unidade}, mas o estoque está 0 — foi zerado por fora do app (reset/importação), não por uso`;
-      } else if (h.ajusteDown > 0.001 && h.saidas === 0) {
-        // Contagem física zerou o item sem nenhuma saída lançada = uso não registrado.
-        classe = 'sumico'; label = '🔴 sumiu sem baixa';
-        explica = `a contagem zerou ${Number(h.ajusteDown.toFixed(3))} ${p.unidade} sem nenhuma saída lançada — alguém usou sem registrar`;
+        explica = `o histórico fecha em ${balHist} ${p.unidade}, mas o estoque está 0 — foi zerado por fora do app (reset/importação antiga), não por uso`;
+      } else if (h.contagemDown > 0.001 && h.saidas === 0) {
+        // Zerado por contagem/Ajuste sem nenhuma saída lançada: pode ser uso, perda ou erro.
+        classe = 'sumico'; label = '🔴 zerado sem baixa';
+        explica = `a contagem zerou ${Number(h.contagemDown.toFixed(3))} ${p.unidade} sem saída lançada — confirme se foi uso, perda ou erro de lançamento`;
       } else {
-        continue;                                       // explicado por saída/contagem normal
+        continue;                                       // explicado por saída normal
       }
       fantasmas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, unidade: p.unidade,
         total_entradas: Number(h.entradas.toFixed(3)), total_saidas: Number(h.saidas.toFixed(3)),
-        ajustes: h.nAjuste, saldo_historico: saldoHist, classe, label, explica,
+        ajustes: h.nAjuste, saldo_historico: balHist, classe, label, explica,
         ultimo_movimento: h.ultimo, ultimo_responsavel: h.ultimo_responsavel });
     }
     const ordem = { sumico: 0, desync: 1 };
@@ -1312,27 +1315,30 @@ app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'geren
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ reconciliados: 0 });
     const { data: movs } = await supabase.from('movimentacoes')
-      .select('produto_id, tipo, qtd, qtd_antes, qtd_depois').in('produto_id', ids);
+      .select('produto_id, tipo, qtd, obs, created_at').in('produto_id', ids)
+      .order('created_at', { ascending: true });
     const agg = {};
     for (const m of (movs || [])) {
-      if (!agg[m.produto_id]) agg[m.produto_id] = { entradas: 0, saidas: 0, ajusteDelta: 0 };
+      if (!agg[m.produto_id]) agg[m.produto_id] = { entradas: 0, bal: 0 };
       const g = agg[m.produto_id];
-      if (m.tipo === 'Entrada') g.entradas += Number(m.qtd);
-      else if (m.tipo === 'Saída' || m.tipo === 'Perda') g.saidas += Number(m.qtd);
-      else if (m.tipo === 'Ajuste') g.ajusteDelta += (Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0));
+      const q = Number(m.qtd) || 0;
+      if (m.tipo === 'Entrada') { g.entradas += q; g.bal += q; }
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') g.bal -= q;
+      else if (m.tipo === 'Ajuste') g.bal = q;            // Ajuste define o saldo (robusto a null)
     }
     let reconciliados = 0;
     for (const p of (produtos || [])) {
       const g = agg[p.id];
       if (!g || g.entradas === 0) continue;
-      const saldoHist = Number((g.entradas - g.saidas + g.ajusteDelta).toFixed(3));
-      if (Math.abs(saldoHist) <= 0.001) continue;       // já fecha — não é dado furado
+      const saldoHist = Number(g.bal.toFixed(3));
+      if (Math.abs(Number(p.qtd) - saldoHist) <= 0.001) continue;   // já fecha — não é dado furado
       const custoUnit = Number(p.custo || 0);
-      // Ajuste corretivo: delta = (qtd real − saldo do histórico) = −saldoHist. qtd fica igual.
+      const gap = Number((Number(p.qtd) - saldoHist).toFixed(3));   // acerto necessário
+      // Ajuste corretivo: alinha o histórico ao estoque real. A qtd não muda.
       await supabase.from('movimentacoes').insert({
         produto_id: p.id, produto_nome: p.nome, categoria: p.categoria,
         tipo: 'Ajuste', qtd: Number(p.qtd), unidade: p.unidade,
-        custo: custoUnit, valor: Number((custoUnit * Math.abs(saldoHist)).toFixed(2)),
+        custo: custoUnit, valor: Number((custoUnit * Math.abs(gap)).toFixed(2)),
         motivo: 'Reconciliação (acerto de histórico)', responsavel: req.user.nome,
         obs: 'sincronização automática',
         qtd_antes: saldoHist, qtd_depois: Number(p.qtd), created_at: nowSP(),
