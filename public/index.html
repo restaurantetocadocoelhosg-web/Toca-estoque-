@@ -1581,7 +1581,7 @@ async function buscaProd(q) {
     list.innerHTML = items.map(p => {
       let st = p.qtd===0?'badge-low':p.qtd<=p.minimo*0.5?'badge-low':p.qtd<p.minimo?'badge-warn':'badge-ok';
       return `<div class="ac-item" onmousedown='selProd(${JSON.stringify(JSON.stringify(p))})'>
-        <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${escapeHtml(p.categoria)} · ${escapeHtml(p.unidade)}</div></div>
+        <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${p.codigo ? p.codigo + ' · ' : ''}${escapeHtml(p.categoria)} · ${escapeHtml(p.unidade)}</div></div>
         <span class="ac-qtd-badge ${st}">${fmt(p.qtd)} ${escapeHtml(p.unidade)}</span>
       </div>`;
     }).join('');
@@ -1691,7 +1691,7 @@ async function loadEstoque() {
     el.innerHTML = items.map(p => {
       const st = p.qtd===0?'zerado':p.qtd<=p.minimo*0.5?'critico':p.qtd<p.minimo?'atencao':'ok';
       return `<div class="prod-row" onclick='quickLanc(${JSON.stringify(JSON.stringify(p))})'>
-        <div class="prod-row-left"><div class="prod-row-nome">${escapeHtml(p.nome)}</div><div class="prod-row-cat">${escapeHtml(p.categoria)} · mín ${fmt(p.minimo)}</div></div>
+        <div class="prod-row-left"><div class="prod-row-nome">${escapeHtml(p.nome)}</div><div class="prod-row-cat">${p.codigo ? '<b style="color:var(--accent)">'+escapeHtml(p.codigo)+'</b> · ' : ''}${escapeHtml(p.categoria)} · mín ${fmt(p.minimo)}</div></div>
         <div class="prod-row-right"><div class="prod-row-qtd ${st}">${fmt(p.qtd)}</div><div class="prod-row-unid">${escapeHtml(p.unidade)}</div></div>
       </div>`;
     }).join('');
@@ -1706,7 +1706,7 @@ function quickLanc(jsonStr) {
     document.getElementById('busca-wrap').style.display = 'none';
     document.getElementById('prod-sel').classList.add('show');
     document.getElementById('sel-nome').textContent = p.nome;
-    document.getElementById('sel-info').textContent = `${p.categoria} · Custo: R$ ${Number(p.custo||0).toFixed(2)}`;
+    document.getElementById('sel-info').textContent = `${p.codigo ? p.codigo + ' · ' : ''}${p.categoria} · Custo: R$ ${Number(p.custo||0).toFixed(2)}`;
     const estoqueEl2 = document.getElementById('sel-estoque-atual');
     if (estoqueEl2) { estoqueEl2.textContent = `Estoque atual: ${fmt(p.qtd)} ${p.unidade}`; estoqueEl2.style.color = p.qtd === 0 ? 'var(--red)' : p.qtd <= p.minimo * 0.5 ? 'var(--yellow)' : 'var(--green)'; }
     document.getElementById('f-qtd').focus();
@@ -2242,7 +2242,7 @@ async function modalBuscaProd(q) {
     if (!_modalBuscaItems.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = _modalBuscaItems.map((p, i) =>
       `<div class="ac-item" onmousedown="modalSelProd(${i})">
-        <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${escapeHtml(p.categoria)} · ${fmt(p.qtd)} ${escapeHtml(p.unidade)}</div></div>
+        <div><div class="ac-nome">${escapeHtml(p.nome)}</div><div class="ac-info">${p.codigo ? p.codigo + ' · ' : ''}${escapeHtml(p.categoria)} · ${fmt(p.qtd)} ${escapeHtml(p.unidade)}</div></div>
       </div>`
     ).join('');
     ac.classList.add('open');

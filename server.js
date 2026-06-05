@@ -370,7 +370,7 @@ app.get('/api/produtos', auth, async (req, res) => {
   let query = supabase.from('produtos').select('*');
   if (arquivados === '1' && req.user.role === 'admin') query = query.eq('ativo', 0);
   else query = query.or('ativo.eq.1,ativo.is.null');
-  if (q) query = query.ilike('nome_search', `%${normalizeSearch(sanitizeText(q, 100))}%`);
+  if (q) { const qq = sanitizeText(q, 100); query = query.or(`nome_search.ilike.%${normalizeSearch(qq)}%,codigo.ilike.%${qq.toUpperCase()}%`); }
   if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
   query = query.order('categoria').order('nome');
   const { data: rows, error } = await query;
@@ -386,8 +386,8 @@ app.get('/api/produtos', auth, async (req, res) => {
 app.get('/api/produtos/buscar', auth, async (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
-  const { data } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo')
-    .ilike('nome_search', `%${normalizeSearch(q)}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(15);
+  const { data } = await supabase.from('produtos').select('id, nome, codigo, categoria, unidade, qtd, minimo, custo')
+    .or(`nome_search.ilike.%${normalizeSearch(q)}%,codigo.ilike.%${q.toUpperCase()}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(15);
   res.json(data || []);
 });
 
@@ -1031,27 +1031,55 @@ const IA_TOOLS = [
   }
 ];
 
+// ===== Matcher determinístico de produto: código → apelido → nome → parcial =====
+function pareceCodigo(s) { return /^[a-z]{2,4}\s*-?\s*\d{1,3}$/i.test(String(s || '').trim()); }
+function normCodigo(s) {
+  const m = String(s || '').toUpperCase().replace(/\s+/g, '').match(/^([A-Z]{2,4})-?(\d{1,3})$/);
+  return m ? `${m[1]}-${m[2].padStart(2, '0')}` : null;
+}
+const SEL_PROD = 'id, nome, codigo, categoria, qtd, minimo, custo, unidade';
+// Retorna { produtos:[...], via }. via: codigo | apelido | nome_exato | parcial | vazio.
+// Quando vem só 1 → certeza; vários no 'parcial' → ambíguo, a IA deve perguntar.
+async function buscarProdutos(termo) {
+  const raw = String(termo || '').trim();
+  if (!raw) return { produtos: [], via: 'vazio' };
+  if (pareceCodigo(raw)) {
+    const cod = normCodigo(raw);
+    if (cod) {
+      const { data } = await supabase.from('produtos').select(SEL_PROD).eq('codigo', cod).limit(1);
+      if (data && data.length) return { produtos: data, via: 'codigo' };
+    }
+  }
+  const qn = normalizeSearch(raw);
+  const { data: sino } = await supabase.from('sinonimos').select('produto_nome').eq('termo', qn).limit(1);
+  if (sino && sino.length) {
+    const { data } = await supabase.from('produtos').select(SEL_PROD).eq('nome', sino[0].produto_nome).limit(1);
+    if (data && data.length) return { produtos: data, via: 'apelido' };
+  }
+  const { data: exato } = await supabase.from('produtos').select(SEL_PROD).eq('nome_search', qn).or('ativo.eq.1,ativo.is.null').limit(5);
+  if (exato && exato.length) return { produtos: exato, via: 'nome_exato' };
+  const { data: parcial } = await supabase.from('produtos').select(SEL_PROD).ilike('nome_search', `%${qn}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(10);
+  return { produtos: parcial || [], via: 'parcial' };
+}
+function statusProd(p) { return Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK'; }
+
 async function executarFerramenta(nome, input, user) {
   try {
     switch (nome) {
 
       case 'buscar_produto': {
         const q = sanitizeText(input.nome, 100);
-        const { data } = await supabase.from('produtos')
-          .select('id, nome, categoria, qtd, minimo, custo, unidade')
-          .ilike('nome_search', `%${normalizeSearch(q)}%`)
-          .or('ativo.eq.1,ativo.is.null').order('nome').limit(10);
-        return {
-          encontrados: (data || []).length,
-          produtos: (data || []).map(p => {
-            const st = Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK';
-            return { ...p, status: st, valor_em_estoque: Number((Number(p.qtd) * Number(p.custo)).toFixed(2)) };
-          })
-        };
+        const { produtos, via } = await buscarProdutos(q);
+        const lista = produtos.map(p => ({ ...p, status: statusProd(p), valor_em_estoque: Number((Number(p.qtd) * Number(p.custo)).toFixed(2)) }));
+        // via 'codigo'/'apelido'/'nome_exato' = identificação CERTA. 'parcial' com >1 = AMBÍGUO: pergunte, não chute.
+        const ambiguo = via === 'parcial' && lista.length > 1;
+        return { encontrados: lista.length, via, ambiguo,
+          instrucao: ambiguo ? 'Vários produtos batem — NÃO escolha sozinho. Liste com o código e pergunte qual.' : (lista.length === 1 ? 'Identificação certa.' : undefined),
+          produtos: lista };
       }
 
       case 'listar_produtos': {
-        let q = supabase.from('produtos').select('id, nome, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+        let q = supabase.from('produtos').select('id, nome, codigo, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
         if (input.categoria) q = q.eq('categoria', sanitizeText(input.categoria, 80));
         const { data } = await q.limit(500);
         let res = (data || []).map(p => {
@@ -1148,8 +1176,13 @@ async function executarFerramenta(nome, input, user) {
         if (!tipo) return { sucesso: false, erro: 'Tipo inválido. Use: Entrada, Saída, Perda ou Ajuste' };
         const qtd = tipo === 'Ajuste' ? parseNonNegativeNumber(input.qtd) : parsePositiveNumber(input.qtd);
         if (qtd === null) return { sucesso: false, erro: 'Quantidade inválida' };
-        const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
-        if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado. Use buscar_produto para ver nomes exatos.` };
+        const { produtos: cands, via } = await buscarProdutos(nomeBusca);
+        if (!cands.length) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado. Use buscar_produto para ver o código/nome exato.` };
+        if (cands.length > 1 && via === 'parcial') return { sucesso: false, ambiguo: true,
+          erro: `"${nomeBusca}" casa com vários produtos — NÃO lance no chute. Pergunte qual (pelo código):`,
+          opcoes: cands.map(p => ({ codigo: p.codigo, nome: p.nome, qtd: p.qtd, unidade: p.unidade })) };
+        const { data: prod } = await supabase.from('produtos').select('*').eq('id', cands[0].id).single();
+        if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado.` };
         let novaQtd = Number(prod.qtd);
         if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
         else if (tipo === 'Saída' || tipo === 'Perda') {
@@ -1255,7 +1288,9 @@ app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
     '- Corrija mentalmente erros de digitação, abreviações, gírias, falta de acento e texto ditado por voz.\n' +
     '  Ex.: "qto tem de file" = quanto tem de filé · "ta zerado oq" = o que está zerado · "lanca 5 cebola" = registrar saída de 5 de cebola · "compras" / "oq comprar" = o que precisa repor · "resumo" / "como ta o estoque" = dashboard geral.\n' +
     '- Nome de produto quase sempre vem incompleto ou sem acento. SEMPRE use buscar_produto/listar_produtos com o pedaço do nome ANTES de dizer que não achou.\n' +
-    '- Se a busca trouxer vários parecidos, NÃO chute: liste as opções numeradas e pergunte qual. Só peça esclarecimento quando for realmente ambíguo — se dá pra entender, responda direto.\n' +
+    '- Cada produto tem um CÓDIGO único (ex.: BOV-01, PES-03). buscar_produto aceita código, apelido ou nome. Quando o usuário der um código, use-o — é identificação exata. Sempre que listar/confirmar um produto, mostre o código junto do nome (ex.: "BOV-06 Contra Filé").\n' +
+    '- buscar_produto retorna "via" e "ambiguo". Se via=codigo/apelido/nome_exato → é o produto CERTO, pode seguir. Se ambiguo=true (vários no parcial) → NUNCA escolha sozinho: liste as opções COM o código e pergunte qual (cuidado com variações que mudam tudo: zero/normal, posta/lascas, com maminha/pura).\n' +
+    '- Se a busca trouxer vários parecidos, NÃO chute: liste as opções numeradas (com código) e pergunte qual. Só peça esclarecimento quando for realmente ambíguo — se dá pra entender, responda direto.\n' +
     '- Perguntas curtas (ex.: "e o frango?") devem ser entendidas no contexto do histórico da conversa.\n\n' +
     'COMO AGIR:\n' +
     '1. Responda SEMPRE em português brasileiro, direto e curto. Nada de repetir a pergunta nem enrolar.\n' +
