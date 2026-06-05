@@ -2768,15 +2768,17 @@ async function renderInventario() {
         (invPodeGerir() ? '<button onclick="fecharInventario()" style="padding:9px 12px;border:none;border-radius:8px;background:#16a34a;color:#fff;font-weight:700;cursor:pointer">✅ Fechar</button>' : '') +
       '</div>' +
     '</div>';
+  html += '<input id="inv-busca" type="search" placeholder="🔍 Buscar item…" oninput="filtrarInvItens(this.value)" ' +
+    'style="width:100%;padding:10px 12px;margin-bottom:10px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);font-size:14px">';
   for (const cat of Object.keys(porCat)) {
-    html += '<div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;padding:10px 0 4px">' + escapeHtml(cat) + '</div>';
+    let linhas = '';
     for (const it of porCat[cat]) {
       const parado = it.dias_parado !== null && it.dias_parado >= 7;
       const badge = it.dias_parado === null ? '<span style="color:#b8860b">sem histórico</span>' :
         parado ? '<span style="color:#e85d26">⚠️ parado ' + it.dias_parado + 'd</span>' : '<span style="color:var(--muted)">' + it.dias_parado + 'd</span>';
       const val = (it.qtd_contada !== null && it.qtd_contada !== '') ? it.qtd_contada : '';
-      html +=
-        '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+      linhas +=
+        '<div class="inv-row" data-nome="' + invNorm(it.produto_nome) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
           '<div style="flex:1;min-width:0">' +
             '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
             '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + badge + '</div>' +
@@ -2786,8 +2788,24 @@ async function renderInventario() {
           '<span style="font-size:11px;color:var(--muted);width:24px">' + it.unidade + '</span>' +
         '</div>';
     }
+    html += '<div class="inv-cat-group"><div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;padding:10px 0 4px">' + escapeHtml(cat) + '</div>' + linhas + '</div>';
   }
   el.innerHTML = html;
+}
+
+function invNorm(s) { return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
+
+function filtrarInvItens(term) {
+  const t = invNorm(term).trim();
+  document.querySelectorAll('#inv-conteudo .inv-cat-group').forEach(grp => {
+    let visiveis = 0;
+    grp.querySelectorAll('.inv-row').forEach(row => {
+      const mostra = !t || (row.dataset.nome || '').includes(t);
+      row.style.display = mostra ? '' : 'none';
+      if (mostra) visiveis++;
+    });
+    grp.style.display = visiveis ? '' : 'none';
+  });
 }
 
 async function abrirInventario() {
