@@ -1259,7 +1259,8 @@ app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
     '- Perguntas curtas (ex.: "e o frango?") devem ser entendidas no contexto do histórico da conversa.\n\n' +
     'COMO AGIR:\n' +
     '1. Responda SEMPRE em português brasileiro, direto e curto. Nada de repetir a pergunta nem enrolar.\n' +
-    '2. Todo número (qtd, custo, valor) vem das ferramentas — NUNCA invente.\n' +
+    '2. Todo número (qtd, custo, valor, lançamentos de hoje) vem SEMPRE de uma chamada de ferramenta FEITA AGORA. NUNCA invente e NUNCA reaproveite números citados antes nesta conversa nem de relatórios anteriores — o estoque muda o tempo todo e aquilo já pode estar velho. Se perguntarem "o que mexeu hoje", chame ver_movimentacoes(hoje=true) na hora; se perguntarem saldo, chame buscar_produto na hora.\n' +
+    '2b. CONFERIR UMA LISTA (comparar o que o usuário mandou com o estoque/movimentos): vá item por item, SEMPRE consultando a ferramenta para cada um. NÃO confie na memória nem em respostas anteriores. Se a lista for grande, confira em blocos e diga quantos faltam. Quando um nome não casar exatamente, busque e pergunte em vez de chutar.\n' +
     '3. Seja proativo: ao buscar, se notar algo grave (zerado urgente, giro parado, anomalia), avise e registre na agenda.\n' +
     '4. Antes de registrar movimentação, confirme produto + quantidade + tipo (salvo se já estiver claro). Depois, mostre o NOVO saldo.\n' +
     '5. Ao terminar uma tarefa, diga em 1 linha o que foi feito.\n\n' +
