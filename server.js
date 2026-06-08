@@ -878,31 +878,50 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
     const itens = [];
     for (const item of (parsed.itens || [])) {
       const qNorm = normalizeSearch(item.nome);
-      let candidatos = [], via_sinonimo = false;
+      let candidatos = [], via = null;
+
+      // 1) Apelido salvo (sinônimo) — match CONFIÁVEL
       const prodNomeSinonimo = sinoMap[qNorm];
       if (prodNomeSinonimo) {
         const sp = prodByNomeLower[prodNomeSinonimo.toLowerCase()];
-        if (sp) { candidatos = [sp]; via_sinonimo = true; }
+        if (sp) { candidatos = [sp]; via = 'apelido'; }
       }
+      // 2) Nome exato normalizado — match CONFIÁVEL (se único)
+      if (!candidatos.length) {
+        const exato = todosProds.filter(p => (p.nome_search || normalizeSearch(p.nome)) === qNorm);
+        if (exato.length === 1) { candidatos = exato; via = 'nome_exato'; }
+        else if (exato.length > 1) { candidatos = exato.slice(0, 3); via = 'ambiguo'; }
+      }
+      // 3) Pontuação por palavra — PALPITE: só auto-seleciona se for líder isolado e cobrir o nome todo
       if (!candidatos.length) {
         const palavras = qNorm.split(/\s+/).filter(w => w.length > 2);
-        const scoreMap = new Map();
+        const ranked = [];
         for (const p of todosProds) {
-          const ns = (p.nome_search || p.nome || '').toLowerCase();
+          const ns = (p.nome_search || normalizeSearch(p.nome));
           let score = 0;
           for (const w of palavras) if (ns.includes(w)) score++;
-          if (score > 0) scoreMap.set(p.id, { produto: p, score });
+          if (qNorm && ns.includes(qNorm)) score += 0.5; // frase inteira contida = bônus
+          if (score > 0) ranked.push({ produto: p, score });
         }
-        if (scoreMap.size > 0) {
-          candidatos = Array.from(scoreMap.values())
-            .sort((a, b) => b.score - a.score).slice(0, 3).map(r => r.produto);
-        } else {
-          candidatos = todosProds
-            .filter(p => (p.nome_search || p.nome || '').toLowerCase().includes(qNorm))
-            .slice(0, 3);
-        }
+        ranked.sort((a, b) => b.score - a.score);
+        candidatos = ranked.slice(0, 3).map(r => r.produto);
+        const topScore = ranked.length ? ranked[0].score : 0;
+        const segScore = ranked.length > 1 ? ranked[1].score : 0;
+        const cobreTudo = palavras.length > 0 && topScore >= palavras.length;
+        via = (cobreTudo && topScore > segScore) ? 'forte' : 'palpite';
       }
-      itens.push({ nome_cupom: item.nome, qtd: Number(item.qtd) || 1, unidade_cupom: item.unidade || 'UN', candidatos, produto: candidatos[0] || null, via_sinonimo });
+
+      // Auto-seleciona o produto SÓ quando o match é confiável; senão a tela exige confirmação.
+      const confiavel = via === 'apelido' || via === 'nome_exato' || via === 'forte';
+      itens.push({
+        nome_cupom: item.nome,
+        qtd: Number(item.qtd) || 1,
+        unidade_cupom: item.unidade || 'UN',
+        candidatos,
+        produto: confiavel ? (candidatos[0] || null) : null,
+        via, via_sinonimo: via === 'apelido',
+        incerto: !confiavel && candidatos.length > 0,
+      });
     }
     await audit('ler_cupom', { total_itens: itens.length }, req.user, getClientIp(req));
     res.json({ itens });

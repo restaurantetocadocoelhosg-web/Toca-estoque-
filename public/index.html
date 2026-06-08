@@ -185,6 +185,8 @@ select.big-input { font-size: 14px; }
 .ci-badge.ok { background: rgba(16,185,129,0.12); color: var(--green); }
 .ci-badge.err { background: rgba(239,68,68,0.12); color: var(--red); }
 .ci-badge.ign { background: var(--s2); color: var(--muted); }
+.ci-badge.warn { background: rgba(245,158,11,0.14); color: var(--yellow); }
+.cupom-item.confira { border-color: rgba(245,158,11,0.4); }
 .ci-produto { font-size: 14px; font-weight: 700; margin-bottom: 4px; color: var(--text); }
 .ci-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .ci-select { flex: 1; background: var(--s2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: var(--font); font-size: 13px; padding: 7px 10px; outline: none; min-width: 120px; }
@@ -1403,8 +1405,8 @@ async function processarCupom(input) {
   document.getElementById('cupom-footer').style.display = 'none';
 
   try {
-    // Reduz tamanho da imagem antes de enviar
-    const base64 = await resizeImage(file, 1200);
+    // Reduz tamanho da imagem antes de enviar (lado maior ~1568px = ponto ótimo da visão)
+    const base64 = await resizeImage(file, 1568);
     const mediaType = 'image/jpeg'; // canvas.toDataURL always outputs JPEG
     const imagemData = base64.split(',')[1];
 
@@ -1430,18 +1432,27 @@ async function processarCupom(input) {
   }
 }
 
-function resizeImage(file, maxW) {
-  return new Promise((resolve) => {
+// Redimensiona pelo LADO MAIOR (não só largura) — recibo é alto/estreito e precisa de
+// resolução pra ler. Com onerror/timeout pra NUNCA travar o spinner se a foto falhar.
+function resizeImage(file, maxSide = 1568) {
+  return new Promise((resolve, reject) => {
     const reader = new FileReader();
+    const timer = setTimeout(() => reject(new Error('A imagem demorou demais pra abrir. Tente tirar a foto de novo.')), 20000);
+    reader.onerror = () => { clearTimeout(timer); reject(new Error('Não consegui abrir o arquivo da imagem.')); };
     reader.onload = e => {
       const img = new Image();
+      img.onerror = () => { clearTimeout(timer); reject(new Error('Formato de imagem não suportado. Tire a foto de novo (JPG/PNG).')); };
       img.onload = () => {
-        const scale = Math.min(1, maxW / img.width);
-        const canvas = document.createElement('canvas');
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
-        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', 0.85));
+        clearTimeout(timer);
+        try {
+          const longest = Math.max(img.width, img.height) || maxSide;
+          const scale = Math.min(1, maxSide / longest);
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.round(img.width * scale));
+          canvas.height = Math.max(1, Math.round(img.height * scale));
+          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+          resolve(canvas.toDataURL('image/jpeg', 0.9));
+        } catch (err) { reject(new Error('Não consegui processar a imagem. Tente outra foto.')); }
       };
       img.src = e.target.result;
     };
@@ -1451,18 +1462,29 @@ function resizeImage(file, maxW) {
 
 function renderCupomItens() {
   const matched = cupomItens.filter(i => i.produto && !i._ignorar).length;
+  const aConfirmar = cupomItens.filter(i => !i._ignorar && !i.produto && i.candidatos && i.candidatos.length).length;
   const total = cupomItens.length;
   document.getElementById('cupom-summary').innerHTML =
-    `<b>${total}</b> item${total!==1?'ns':''} encontrado${total!==1?'s':''} no cupom · <b style="color:var(--green)">${matched} cruzado${matched!==1?'s':''}</b> com o estoque`;
+    `<b>${total}</b> item${total!==1?'ns':''} no cupom · <b style="color:var(--green)">${matched} cruzado${matched!==1?'s':''}</b>`
+    + (aConfirmar ? ` · <b style="color:var(--yellow)">${aConfirmar} a confirmar</b>` : '');
 
   document.getElementById('cupom-itens').innerHTML = cupomItens.map((item, idx) => {
     const ignorado = item._ignorar;
     const temProd = item.produto && !ignorado;
-    const badge = ignorado ? '<span class="ci-badge ign">Ignorar</span>' : temProd ? '<span class="ci-badge ok">✓ Cruzado</span>' : '<span class="ci-badge err">Não encontrado</span>';
-    const classeItem = ignorado ? 'cupom-item ignored' : temProd ? 'cupom-item matched' : 'cupom-item unmatched';
+    const temCand = item.candidatos && item.candidatos.length;
+    const badge = ignorado ? '<span class="ci-badge ign">Ignorar</span>'
+      : temProd ? '<span class="ci-badge ok">✓ Cruzado</span>'
+      : temCand ? '<span class="ci-badge warn">⚠️ Confira o produto</span>'
+      : '<span class="ci-badge err">Não encontrado</span>';
+    const classeItem = ignorado ? 'cupom-item ignored'
+      : temProd ? 'cupom-item matched'
+      : temCand ? 'cupom-item confira'
+      : 'cupom-item unmatched';
 
-    // Select de produto (candidatos)
-    const opcoes = (item.candidatos||[]).map(c =>
+    // Select de produto (candidatos). Quando o match é incerto (sem produto definido),
+    // entra um placeholder selecionado pra OBRIGAR a escolha — não lança no chute.
+    const placeholder = (!item.produto && temCand) ? `<option value="" selected>— escolha o produto certo —</option>` : '';
+    const opcoes = placeholder + (item.candidatos||[]).map(c =>
       `<option value="${escapeHtml(c.nome)}" ${item.produto&&item.produto.nome===c.nome?'selected':''}>${escapeHtml(c.nome)} (${fmt(c.qtd)} ${escapeHtml(c.unidade)})</option>`
     ).join('');
     const semCandidato = !item.candidatos || !item.candidatos.length;
