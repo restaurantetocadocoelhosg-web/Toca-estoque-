@@ -391,10 +391,13 @@ app.get('/api/produtos/buscar', auth, async (req, res) => {
   res.json(data || []);
 });
 
+// Lista as categorias distintas (deriva dos produtos ativos). Usada nos cadastros e no escopo do inventário.
 app.get('/api/categorias', auth, async (req, res) => {
-  const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null').order('categoria');
-  const unique = [...new Set((data || []).map(r => r.categoria).filter(Boolean))];
-  res.json(unique);
+  try {
+    const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null');
+    const cats = [...new Set((data || []).map(r => r.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    res.json(cats);
+  } catch(e) { res.status(500).json({ erro: 'Erro ao listar categorias.' }); }
 });
 
 app.post('/api/produtos', auth, requireRole('admin', 'gerente'), async (req, res) => {
@@ -1527,15 +1530,6 @@ app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'geren
     }
     await audit('reconciliar_fantasmas', { reconciliados, alvo: alvoId || 'todos' }, req.user, getClientIp(req));
     res.json({ reconciliados });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
-});
-
-// Lista as categorias distintas (para escolher o escopo do inventário).
-app.get('/api/categorias', auth, async (req, res) => {
-  try {
-    const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null');
-    const cats = [...new Set((data || []).map(p => p.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-    res.json(cats);
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
 });
 

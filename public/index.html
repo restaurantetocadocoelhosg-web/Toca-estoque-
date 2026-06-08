@@ -2277,7 +2277,7 @@ async function modalBuscaCat(q) {
   if (!q || q.length < 1) { document.getElementById('modal-cat-ac').classList.remove('open'); return; }
   try {
     const cats = await api('/api/categorias');
-    const filtradas = cats.filter(c => c.toLowerCase().includes(q.toLowerCase()));
+    const filtradas = cats.filter(c => norm(c).includes(norm(q)));
     const ac = document.getElementById('modal-cat-ac');
     if (!filtradas.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = filtradas.map(c =>
@@ -2516,7 +2516,7 @@ async function peditBuscaCat(q) {
   if (!q || q.length < 1) { document.getElementById('pedit-cat-ac').classList.remove('open'); return; }
   try {
     const cats = await api('/api/categorias');
-    const filtradas = cats.filter(c => c.toLowerCase().includes(q.toLowerCase()));
+    const filtradas = cats.filter(c => norm(c).includes(norm(q)));
     const ac = document.getElementById('pedit-cat-ac');
     if (!filtradas.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = filtradas.map(c =>
@@ -2793,7 +2793,10 @@ async function renderInventario() {
   el.innerHTML = html;
 }
 
-function invNorm(s) { return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
+// Normaliza texto p/ busca: minúsculo + remove acento (combining marks U+0300–U+036F).
+// Usado por todos os filtros client-side (categoria, inventário) p/ ficarem acento-insensíveis como o servidor.
+function norm(s) { return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''); }
+function invNorm(s) { return norm(s); }
 
 function filtrarInvItens(term) {
   const t = invNorm(term).trim();
