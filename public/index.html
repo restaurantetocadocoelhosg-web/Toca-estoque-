@@ -276,8 +276,17 @@ select.big-input { font-size: 14px; }
 .chat-msgs { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; padding-bottom: 0; }
 .chat-bubble { max-width: 85%; padding: 10px 14px; border-radius: 16px; font-size: 14px; line-height: 1.5; }
 .chat-bubble.user { background: var(--accent); color: #fff; align-self: flex-end; border-bottom-right-radius: 4px; box-shadow: 0 2px 8px rgba(232,93,38,0.25); }
-.chat-bubble.ia { background: var(--s1); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 4px; white-space: pre-wrap; color: var(--text); box-shadow: var(--shadow); }
-.chat-bubble.ia.loading { color: var(--muted); font-style: italic; }
+.chat-bubble.ia { background: var(--s1); border: 1px solid var(--border); align-self: flex-start; border-bottom-left-radius: 4px; color: var(--text); box-shadow: var(--shadow); }
+.chat-bubble.ia.loading { color: var(--muted); font-style: italic; white-space: pre-wrap; }
+.chat-bubble.ia .ia-h { font-weight: 700; color: var(--accent); margin: 8px 0 4px; font-size: 14.5px; }
+.chat-bubble.ia .ia-h:first-child { margin-top: 0; }
+.chat-bubble.ia .ia-p { margin: 2px 0; }
+.chat-bubble.ia .ia-list { display: flex; flex-direction: column; gap: 3px; margin: 3px 0; }
+.chat-bubble.ia .ia-li { position: relative; padding-left: 15px; }
+.chat-bubble.ia .ia-li::before { content: '•'; position: absolute; left: 3px; color: var(--accent); font-weight: 700; }
+.chat-bubble.ia .ia-gap { height: 7px; }
+.chat-bubble.ia .ia-val { color: var(--green); font-weight: 700; }
+.chat-bubble.ia b { color: var(--text); font-weight: 700; }
 .chat-input-wrap { padding: 10px 14px; padding-bottom: calc(10px + var(--safe-bottom)); background: var(--s1); border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; box-shadow: 0 -1px 0 var(--border); }
 .chat-input { flex: 1; background: var(--bg); border: 1.5px solid var(--border); border-radius: 12px; color: var(--text); font-family: var(--font); font-size: 15px; padding: 11px 14px; outline: none; resize: none; max-height: 100px; -webkit-appearance: none; transition: border-color 0.15s; }
 .chat-input:focus { border-color: var(--accent); }
@@ -2108,7 +2117,8 @@ function restaurarChatUI() {
     const h = chatHistorico[i];
     const div = document.createElement('div');
     div.className = `chat-bubble ${h.role === 'user' ? 'user' : 'ia'}`;
-    div.textContent = h.content;
+    if (h.role === 'user') div.textContent = h.content;
+    else div.innerHTML = formatIA(h.content);
     msgs.appendChild(div);
   }
   msgs.scrollTop = msgs.scrollHeight;
@@ -2134,7 +2144,7 @@ async function iniciarChatBoot() {
   try {
     const result = await apiPost('/api/chat', { init: true, historico: [] });
     loading.className = 'chat-bubble ia';
-    loading.textContent = result.resposta;
+    loading.innerHTML = formatIA(result.resposta);
     chatHistorico.push({ role: 'assistant', content: result.resposta });
     if (chatHistorico.length > 20) chatHistorico = chatHistorico.slice(-20);
     salvarChatLocal();
@@ -2160,7 +2170,34 @@ function limparChat() {
 
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 100) + 'px';
+  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+}
+
+// Formata a resposta da IA: texto puro/emoji -> HTML organizado e colorido.
+// Segurança: escapa TUDO primeiro; só insere tags próprias (nunca HTML vindo do modelo).
+function formatIA(texto) {
+  const realce = s => escapeHtml(s)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/(R\$\s?[\d.]+,\d{2})/g, '<span class="ia-val">$1</span>');
+  const tituloEmoji = /^(?:📦|📊|⚠️|📥|📝|🛒|📋|✅|❌|🤖|💡|🔎|📈|📉|🚨)/u;
+  const linhas = String(texto || '').replace(/\r/g, '').split('\n');
+  let html = '', emLista = false;
+  const fechaLista = () => { if (emLista) { html += '</div>'; emLista = false; } };
+  for (const raw of linhas) {
+    const linha = raw.trim();
+    if (!linha) { fechaLista(); html += '<div class="ia-gap"></div>'; continue; }
+    const mBullet = linha.match(/^[•\-]\s+(.*)$/);
+    if (mBullet) {
+      if (!emLista) { html += '<div class="ia-list">'; emLista = true; }
+      html += '<div class="ia-li">' + realce(mBullet[1]) + '</div>';
+      continue;
+    }
+    fechaLista();
+    if (tituloEmoji.test(linha) || /:$/.test(linha)) html += '<div class="ia-h">' + realce(linha) + '</div>';
+    else html += '<div class="ia-p">' + realce(linha) + '</div>';
+  }
+  fechaLista();
+  return html || realce(String(texto || ''));
 }
 
 function chatEnter(e) {
@@ -2211,7 +2248,7 @@ async function enviarChat() {
     salvarChatLocal();
 
     loading.className = 'chat-bubble ia';
-    loading.textContent = result.resposta;
+    loading.innerHTML = formatIA(result.resposta);
   } catch(e) {
     loading.className = 'chat-bubble ia';
     loading.textContent = '❌ ' + (e.message || 'Erro ao consultar IA');
