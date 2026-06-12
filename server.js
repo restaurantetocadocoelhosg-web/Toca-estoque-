@@ -2182,13 +2182,16 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
       if (m.tipo === 'Perda') { perdasValor += Number(m.qtd || 0) * Number(m.custo || 0); continue; }
       if (obsN.includes('sincronizacao automatica')) { nSinc++; continue; }
       if (obsN.includes('inventario')) { nAjusteInv++; continue; }
-      const delta = Number(m.qtd_depois ?? 0) - Number(m.qtd_antes ?? 0);
+      if (m.qtd_antes === null || m.qtd_depois === null) continue; // sem antes/depois não dá pra medir
+      const delta = Number(m.qtd_depois) - Number(m.qtd_antes);
       const valorDelta = Math.abs(delta) * Number(m.custo || 0);
       if (delta < 0) manualNegValor += valorDelta;
       manuais.push({ nome: m.produto_nome, delta: Number(delta.toFixed(3)), valor: Number(valorDelta.toFixed(2)), responsavel: m.responsavel || '?' });
     }
 
-    const sumicoReal = porCausa.sumico + porCausa.roubo + manualNegValor;
+    // Sumiço real = SÓ o que o inventário apurou como sumico/roubo. Ajuste manual é
+    // quase sempre correção (ex.: typo de digitação) — listado, mas NÃO conta como perda.
+    const sumicoReal = porCausa.sumico + porCausa.roubo;
     if (!invList.length && !manuais.length) {
       return res.json({ resposta: `🔎 *CONFERÊNCIA — últimos ${dias} dias*\n📅 ${dataBR}\n\n⚠️ Nenhum inventário fechado nem ajuste manual no período.\n\nSem contagem física não dá para saber se está sumindo item. Faça o inventário de sábado.`, total_sumido: 0, contagens: 0 });
     }
@@ -2208,9 +2211,10 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
       msg += `🧾 Nenhum inventário fechado no período — faça o de sábado.\n`;
     }
     if (manuais.length) {
-      msg += `\n⚙️ *Ajustes manuais: ${manuais.length}*\n`;
+      msg += `\n⚙️ *Ajustes manuais: ${manuais.length}* (correções — não contam como perda)\n`;
       msg += manuais.slice(0, 8).map(a => `   • ${a.nome}: ${a.delta > 0 ? '+' : ''}${a.delta} (R$ ${a.valor.toFixed(2)}) — ${a.responsavel}`).join('\n');
       if (manuais.length > 8) msg += `\n   …e mais ${manuais.length - 8}`;
+      if (manualNegValor > 200) msg += `\n   ⚠️ Ajustes negativos somam R$ ${manualNegValor.toFixed(2)} — prefira apurar pelo inventário, onde a causa é classificada.`;
       msg += '\n';
     }
     if (perdasValor > 0) msg += `\n🗑️ Perdas declaradas na semana: R$ ${perdasValor.toFixed(2)}`;
@@ -2229,9 +2233,12 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     const mesAnt = (() => { const d = new Date(mesRef + '-15T12:00:00-03:00'); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })();
 
     async function resumoMes(mes) {
+      // limite superior = dia 1º do mês seguinte (evita data inválida tipo 06-31)
+      const dProx = new Date(mes + '-15T12:00:00-03:00'); dProx.setMonth(dProx.getMonth() + 1);
+      const proxMes = dProx.toISOString().slice(0, 7) + '-01';
       const { data: invs } = await supabase.from('inventarios')
         .select('id, data, categoria').eq('status', 'fechado')
-        .gte('data', mes + '-01').lte('data', mes + '-31').order('data');
+        .gte('data', mes + '-01').lt('data', proxMes).order('data');
       const lista = invs || [];
       const r = { mes, inventarios: lista.length, sumico: 0, roubo: 0, perda: 0, erro_lancamento: 0, sobra: 0, porProduto: {} };
       if (!lista.length) return r;
