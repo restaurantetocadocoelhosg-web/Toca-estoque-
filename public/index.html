@@ -1414,12 +1414,9 @@ async function processarCupom(input) {
   document.getElementById('cupom-footer').style.display = 'none';
 
   try {
-    // Reduz tamanho da imagem antes de enviar (lado maior ~1568px = ponto ótimo da visão)
-    const base64 = await resizeImage(file, 1568);
-    const mediaType = 'image/jpeg'; // canvas.toDataURL always outputs JPEG
-    const imagemData = base64.split(',')[1];
-
-    const result = await apiPost('/api/ler-cupom', { imagem: imagemData, mediaType });
+    // Nota comprida é FATIADA em pedaços (cada um com texto legível); foto normal vai inteira.
+    const fatias = await prepararCupomImagens(file);
+    const result = await apiPost('/api/ler-cupom', { imagens: fatias, mediaType: 'image/jpeg' });
 
     cupomItens = result.itens || [];
 
@@ -1441,9 +1438,8 @@ async function processarCupom(input) {
   }
 }
 
-// Redimensiona pelo LADO MAIOR (não só largura) — recibo é alto/estreito e precisa de
-// resolução pra ler. Com onerror/timeout pra NUNCA travar o spinner se a foto falhar.
-function resizeImage(file, maxSide = 1568) {
+// Abre a foto com onerror/timeout pra NUNCA travar o spinner se a imagem falhar.
+function carregarImagem(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     const timer = setTimeout(() => reject(new Error('A imagem demorou demais pra abrir. Tente tirar a foto de novo.')), 20000);
@@ -1451,22 +1447,41 @@ function resizeImage(file, maxSide = 1568) {
     reader.onload = e => {
       const img = new Image();
       img.onerror = () => { clearTimeout(timer); reject(new Error('Formato de imagem não suportado. Tire a foto de novo (JPG/PNG).')); };
-      img.onload = () => {
-        clearTimeout(timer);
-        try {
-          const longest = Math.max(img.width, img.height) || maxSide;
-          const scale = Math.min(1, maxSide / longest);
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, Math.round(img.width * scale));
-          canvas.height = Math.max(1, Math.round(img.height * scale));
-          canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
-          resolve(canvas.toDataURL('image/jpeg', 0.9));
-        } catch (err) { reject(new Error('Não consegui processar a imagem. Tente outra foto.')); }
-      };
+      img.onload = () => { clearTimeout(timer); resolve(img); };
       img.src = e.target.result;
     };
     reader.readAsDataURL(file);
   });
+}
+
+// Nota fiscal comprida fica ilegível se reduzida inteira a 1568px — o texto some.
+// Fatia em pedaços verticais com sobreposição; cada fatia mantém o texto legível.
+// Foto "normal" (não comprida) vai inteira como antes. Retorna array de base64 (sem prefixo).
+async function prepararCupomImagens(file) {
+  const img = await carregarImagem(file);
+  const desenhar = (y, h) => {
+    const scale = Math.min(1, 1568 / Math.max(h, img.width));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(img.width * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    canvas.getContext('2d').drawImage(img, 0, y, img.width, h, 0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/jpeg', 0.9).split(',')[1];
+  };
+  const ratio = img.height / img.width;
+  if (ratio <= 2.2) return [desenhar(0, img.height)];
+  const MAX_FATIAS = 8;
+  let fatiaH = img.width * 1.6;            // cada fatia ~1.6× a largura (texto grande)
+  const overlap = Math.round(fatiaH * 0.07); // sobreposição pra não cortar linha na emenda
+  let n = Math.ceil((img.height - overlap) / (fatiaH - overlap));
+  if (n > MAX_FATIAS) { n = MAX_FATIAS; fatiaH = (img.height + (n - 1) * overlap) / n; }
+  const fatias = [];
+  for (let i = 0; i < n; i++) {
+    const y = Math.max(0, Math.round(i * (fatiaH - overlap)));
+    const h = Math.min(Math.round(fatiaH), img.height - y);
+    if (h < 60) break;
+    fatias.push(desenhar(y, h));
+  }
+  return fatias;
 }
 
 function renderCupomItens() {

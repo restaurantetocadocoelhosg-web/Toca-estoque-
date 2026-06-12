@@ -483,6 +483,27 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null)
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
 
+  // Trava de contagem desatualizada: Ajuste em produto que se movimentou há pouco.
+  // A causa nº1 de "produto que volta": contagem feita ANTES das saídas da noite,
+  // digitada depois — o ajuste apaga as saídas. Avisa e pede confirmação (forcar).
+  if (tipo === 'Ajuste' && !req.body.forcar) {
+    const corte = new Date(Date.now() - 6 * 3600000).toISOString();
+    const { data: recentes } = await supabase.from('movimentacoes')
+      .select('tipo, qtd, unidade, responsavel, created_at').eq('produto_id', prod.id)
+      .in('tipo', ['Entrada', 'Saída', 'Perda']).gte('created_at', corte)
+      .order('created_at', { ascending: false }).limit(10);
+    if (recentes && recentes.length) {
+      const resumo = recentes.slice(0, 5).map(r => {
+        const h = new Date(r.created_at).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
+        return `${r.tipo} de ${r.qtd} ${r.unidade || ''} às ${h} (${r.responsavel || '?'})`;
+      }).join('; ');
+      return res.status(409).json({
+        alerta: true, codigo: 'AJUSTE_COM_MOVIMENTO_RECENTE',
+        msg: `${prod.nome} teve ${recentes.length} movimentação(ões) nas últimas 6 horas: ${resumo}. Se a sua contagem foi feita ANTES disso, este ajuste vai APAGAR esses lançamentos. Confirme só se contou AGORA.`
+      });
+    }
+  }
+
   // Detecção de anomalia para Saída/Perda
   if ((tipo === 'Saída' || tipo === 'Perda') && !req.body.forcar) {
     const trintaDias = dateAgoDias(30);
@@ -836,10 +857,15 @@ app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
 // inclusive) pode usar o leitor. NÃO acoplar à permissão 'ia' — senão desligar a varredura
 // automática (ia) bloqueia o leitor junto.
 app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
-  const { imagem, mediaType } = req.body;
-  if (!imagem) return res.status(400).json({ erro: 'Imagem não enviada.' });
+  const { imagem, imagens, mediaType } = req.body;
+  // Aceita 'imagens' (fatias de nota comprida, em ordem) ou 'imagem' única (compat).
+  const listaImg = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 8);
+  if (!listaImg.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return res.status(500).json({ erro: 'ANTHROPIC_API_KEY não configurada no servidor.' });
+  const avisoFatias = listaImg.length > 1
+    ? `\n\nATENÇÃO: você recebeu ${listaImg.length} FATIAS da MESMA nota fiscal, em ordem de cima para baixo, com pequena SOBREPOSIÇÃO entre uma fatia e a seguinte. Linhas que aparecem repetidas na emenda de duas fatias são o MESMO item — conte UMA vez só. Monte a lista única de itens da nota inteira.`
+    : '';
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -847,8 +873,8 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
       body: JSON.stringify({
         model: 'claude-sonnet-4-6', max_tokens: 16384,
         messages: [{ role: 'user', content: [
-          { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: imagem } },
-          { type: 'text', text: `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade e unidade.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. O volume/tamanho no nome (350ML, 500ML, 2L, 1KG, 5KG, 20KG) NUNCA é a quantidade.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- CAIXA/CX/FARDO COM PESO (ex 'FILE FRANGO CX 20KG', 'CARNE 18 KG') -> qtd = o peso em KG, não 1 caixa.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\"}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN'}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN\n'FILE FRANGO CX 20KG' -> qtd:20, KG\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
+          ...listaImg.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
+          { type: 'text', text: avisoFatias + `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade e unidade.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. O volume/tamanho no nome (350ML, 500ML, 2L, 1KG, 5KG, 20KG) NUNCA é a quantidade.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- CAIXA/CX/FARDO COM PESO (ex 'FILE FRANGO CX 20KG', 'CARNE 18 KG') -> qtd = o peso em KG, não 1 caixa.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\"}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN'}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN\n'FILE FRANGO CX 20KG' -> qtd:20, KG\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
         ]}]
       })
     });
@@ -861,7 +887,11 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
     const text = (data.content || []).map(b => b.text || '').join('');
     let parsed;
     try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
-    catch(e) { return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' }); }
+    catch(e) {
+      console.error('ler-cupom: resposta não-JSON da IA:', text.slice(0, 300));
+      await logErroAgenda('ler-cupom parse', 'IA respondeu fora do formato: ' + text.slice(0, 150), req.user);
+      return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' });
+    }
     if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
 
     // Batch synonym lookup — 1 query para todos os itens
