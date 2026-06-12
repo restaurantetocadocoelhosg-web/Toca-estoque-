@@ -470,7 +470,8 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   if (!produto_nome || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
 
-  const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', produto_nome).single();
+  const { prod, opcoes } = await acharProdutoUnico(produto_nome);
+  if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
 
   let qtd = tipo === 'Ajuste' ? parseNonNegativeNumber(qtdInput) : parsePositiveNumber(qtdInput);
@@ -1085,6 +1086,21 @@ async function buscarProdutos(termo) {
 }
 function statusProd(p) { return Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK'; }
 
+// Acha UM produto pelo texto digitado — acento/caixa-insensível, aceita código (BOV-01) e apelido.
+// Retorna { prod } (registro completo) quando a identificação é certa; { opcoes } quando ambíguo; {} quando não achou.
+async function acharProdutoUnico(termo) {
+  const { produtos } = await buscarProdutos(termo);
+  if (!produtos.length) return {};
+  let alvo = produtos.length === 1 ? produtos[0] : null;
+  if (!alvo) {
+    const qn = normalizeSearch(termo);
+    alvo = produtos.find(p => normalizeSearch(p.nome) === qn) || null;
+  }
+  if (!alvo) return { opcoes: produtos };
+  const { data } = await supabase.from('produtos').select('*').eq('id', alvo.id).single();
+  return data ? { prod: data } : {};
+}
+
 async function executarFerramenta(nome, input, user) {
   try {
     switch (nome) {
@@ -1118,7 +1134,8 @@ async function executarFerramenta(nome, input, user) {
 
       case 'ver_historico': {
         const nomeBusca = sanitizeText(input.produto_nome, 120);
-        const { data: prod } = await supabase.from('produtos').select('id, nome, qtd, unidade, minimo').ilike('nome', nomeBusca).single();
+        const { prod, opcoes } = await acharProdutoUnico(nomeBusca);
+        if (opcoes) return { erro: `Vários produtos batem com "${nomeBusca}". Pergunte qual: ${opcoes.slice(0, 8).map(p => `${p.nome} (${p.codigo || 's/cód'})`).join(', ')}` };
         if (!prod) return { erro: `Produto "${nomeBusca}" não encontrado` };
         const dias = Math.min(Number(input.dias) || 30, 365);
         const desde = dateAgoDias(dias);
@@ -1138,7 +1155,12 @@ async function executarFerramenta(nome, input, user) {
           q = q.gte('created_at', dateAgoDias(Number(input.dias)) + 'T00:00:00-03:00');
         }
         if (input.tipo) q = q.eq('tipo', input.tipo);
-        if (input.produto_nome) q = q.ilike('produto_nome', `%${sanitizeText(input.produto_nome, 100)}%`);
+        if (input.produto_nome) {
+          const termoMov = sanitizeText(input.produto_nome, 100);
+          const { produtos: provaveis } = await buscarProdutos(termoMov);
+          if (provaveis.length) q = q.in('produto_id', provaveis.map(p => p.id));
+          else q = q.ilike('produto_nome', `%${termoMov}%`);
+        }
         const { data } = await q.order('id', { ascending: false }).limit(Math.min(Number(input.limite) || 50, 200));
         return { total: (data || []).length, movimentacoes: data || [] };
       }
@@ -1233,7 +1255,8 @@ async function executarFerramenta(nome, input, user) {
       case 'atualizar_produto': {
         if (!['admin','gerente'].includes(user && user.role)) return { sucesso: false, erro: 'Permissão insuficiente. Requer gerente ou admin.' };
         const nomeBusca = sanitizeText(input.produto_nome, 120);
-        const { data: prod } = await supabase.from('produtos').select('*').ilike('nome', nomeBusca).single();
+        const { prod, opcoes } = await acharProdutoUnico(nomeBusca);
+        if (opcoes) return { sucesso: false, erro: `Vários produtos batem com "${nomeBusca}". Pergunte qual: ${opcoes.slice(0, 8).map(p => `${p.nome} (${p.codigo || 's/cód'})`).join(', ')}` };
         if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado` };
         const updates = {};
         if (input.custo !== undefined) { const c = parseNonNegativeNumber(input.custo); if (c !== null) updates.custo = c; }
@@ -1823,7 +1846,8 @@ app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), async (req, re
   const termo = sanitizeText(req.body?.termo, 120);
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   if (!termo || !produto_nome) return res.status(400).json({ erro: 'Termo e produto são obrigatórios.' });
-  const { data: prod } = await supabase.from('produtos').select('nome').ilike('nome', produto_nome).single();
+  const { prod, opcoes } = await acharProdutoUnico(produto_nome);
+  if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
   const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: 'termo' });
   if (error) return res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
@@ -1837,7 +1861,7 @@ app.post('/api/sinonimos/importar', auth, requireRole('admin'), async (req, res)
   for (const s of lista) {
     try {
       const termo = normalizeSearch(String(s.termo || ''));
-      const { data: prod } = await supabase.from('produtos').select('nome').ilike('nome', s.produto_nome).single();
+      const { prod } = await acharProdutoUnico(String(s.produto_nome || ''));
       if (!termo || !prod) { erros.push(s.termo); continue; }
       await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: 'termo' });
       ok++;
@@ -1997,14 +2021,13 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
     const qtd = parsePositiveNumber(req.body?.qtd);
     if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie: produto, quantidade` });
-    const buscaNorm = normalizeSearch(produto_nome);
-    const { data: matches } = await supabase.from('produtos').select('*').ilike('nome_search', `%${buscaNorm}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(6);
-    if (!matches || !matches.length) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
-    let prod = matches.length === 1 ? matches[0] : matches.find(p => normalizeSearch(p.nome) === buscaNorm);
-    if (!prod) {
-      const ops = matches.slice(0, 6).map(p => `• ${p.nome}`).join('\n');
-      return res.json({ resposta: `Encontrei ${matches.length} produtos com "${produto_nome}". Seja mais especifico:\n\n${ops}` });
+    // Matcher completo: acento-insensível + aceita código (BOV-01) e apelido cadastrado.
+    const { prod, opcoes } = await acharProdutoUnico(produto_nome);
+    if (opcoes) {
+      const ops = opcoes.slice(0, 6).map(p => `• ${p.nome}${p.codigo ? ` (${p.codigo})` : ''}`).join('\n');
+      return res.json({ resposta: `Encontrei ${opcoes.length} produtos com "${produto_nome}". Seja mais especifico (pode usar o código):\n\n${ops}` });
     }
+    if (!prod) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
     // Blindagem de concorrência: trava otimista com retry — evita que duas baixas
     // simultâneas do mesmo produto se sobrescrevam (perda de dado).
     let novaQtd, prodAtual = prod, sucesso = false;
