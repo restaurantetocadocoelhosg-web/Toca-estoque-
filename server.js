@@ -932,17 +932,15 @@ app.post('/api/resetar', auth, requireRole('admin'), async (req, res) => {
 // Ler nota fiscal é parte do LANÇAMENTO de estoque (não da IA). Todo quem lança (operador
 // inclusive) pode usar o leitor. NÃO acoplar à permissão 'ia' — senão desligar a varredura
 // automática (ia) bloqueia o leitor junto.
-app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
-  const { imagem, imagens, mediaType } = req.body;
-  // Aceita 'imagens' (fatias de nota comprida, em ordem) ou 'imagem' única (compat).
-  const listaImg = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 8);
-  if (!listaImg.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
+// Motor compartilhado do leitor de nota: lê a(s) imagem(ns) com a IA e cruza com o estoque.
+// Usado pelo app (/api/ler-cupom, confirmação na tela) e pelo grupo do WhatsApp (lançamento automático).
+// Retorna { itens } | { itens:[], aviso } | { status, erro }.
+async function lerNotaComIA(listaImg, mediaType, userLog) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) return res.status(500).json({ erro: 'ANTHROPIC_API_KEY não configurada no servidor.' });
+  if (!apiKey) return { status: 500, erro: 'ANTHROPIC_API_KEY não configurada no servidor.' };
   const avisoFatias = listaImg.length > 1
     ? `\n\nATENÇÃO: você recebeu ${listaImg.length} FATIAS da MESMA nota fiscal, em ordem de cima para baixo, com pequena SOBREPOSIÇÃO entre uma fatia e a seguinte. Linhas que aparecem repetidas na emenda de duas fatias são o MESMO item — conte UMA vez só. Monte a lista única de itens da nota inteira.`
     : '';
-  try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
@@ -957,7 +955,7 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
     if (!response.ok) {
       const errBody = (await response.text()).slice(0, 500);
       console.error('Anthropic API error [ler-cupom]:', response.status, errBody);
-      return res.status(502).json({ erro: 'Erro na API (' + response.status + '): ' + errBody });
+      return { status: 502, erro: 'Erro na API (' + response.status + '): ' + errBody };
     }
     const data = await response.json();
     const text = (data.content || []).map(b => b.text || '').join('');
@@ -965,10 +963,10 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
     try { parsed = JSON.parse(text.replace(/```json|```/g, '').trim()); }
     catch(e) {
       console.error('ler-cupom: resposta não-JSON da IA:', text.slice(0, 300));
-      await logErroAgenda('ler-cupom parse', 'IA respondeu fora do formato: ' + text.slice(0, 150), req.user);
-      return res.status(422).json({ erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' });
+      await logErroAgenda('ler-cupom parse', 'IA respondeu fora do formato: ' + text.slice(0, 150), userLog);
+      return { status: 422, erro: 'Foto ilegível. Tente uma imagem mais nítida e bem iluminada.' };
     }
-    if (parsed.erro) return res.json({ itens: [], aviso: parsed.erro });
+    if (parsed.erro) return { itens: [], aviso: parsed.erro };
 
     // Batch synonym lookup — 1 query para todos os itens
     const termos = (parsed.itens || []).map(i => normalizeSearch(i.nome));
@@ -1030,12 +1028,94 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
         incerto: !confiavel && candidatos.length > 0,
       });
     }
-    await audit('ler_cupom', { total_itens: itens.length }, req.user, getClientIp(req));
-    res.json({ itens });
+    return { itens };
+}
+
+app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
+  const { imagem, imagens, mediaType } = req.body;
+  // Aceita 'imagens' (fatias de nota comprida, em ordem) ou 'imagem' única (compat).
+  const listaImg = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 8);
+  if (!listaImg.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
+  try {
+    const r = await lerNotaComIA(listaImg, mediaType, req.user);
+    if (r.erro) return res.status(r.status || 500).json({ erro: r.erro });
+    if (r.aviso) return res.json({ itens: [], aviso: r.aviso });
+    await audit('ler_cupom', { total_itens: r.itens.length }, req.user, getClientIp(req));
+    res.json({ itens: r.itens });
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
     await logErroAgenda('ler-cupom', e, req.user);
     res.status(500).json({ erro: 'Erro interno: ' + e.message });
+  }
+});
+
+// ==================== LER NOTA VIA WHATSAPP (grupo de notas) ====================
+// O bot manda a foto da nota; itens com match CONFIÁVEL (apelido/nome exato) e unidade
+// compatível são lançados como Entrada automaticamente. O resto volta na resposta
+// para confirmação no app. Nunca lança no chute.
+function unidadeCompativel(uniCupom, uniProd) {
+  const n = (u) => normalizeSearch(u).replace(/s$/, '');
+  const a = n(uniCupom || 'un'), b = n(uniProd || 'un');
+  if (a === b) return true;
+  const grupos = [['un', 'unidade', 'pc', 'pct', 'cx', 'fardo', 'pacote'], ['kg', 'quilo', 'kilo', 'g'], ['l', 'lt', 'litro', 'ml']];
+  return grupos.some(g => g.includes(a) && g.includes(b));
+}
+
+app.post('/api/webhook/ler-nota', async (req, res) => {
+  const secret = req.headers['x-webhook-secret'] || req.body?.secret;
+  if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
+  const { imagem, imagens, mediaType } = req.body;
+  const remetente = sanitizeText(req.body?.remetente, 60) || 'WhatsApp';
+  const listaImg = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 8);
+  if (!listaImg.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
+  try {
+    const r = await lerNotaComIA(listaImg, mediaType, { nome: remetente });
+    if (r.erro) return res.json({ resposta: `❌ Não consegui ler a nota: ${r.erro}` });
+    if (r.aviso || !r.itens.length) return res.json({ resposta: `⚠️ Não achei itens na nota. ${r.aviso || 'Tente uma foto mais nítida e inteira.'}` });
+
+    const lancados = [], confirmar = [], naoachados = [];
+    for (const item of r.itens) {
+      // Auto-lança SÓ apelido/nome exato (certeza real) com unidade compatível; 'forte' é palpite — vai pra confirmação.
+      const auto = item.produto && (item.via === 'apelido' || item.via === 'nome_exato') && unidadeCompativel(item.unidade_cupom, item.produto.unidade);
+      if (!auto) {
+        if (item.candidatos && item.candidatos.length) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.candidatos[0].nome });
+        else naoachados.push(`${item.nome_cupom} (${item.qtd})`);
+        continue;
+      }
+      // Entrada com trava otimista (mesma blindagem do webhook entrada)
+      let prodAtual = item.produto, novaQtd = 0, sucesso = false;
+      for (let tent = 0; tent < 4 && !sucesso; tent++) {
+        novaQtd = Number((Number(prodAtual.qtd) + Number(item.qtd)).toFixed(3));
+        const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+        if (upd && upd.length) { sucesso = true; break; }
+        const { data: re } = await supabase.from('produtos').select('*').eq('id', item.produto.id).single();
+        if (!re) break;
+        prodAtual = re;
+      }
+      if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
+      await supabase.from('movimentacoes').insert({
+        produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
+        tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
+        custo: item.produto.custo, valor: Number((Number(item.produto.custo) * item.qtd).toFixed(2)),
+        motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
+      });
+      lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd });
+    }
+    await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length }, null, '');
+
+    let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
+    if (lancados.length) {
+      msg += `✅ *Lançados (${lancados.length}):*\n` + lancados.map(l => `• ${l.nome}: +${l.qtd} ${l.unidade} (estoque: ${l.estoque})`).join('\n') + '\n';
+    }
+    if (confirmar.length) msg += `\n⚠️ *Confira no app (${confirmar.length}) — não lancei no chute:*\n` + confirmar.map(c => `• "${c.nome_cupom}" (${c.qtd}) → seria ${c.sugestao}?`).join('\n') + '\n';
+    if (naoachados.length) msg += `\n❓ *Não achei no estoque:*\n` + naoachados.map(n => `• ${n}`).join('\n') + '\n';
+    if (!lancados.length && !confirmar.length && !naoachados.length) msg += 'Nada para lançar.';
+    if (confirmar.length || naoachados.length) msg += `\n💡 Dica: cadastre o apelido no app (Admin → Sinônimos) que da próxima vez lanço sozinho.`;
+    res.json({ resposta: msg, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length });
+  } catch(e) {
+    console.error('Erro ler-nota webhook:', e.message);
+    await logErroAgenda('ler-nota-whatsapp', e, { nome: remetente });
+    res.json({ resposta: '❌ Erro ao processar a nota: ' + e.message });
   }
 });
 
