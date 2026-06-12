@@ -2111,48 +2111,150 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
   }
 
   if (acao === 'conferencia') {
+    // Conferência por ORIGEM: inventário (causas categorizadas) + ajustes manuais.
+    // Exclui 'sincronização automática' (reset/backup) — não é sumiço.
     const dias = Math.min(Math.max(parseInt(req.body?.dias) || 7, 1), 60);
     const desde = dateAgoDias(dias);
-    const { data: movs } = await supabase.from('movimentacoes')
-      .select('produto_nome, categoria, tipo, qtd, qtd_antes, qtd_depois, custo')
-      .in('tipo', ['Ajuste','Perda']).gte('created_at', desde + 'T00:00:00-03:00');
-    const lista = movs || [];
-    const sumido = {}; let totalValor = 0; let nAjustes = 0; let totalPerdaValor = 0;
-    for (const m of lista) {
-      if (m.tipo === 'Ajuste') {
-        nAjustes++;
-        const delta = Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0);
-        if (delta < 0) {
-          const k = m.produto_nome || '?';
-          if (!sumido[k]) sumido[k] = { qtd: 0, valor: 0 };
-          sumido[k].qtd += Math.abs(delta);
-          sumido[k].valor += Math.abs(delta) * Number(m.custo || 0);
-          totalValor += Math.abs(delta) * Number(m.custo || 0);
+    const dataBR = dateSP().split('-').reverse().join('/');
+
+    // 1) Inventários fechados no período — fonte oficial do sumiço.
+    const { data: invs } = await supabase.from('inventarios')
+      .select('id, data, categoria, valor_sumico, valor_sobra, itens_divergentes')
+      .eq('status', 'fechado').gte('fechado_em', desde + 'T00:00:00-03:00').order('fechado_em');
+    const invList = invs || [];
+    const porCausa = { sumico: 0, roubo: 0, perda: 0, erro_lancamento: 0, sobra: 0 };
+    const sumidoInv = {};
+    if (invList.length) {
+      const { data: itens } = await supabase.from('inventario_itens')
+        .select('produto_nome, divergencia, valor_divergencia, causa')
+        .in('inventario_id', invList.map(i => i.id)).not('causa', 'in', '("ok","nao_contado")');
+      for (const it of (itens || [])) {
+        const v = Math.abs(Number(it.valor_divergencia || 0));
+        if (!v) continue;
+        const c = porCausa[it.causa] !== undefined ? it.causa : (Number(it.divergencia) < 0 ? 'sumico' : 'sobra');
+        porCausa[c] += v;
+        if ((c === 'sumico' || c === 'roubo') && Number(it.divergencia) < 0) {
+          const k = it.produto_nome || '?';
+          if (!sumidoInv[k]) sumidoInv[k] = { qtd: 0, valor: 0 };
+          sumidoInv[k].qtd += Math.abs(Number(it.divergencia));
+          sumidoInv[k].valor += v;
         }
-      } else if (m.tipo === 'Perda') {
-        totalPerdaValor += Number(m.qtd || 0) * Number(m.custo || 0);
       }
     }
-    const dataBR = dateSP().split('-').reverse().join('/');
-    if (nAjustes === 0) {
-      return res.json({ resposta: `🔎 *CONFERÊNCIA DE ESTOQUE — últimos ${dias} dias*\n📅 ${dataBR}\n\n⚠️ Nenhuma contagem física (ajuste) foi feita no período.\n\nSem contagem, não dá para saber se está sumindo item. Faça a contagem dos itens de alto giro (carnes, refrigerantes, ovos) e lance os ajustes no app.`, total_sumido: 0, contagens: 0 });
+
+    // 2) Movimentações do período: ajustes manuais (fora do inventário) + perdas declaradas.
+    const { data: movs } = await supabase.from('movimentacoes')
+      .select('produto_nome, tipo, qtd, qtd_antes, qtd_depois, custo, responsavel, obs')
+      .in('tipo', ['Ajuste', 'Perda']).gte('created_at', desde + 'T00:00:00-03:00');
+    const manuais = []; let nSinc = 0, nAjusteInv = 0, perdasValor = 0, manualNegValor = 0;
+    for (const m of (movs || [])) {
+      const obsN = normalizeSearch(m.obs || '');
+      if (m.tipo === 'Perda') { perdasValor += Number(m.qtd || 0) * Number(m.custo || 0); continue; }
+      if (obsN.includes('sincronizacao automatica')) { nSinc++; continue; }
+      if (obsN.includes('inventario')) { nAjusteInv++; continue; }
+      const delta = Number(m.qtd_depois ?? 0) - Number(m.qtd_antes ?? 0);
+      const valorDelta = Math.abs(delta) * Number(m.custo || 0);
+      if (delta < 0) manualNegValor += valorDelta;
+      manuais.push({ nome: m.produto_nome, delta: Number(delta.toFixed(3)), valor: Number(valorDelta.toFixed(2)), responsavel: m.responsavel || '?' });
     }
-    const top = Object.entries(sumido).sort((a,b)=>b[1].valor-a[1].valor).slice(0,12);
-    let msg = `🔎 *CONFERÊNCIA DE ESTOQUE — últimos ${dias} dias*\n📅 ${dataBR}\n\n`;
-    if (!top.length) {
-      msg += `✅ Tudo bateu! ${nAjustes} contagem(ns) feita(s) e nenhum item sumido. 👏`;
+
+    const sumicoReal = porCausa.sumico + porCausa.roubo + manualNegValor;
+    if (!invList.length && !manuais.length) {
+      return res.json({ resposta: `🔎 *CONFERÊNCIA — últimos ${dias} dias*\n📅 ${dataBR}\n\n⚠️ Nenhum inventário fechado nem ajuste manual no período.\n\nSem contagem física não dá para saber se está sumindo item. Faça o inventário de sábado.`, total_sumido: 0, contagens: 0 });
+    }
+
+    let msg = `🔎 *CONFERÊNCIA — últimos ${dias} dias*\n📅 ${dataBR}\n\n`;
+    if (invList.length) {
+      msg += `🧾 *Inventário(s): ${invList.length}* (${invList.map(i => i.categoria || 'geral').join(', ')})\n`;
+      if (porCausa.sumico + porCausa.roubo > 0) {
+        const top = Object.entries(sumidoInv).sort((a, b) => b[1].valor - a[1].valor).slice(0, 10);
+        msg += `   💸 Sumiço real: R$ ${(porCausa.sumico + porCausa.roubo).toFixed(2)}\n`;
+        msg += top.map(([n, d]) => `      • ${n}: -${Number(d.qtd).toFixed(d.qtd % 1 === 0 ? 0 : 1)} (R$ ${d.valor.toFixed(2)})`).join('\n') + '\n';
+      } else msg += `   ✅ Contagem bateu — nenhum sumiço real.\n`;
+      if (porCausa.erro_lancamento > 0) msg += `   ✏️ Erro de lançamento (corrigido, não é perda): R$ ${porCausa.erro_lancamento.toFixed(2)}\n`;
+      if (porCausa.perda > 0) msg += `   🗑️ Perda apurada na contagem: R$ ${porCausa.perda.toFixed(2)}\n`;
+      if (porCausa.sobra > 0) msg += `   📦 Sobra: R$ ${porCausa.sobra.toFixed(2)}\n`;
     } else {
-      msg += `💸 *Itens que sumiram* (contagem achou MENOS que o sistema):\n\n`;
-      msg += top.map(([nome, d]) => `• ${nome}: -${Number(d.qtd).toFixed(d.qtd % 1 === 0 ? 0 : 1)} (R$ ${d.valor.toFixed(2)})`).join('\n');
-      msg += `\n\n💰 *Total sumido: R$ ${totalValor.toFixed(2)}*`;
-      msg += `\n📋 ${nAjustes} contagem(ns) no período.`;
-      msg += `\n\n_Causa comum: saída não lançada. Cobre a equipe no fechamento diário._`;
+      msg += `🧾 Nenhum inventário fechado no período — faça o de sábado.\n`;
     }
-    if (totalPerdaValor > 0) msg += `\n🗑️ Perdas declaradas: R$ ${totalPerdaValor.toFixed(2)}`;
-    return res.json({ resposta: msg, total_sumido: Number(totalValor.toFixed(2)), contagens: nAjustes, perdas_valor: Number(totalPerdaValor.toFixed(2)), itens: top.map(([n,d])=>({nome:n,qtd:d.qtd,valor:Number(d.valor.toFixed(2))})) });
+    if (manuais.length) {
+      msg += `\n⚙️ *Ajustes manuais: ${manuais.length}*\n`;
+      msg += manuais.slice(0, 8).map(a => `   • ${a.nome}: ${a.delta > 0 ? '+' : ''}${a.delta} (R$ ${a.valor.toFixed(2)}) — ${a.responsavel}`).join('\n');
+      if (manuais.length > 8) msg += `\n   …e mais ${manuais.length - 8}`;
+      msg += '\n';
+    }
+    if (perdasValor > 0) msg += `\n🗑️ Perdas declaradas na semana: R$ ${perdasValor.toFixed(2)}`;
+    if (nSinc > 0) msg += `\n🚫 Ignoradas ${nSinc} sincronização(ões) automática(s) de backup.`;
+    msg += `\n\n💰 *DINHEIRO REALMENTE PERDIDO: R$ ${sumicoReal.toFixed(2)}*`;
+    if (sumicoReal > 0) msg += `\n_Causa comum: saída não lançada. Cobre a equipe no fechamento diário._`;
+    return res.json({ resposta: msg, total_sumido: Number(sumicoReal.toFixed(2)), contagens: invList.length, ajustes_manuais: manuais.length, por_causa: porCausa, perdas_valor: Number(perdasValor.toFixed(2)), sincronizacoes_ignoradas: nSinc, ajustes_inventario_ignorados: nAjusteInv });
   }
 
-  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | conferencia` });
+  if (acao === 'conferencia_mensal') {
+    // Consolidado do mês: tendência dos inventários + comparação com o mês anterior.
+    // Aceita mes=AAAA-MM; padrão = mês anterior (roda dia 1º).
+    const mesParam = /^\d{4}-\d{2}$/.test(String(req.body?.mes || '')) ? String(req.body.mes) : null;
+    const hoje = dateSP();
+    const mesRef = mesParam || (() => { const d = new Date(hoje + 'T12:00:00-03:00'); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })();
+    const mesAnt = (() => { const d = new Date(mesRef + '-15T12:00:00-03:00'); d.setMonth(d.getMonth() - 1); return d.toISOString().slice(0, 7); })();
+
+    async function resumoMes(mes) {
+      const { data: invs } = await supabase.from('inventarios')
+        .select('id, data, categoria').eq('status', 'fechado')
+        .gte('data', mes + '-01').lte('data', mes + '-31').order('data');
+      const lista = invs || [];
+      const r = { mes, inventarios: lista.length, sumico: 0, roubo: 0, perda: 0, erro_lancamento: 0, sobra: 0, porProduto: {} };
+      if (!lista.length) return r;
+      const { data: itens } = await supabase.from('inventario_itens')
+        .select('produto_nome, divergencia, valor_divergencia, causa, inventario_id')
+        .in('inventario_id', lista.map(i => i.id)).not('causa', 'in', '("ok","nao_contado")');
+      for (const it of (itens || [])) {
+        const v = Math.abs(Number(it.valor_divergencia || 0));
+        if (!v) continue;
+        const c = r[it.causa] !== undefined ? it.causa : (Number(it.divergencia) < 0 ? 'sumico' : 'sobra');
+        r[c] += v;
+        if ((c === 'sumico' || c === 'roubo') && Number(it.divergencia) < 0) {
+          const k = it.produto_nome || '?';
+          if (!r.porProduto[k]) r.porProduto[k] = { valor: 0, vezes: new Set() };
+          r.porProduto[k].valor += v;
+          r.porProduto[k].vezes.add(it.inventario_id);
+        }
+      }
+      return r;
+    }
+
+    const [atual, anterior] = await Promise.all([resumoMes(mesRef), resumoMes(mesAnt)]);
+    const sumicoAtual = atual.sumico + atual.roubo;
+    const sumicoAnt = anterior.sumico + anterior.roubo;
+    const mesBR = mesRef.split('-').reverse().join('/');
+    let msg = `📅 *BALANÇO MENSAL DE ESTOQUE — ${mesBR}*\n\n`;
+    if (!atual.inventarios) {
+      msg += `⚠️ Nenhum inventário fechado em ${mesBR}. Sem contagem não há balanço — mantenha o inventário de sábado.`;
+    } else {
+      msg += `🧾 Inventários no mês: ${atual.inventarios}\n`;
+      msg += `💸 Sumiço real: R$ ${sumicoAtual.toFixed(2)}`;
+      if (anterior.inventarios) {
+        const dif = sumicoAtual - sumicoAnt;
+        const pct = sumicoAnt > 0 ? Math.abs(dif / sumicoAnt * 100).toFixed(0) : null;
+        msg += dif <= 0 ? ` (${pct ? `melhorou ${pct}% — ` : ''}mês anterior R$ ${sumicoAnt.toFixed(2)}) ✅` : ` (${pct ? `PIOROU ${pct}% — ` : ''}mês anterior R$ ${sumicoAnt.toFixed(2)}) ⚠️`;
+      }
+      msg += '\n';
+      if (atual.erro_lancamento > 0) msg += `✏️ Erros de lançamento corrigidos: R$ ${atual.erro_lancamento.toFixed(2)}\n`;
+      if (atual.perda > 0) msg += `🗑️ Perdas apuradas: R$ ${atual.perda.toFixed(2)}\n`;
+      if (atual.sobra > 0) msg += `📦 Sobras: R$ ${atual.sobra.toFixed(2)}\n`;
+      const topProd = Object.entries(atual.porProduto).map(([n, d]) => ({ nome: n, valor: d.valor, vezes: d.vezes.size }))
+        .sort((a, b) => b.valor - a.valor).slice(0, 8);
+      if (topProd.length) {
+        msg += `\n🎯 *Produtos problema do mês:*\n`;
+        msg += topProd.map(p => `• ${p.nome}: R$ ${p.valor.toFixed(2)}${p.vezes > 1 ? ` (sumiu em ${p.vezes} inventários!)` : ''}`).join('\n');
+        const reincidentes = topProd.filter(p => p.vezes > 1);
+        if (reincidentes.length) msg += `\n\n⚠️ _Reincidentes merecem atenção especial: ${reincidentes.map(p => p.nome).join(', ')}._`;
+      }
+    }
+    return res.json({ resposta: msg, mes: mesRef, sumico_real: Number(sumicoAtual.toFixed(2)), mes_anterior: { mes: mesAnt, sumico_real: Number(sumicoAnt.toFixed(2)), inventarios: anterior.inventarios }, inventarios: atual.inventarios });
+  }
+
+  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | conferencia | conferencia_mensal` });
 });
 
 app.get('/api/webhook/relatorio-diario', async (req, res) => {
