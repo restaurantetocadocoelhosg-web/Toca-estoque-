@@ -782,6 +782,35 @@ select.big-input { font-size: 14px; }
         </div>
         <div id="sin-list"></div>
       </div>
+
+      <!-- GESTÃO DE CATEGORIAS -->
+      <div class="admin-card">
+        <div class="admin-card-title">🗂️ Categorias <button class="btn-sm" onclick="loadCatsAdmin()">↻</button></div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Crie, renomeie ou exclua categorias. Renomear move todos os produtos junto.</div>
+        <div class="form-row" style="margin-bottom:10px">
+          <input class="small-input" id="cat-nova" placeholder="Nova categoria (ex: Padaria)">
+          <button class="btn-export btn-success" style="padding:11px" onclick="criarCategoria()">➕ Criar categoria</button>
+        </div>
+        <div id="cats-admin-list"></div>
+      </div>
+
+      <!-- GRUPOS DE TROCA -->
+      <div class="admin-card">
+        <div class="admin-card-title">🔄 Grupos de troca <button class="btn-sm" onclick="loadGrupos()">↻</button></div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Produtos que se substituem na compra conforme o preço (ex: <b>Alcatra ↔ Coxão Mole</b>). Se um do grupo está girando ou tem estoque, o outro <b>não dispara</b> alerta de parado nem compra urgente.
+        </div>
+        <div class="form-row" style="margin-bottom:8px">
+          <input class="small-input" id="gr-nome" placeholder="Nome do grupo (ex: grelha bovina)">
+          <div style="position:relative">
+            <input class="small-input" id="gr-prod" placeholder="🔍 Adicionar produto ao grupo..." oninput="buscaGrupoProd(this.value)" autocomplete="off">
+            <div id="gr-ac" class="ac-list"></div>
+          </div>
+        </div>
+        <div id="gr-selecionados" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px"></div>
+        <button class="btn-export btn-success" style="padding:11px;margin-bottom:12px" onclick="salvarGrupo()">💾 Salvar grupo</button>
+        <div id="grupos-list"></div>
+      </div>
     </div>
   </div>
 
@@ -1249,7 +1278,7 @@ function goPage(id, btn) {
   btn.classList.add('active');
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
-  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); }
+  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
   if (id === 'agenda') loadAgenda();
@@ -2102,6 +2131,131 @@ async function deleteSinonimo(id) {
     if (!res.ok) throw new Error('Erro');
     await loadSinonimos(); toast('Sinônimo removido', 'ok');
   } catch(e) { toast('Erro ao remover', 'err'); }
+}
+
+// ==================== CATEGORIAS (Admin) ====================
+async function loadCatsAdmin() {
+  const el = document.getElementById('cats-admin-list');
+  if (!el) return;
+  try {
+    const cats = await api('/api/categorias');
+    if (!cats.length) { el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nenhuma categoria.</div>'; return; }
+    el.innerHTML = cats.map(c => `
+      <div class="sin-row">
+        <span class="sin-prod" style="flex:1">${escapeHtml(c)}</span>
+        <button class="btn-sm" onclick="renomearCategoria('${escapeHtml(c)}')">✏️</button>
+        <button class="btn-sm danger" onclick="excluirCategoria('${escapeHtml(c)}')">✕</button>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+async function criarCategoria() {
+  const nome = document.getElementById('cat-nova').value.trim();
+  if (!nome || nome.length < 2) { toast('Digite o nome da categoria', 'err'); return; }
+  try {
+    await apiPost('/api/categorias', { nome });
+    toast('Categoria criada!', 'ok');
+    document.getElementById('cat-nova').value = '';
+    await loadCatsAdmin();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function renomearCategoria(de) {
+  const para = prompt(`Renomear a categoria "${de}" para:`, de);
+  if (!para || para.trim() === de) return;
+  try {
+    const r = await apiPost('/api/categorias/renomear', { de, para: para.trim() }, 'PUT');
+    toast(`Categoria renomeada (${r.produtos_afetados} produto(s) movidos)`, 'ok');
+    await loadCatsAdmin(); await loadProdAdmin();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function excluirCategoria(nome) {
+  if (!confirm(`Excluir a categoria "${nome}"? Só funciona se nenhum produto a usar.`)) return;
+  try {
+    const res = await fetch(API + `/api/categorias/${encodeURIComponent(nome)}`, { method: 'DELETE', headers: authHeaders() });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.erro || 'Erro');
+    toast('Categoria excluída', 'ok');
+    await loadCatsAdmin();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+// ==================== GRUPOS DE TROCA (Admin) ====================
+let grSelecionados = [];
+
+async function buscaGrupoProd(q) {
+  const ac = document.getElementById('gr-ac');
+  if (!q || q.length < 2) { ac.classList.remove('open'); return; }
+  try {
+    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    if (!items.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="addGrupoProd(${p.id},'${escapeHtml(p.nome)}')">${escapeHtml(p.nome)} <span style="color:var(--muted);font-size:11px">${escapeHtml(p.codigo||'')}</span></div>`).join('');
+    ac.classList.add('open');
+  } catch(e) {}
+}
+
+function addGrupoProd(id, nome) {
+  if (!grSelecionados.find(p => p.id === id)) grSelecionados.push({ id, nome });
+  document.getElementById('gr-prod').value = '';
+  document.getElementById('gr-ac').classList.remove('open');
+  renderGrSelecionados();
+}
+
+function renderGrSelecionados() {
+  document.getElementById('gr-selecionados').innerHTML = grSelecionados.map(p =>
+    `<span style="font-size:12px;padding:5px 10px;border-radius:12px;background:rgba(34,197,94,0.12);border:1px solid rgba(34,197,94,0.3)">${escapeHtml(p.nome)} <b style="cursor:pointer" onclick="grSelecionados=grSelecionados.filter(x=>x.id!==${p.id});renderGrSelecionados()">✕</b></span>`
+  ).join('');
+}
+
+async function salvarGrupo() {
+  const nome = document.getElementById('gr-nome').value.trim();
+  if (!nome || nome.length < 2) { toast('Digite o nome do grupo', 'err'); return; }
+  if (!grSelecionados.length) { toast('Adicione ao menos 1 produto', 'err'); return; }
+  try {
+    await apiPost('/api/grupos', { nome, produto_ids: grSelecionados.map(p => p.id) });
+    toast(`Grupo "${nome}" salvo com ${grSelecionados.length} produto(s)!`, 'ok');
+    document.getElementById('gr-nome').value = '';
+    grSelecionados = []; renderGrSelecionados();
+    await loadGrupos();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function loadGrupos() {
+  const el = document.getElementById('grupos-list');
+  if (!el) return;
+  try {
+    const grupos = await api('/api/grupos');
+    if (!grupos.length) { el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nenhum grupo criado. Ex.: crie "grelha bovina" com Alcatra + Coxão Mole.</div>'; return; }
+    el.innerHTML = grupos.map(g => `
+      <div style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:10px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <b style="font-size:13px">🔄 ${escapeHtml(g.nome)}</b>
+          <button class="btn-sm danger" onclick="excluirGrupo('${escapeHtml(g.nome)}')">🗑️ Desfazer grupo</button>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          ${g.produtos.map(p => `<span style="font-size:12px;padding:4px 9px;border-radius:11px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3)">${escapeHtml(p.nome)} <span style="color:var(--muted)">(${p.qtd} ${escapeHtml(p.unidade||'')})</span> <b style="cursor:pointer" title="Tirar do grupo" onclick="removerDoGrupo(${p.id})">✕</b></span>`).join('')}
+        </div>
+      </div>`).join('');
+  } catch(e) {}
+}
+
+async function removerDoGrupo(produto_id) {
+  try {
+    await apiPost('/api/grupos/remover-produto', { produto_id });
+    toast('Produto removido do grupo', 'ok');
+    await loadGrupos();
+  } catch(e) { toast(e.message, 'err'); }
+}
+
+async function excluirGrupo(nome) {
+  if (!confirm(`Desfazer o grupo "${nome}"? Os produtos continuam — só perdem o vínculo.`)) return;
+  try {
+    const res = await fetch(API + `/api/grupos/${encodeURIComponent(nome)}`, { method: 'DELETE', headers: authHeaders() });
+    if (!res.ok) throw new Error('Erro');
+    toast('Grupo desfeito', 'ok');
+    await loadGrupos();
+  } catch(e) { toast(e.message, 'err'); }
 }
 
 // Salvar sinônimo direto do cupom

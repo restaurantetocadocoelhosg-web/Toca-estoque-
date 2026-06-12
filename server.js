@@ -391,13 +391,89 @@ app.get('/api/produtos/buscar', auth, async (req, res) => {
   res.json(data || []);
 });
 
-// Lista as categorias distintas (deriva dos produtos ativos). Usada nos cadastros e no escopo do inventário.
+// Lista categorias: tabela `categorias` (criadas no Admin) + as derivadas dos produtos ativos.
 app.get('/api/categorias', auth, async (req, res) => {
   try {
-    const { data } = await supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null');
-    const cats = [...new Set((data || []).map(r => r.categoria).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'pt-BR'));
+    const [{ data: tab }, { data: dosProds }] = await Promise.all([
+      supabase.from('categorias').select('nome'),
+      supabase.from('produtos').select('categoria').or('ativo.eq.1,ativo.is.null'),
+    ]);
+    const cats = [...new Set([...(tab || []).map(r => r.nome), ...(dosProds || []).map(r => r.categoria)].filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, 'pt-BR'));
     res.json(cats);
   } catch(e) { res.status(500).json({ erro: 'Erro ao listar categorias.' }); }
+});
+
+// ==================== GESTÃO DE CATEGORIAS (Admin) ====================
+app.post('/api/categorias', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const nome = sanitizeText(req.body?.nome, 80);
+  if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome de categoria inválido.' });
+  const { error } = await supabase.from('categorias').insert({ nome });
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ erro: 'Esta categoria já existe.' });
+    return res.status(500).json({ erro: 'Erro ao criar categoria.' });
+  }
+  await audit('criar_categoria', { nome }, req.user, getClientIp(req));
+  res.json({ ok: true, nome });
+});
+
+app.put('/api/categorias/renomear', auth, requireRole('admin'), async (req, res) => {
+  const de = sanitizeText(req.body?.de, 80);
+  const para = sanitizeText(req.body?.para, 80);
+  if (!de || !para || de === para) return res.status(400).json({ erro: 'Informe a categoria atual e o novo nome.' });
+  const { data: afetados } = await supabase.from('produtos').select('id').eq('categoria', de);
+  await supabase.from('produtos').update({ categoria: para }).eq('categoria', de);
+  await supabase.from('categorias').delete().eq('nome', de);
+  await supabase.from('categorias').upsert({ nome: para }, { onConflict: 'nome' });
+  await audit('renomear_categoria', { de, para, produtos_afetados: (afetados || []).length }, req.user, getClientIp(req));
+  res.json({ ok: true, produtos_afetados: (afetados || []).length });
+});
+
+app.delete('/api/categorias/:nome', auth, requireRole('admin'), async (req, res) => {
+  const nome = sanitizeText(req.params.nome, 80);
+  const { count } = await supabase.from('produtos').select('id', { count: 'exact', head: true }).eq('categoria', nome).or('ativo.eq.1,ativo.is.null');
+  if (count > 0) return res.status(400).json({ erro: `Categoria em uso por ${count} produto(s). Mova-os antes de excluir.` });
+  await supabase.from('categorias').delete().eq('nome', nome);
+  await audit('excluir_categoria', { nome }, req.user, getClientIp(req));
+  res.json({ ok: true });
+});
+
+// ==================== GRUPOS DE TROCA (produtos que se substituem) ====================
+// Ex.: Alcatra ↔ Coxão Mole — compra alterna pelo preço. Alerta de parado e lista de
+// compras passam a olhar o GRUPO: se um irmão girou/tem estoque, o outro não alarma.
+app.get('/api/grupos', auth, async (req, res) => {
+  const { data } = await supabase.from('produtos').select('id, nome, codigo, categoria, qtd, unidade, grupo_troca')
+    .not('grupo_troca', 'is', null).or('ativo.eq.1,ativo.is.null').order('grupo_troca').order('nome');
+  const grupos = {};
+  for (const p of (data || [])) {
+    if (!grupos[p.grupo_troca]) grupos[p.grupo_troca] = [];
+    grupos[p.grupo_troca].push(p);
+  }
+  res.json(Object.entries(grupos).map(([nome, produtos]) => ({ nome, produtos })));
+});
+
+app.post('/api/grupos', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const nome = sanitizeText(req.body?.nome, 60);
+  const ids = Array.isArray(req.body?.produto_ids) ? req.body.produto_ids.map(Number).filter(Number.isFinite) : [];
+  if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome do grupo inválido.' });
+  if (ids.length < 1) return res.status(400).json({ erro: 'Selecione ao menos 1 produto.' });
+  await supabase.from('produtos').update({ grupo_troca: nome }).in('id', ids);
+  await audit('grupo_troca', { nome, produto_ids: ids }, req.user, getClientIp(req));
+  res.json({ ok: true, nome, total: ids.length });
+});
+
+app.post('/api/grupos/remover-produto', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const id = Number(req.body?.produto_id);
+  if (!Number.isFinite(id)) return res.status(400).json({ erro: 'Produto inválido.' });
+  await supabase.from('produtos').update({ grupo_troca: null }).eq('id', id);
+  res.json({ ok: true });
+});
+
+app.delete('/api/grupos/:nome', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const nome = sanitizeText(req.params.nome, 60);
+  await supabase.from('produtos').update({ grupo_troca: null }).eq('grupo_troca', nome);
+  await audit('grupo_troca_excluir', { nome }, req.user, getClientIp(req));
+  res.json({ ok: true });
 });
 
 app.post('/api/produtos', auth, requireRole('admin', 'gerente'), async (req, res) => {
@@ -430,9 +506,9 @@ app.put('/api/produtos/:id', auth, requireRole('admin', 'gerente'), async (req, 
   const minimo = req.body?.minimo !== undefined ? parseNonNegativeNumber(req.body.minimo) : produto.minimo;
   if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
   if (custo === null || minimo === null) return res.status(400).json({ erro: 'Custo e mínimo devem ser números válidos.' });
-  const { data: atualizado, error } = await supabase.from('produtos').update({
-    nome, nome_search: normalizeSearch(nome), categoria, unidade, custo, minimo,
-  }).eq('id', req.params.id).select().single();
+  const updates = { nome, nome_search: normalizeSearch(nome), categoria, unidade, custo, minimo };
+  if (req.body?.grupo_troca !== undefined) updates.grupo_troca = sanitizeText(req.body.grupo_troca, 60) || null;
+  const { data: atualizado, error } = await supabase.from('produtos').update(updates).eq('id', req.params.id).select().single();
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Já existe um produto com este nome.' });
     return res.status(500).json({ erro: 'Erro ao atualizar produto.' });
@@ -1466,23 +1542,35 @@ app.get('/api/agenda', auth, async (req, res) => {
 // ==================== ALERTAS ====================
 app.get('/api/alertas/estoque-parado', auth, async (req, res) => {
   try {
-    const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, qtd, unidade, minimo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, qtd, unidade, minimo, grupo_troca').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ alertas: [], resumo: { total: 0, criticos: 0, atencao: 0, sem_historico: 0 } });
     const { data: todosMov } = await supabase.from('movimentacoes').select('produto_id, created_at, tipo, responsavel').in('produto_id', ids).order('created_at', { ascending: false });
     const lastMovMap = {};
     for (const m of (todosMov || [])) { if (!lastMovMap[m.produto_id]) lastMovMap[m.produto_id] = m; }
+    // Último movimento por GRUPO de troca: irmão girando = grupo vivo, não alarma os outros.
+    const lastGrupoMov = {};
+    for (const p of (produtos || [])) {
+      if (p.grupo_troca && lastMovMap[p.id]) {
+        const t = new Date(lastMovMap[p.id].created_at).getTime();
+        if (!lastGrupoMov[p.grupo_troca] || t > lastGrupoMov[p.grupo_troca]) lastGrupoMov[p.grupo_troca] = t;
+      }
+    }
     const agora = Date.now();
     const alertas = [];
+    let silenciadosPorGrupo = 0;
     for (const p of (produtos || [])) {
       const thDias = THRESHOLDS_ALERTA[p.categoria] || THRESHOLD_PADRAO;
       const lastMov = lastMovMap[p.id];
       const diasParado = lastMov ? Math.floor((agora - new Date(lastMov.created_at).getTime()) / 86400000) : null;
       if (diasParado === null || diasParado >= thDias) {
+        if (p.grupo_troca && lastGrupoMov[p.grupo_troca] && (agora - lastGrupoMov[p.grupo_troca]) < thDias * 86400000) {
+          silenciadosPorGrupo++; continue; // substituto do grupo em uso — rotativo, não parado
+        }
         const urgencia = diasParado === null ? 'SEM_HISTORICO' : diasParado >= thDias * 2 ? 'CRITICO' : 'ATENCAO';
         alertas.push({ produto_id: p.id, nome: p.nome, categoria: p.categoria, qtd: p.qtd, unidade: p.unidade,
           dias_parado: diasParado, ultimo_movimento: lastMov?.created_at || null,
-          ultimo_responsavel: lastMov?.responsavel || null, threshold_dias: thDias, urgencia });
+          ultimo_responsavel: lastMov?.responsavel || null, threshold_dias: thDias, urgencia, grupo_troca: p.grupo_troca || null });
       }
     }
     alertas.sort((a, b) => { const o = { SEM_HISTORICO: 0, CRITICO: 1, ATENCAO: 2 };
@@ -1490,7 +1578,8 @@ app.get('/api/alertas/estoque-parado', auth, async (req, res) => {
     const resumo = { total: alertas.length,
       criticos: alertas.filter(a => a.urgencia === 'CRITICO').length,
       atencao: alertas.filter(a => a.urgencia === 'ATENCAO').length,
-      sem_historico: alertas.filter(a => a.urgencia === 'SEM_HISTORICO').length };
+      sem_historico: alertas.filter(a => a.urgencia === 'SEM_HISTORICO').length,
+      silenciados_por_grupo: silenciadosPorGrupo };
     await audit('alertas_estoque_parado', resumo, req.user, getClientIp(req));
     res.json({ alertas, resumo });
   } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
@@ -2087,13 +2176,36 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
   }
 
   if (acao === 'compras') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
+    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade, grupo_troca').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     const todos = data || [];
     const semMinimo = todos.filter(p => Number(p.minimo) <= 0 && Number(p.qtd) === 0).length;
-    const lista = todos.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+    const baixos = todos.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+    // Grupo de troca: se um irmão tem estoque, o item baixo sai do urgente (você escolhe pelo preço).
+    const estoquePorGrupo = {};
+    for (const p of todos) {
+      if (p.grupo_troca && Number(p.qtd) > 0) {
+        if (!estoquePorGrupo[p.grupo_troca]) estoquePorGrupo[p.grupo_troca] = [];
+        estoquePorGrupo[p.grupo_troca].push(p);
+      }
+    }
+    const lista = [], comSubstituto = [];
+    for (const p of baixos) {
+      const irmaos = (p.grupo_troca && estoquePorGrupo[p.grupo_troca] || []).filter(i => i.nome !== p.nome);
+      if (irmaos.length) comSubstituto.push({ ...p, irmao: irmaos[0] });
+      else lista.push(p);
+    }
     const nota = semMinimo > 0 ? `\n\n(+ ${semMinimo} zerados sem mínimo definido — defina o mínimo no app para entrarem na lista)` : '';
-    if (!lista.length) return res.json({ resposta: '✅ Estoque OK! Nada para comprar urgente.' + nota });
-    return res.json({ resposta: `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}${nota}` });
+    let msg;
+    if (!lista.length && !comSubstituto.length) msg = '✅ Estoque OK! Nada para comprar urgente.' + nota;
+    else {
+      msg = lista.length ? `🛒 *LISTA DE COMPRAS (${lista.length} itens)*\n\n${lista.map(p=>`• ${p.nome}: tem ${p.qtd}, comprar ~${Math.max(0,Number(p.minimo)*2-Number(p.qtd)).toFixed(1)} ${p.unidade}`).join('\n')}` : '✅ Nada urgente sem alternativa.';
+      if (comSubstituto.length) {
+        msg += `\n\n🔄 *Baixos COM substituto em estoque* (escolha pelo preço):\n`;
+        msg += comSubstituto.map(p => `• ${p.nome}: tem ${p.qtd} — substituto: ${p.irmao.nome} (${p.irmao.qtd} ${p.irmao.unidade})`).join('\n');
+      }
+      msg += nota;
+    }
+    return res.json({ resposta: msg });
   }
 
   if (acao === 'fechamento') {
@@ -2309,16 +2421,26 @@ app.get('/api/webhook/relatorio-diario', async (req, res) => {
   if (criticos.length) { msg += `🟠 *CRÍTICOS (${criticos.length})*\n${criticos.slice(0,10).map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}\n\n`; }
   // Alerta estoque parado alto giro
   const CATS_GIRO_REL = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
-  const { data: prodGiro } = await supabase.from('produtos').select('id, nome, categoria').or('ativo.eq.1,ativo.is.null').in('categoria', CATS_GIRO_REL);
+  const { data: prodGiro } = await supabase.from('produtos').select('id, nome, categoria, grupo_troca').or('ativo.eq.1,ativo.is.null').in('categoria', CATS_GIRO_REL);
   if (prodGiro && prodGiro.length > 0) {
     const idsGiro = prodGiro.map(p => p.id);
     const { data: movsGiro } = await supabase.from('movimentacoes').select('produto_id, created_at').in('produto_id', idsGiro).order('created_at', { ascending: false });
     const lastMG = {};
     for (const m of (movsGiro || [])) { if (!lastMG[m.produto_id]) lastMG[m.produto_id] = m.created_at; }
+    // grupo de troca: irmão girando = grupo vivo (Alcatra parada com Coxão Mole em uso não alarma)
+    const lastGrupoRel = {};
+    for (const p of prodGiro) {
+      if (p.grupo_troca && lastMG[p.id]) {
+        const t = new Date(lastMG[p.id]).getTime();
+        if (!lastGrupoRel[p.grupo_troca] || t > lastGrupoRel[p.grupo_troca]) lastGrupoRel[p.grupo_troca] = t;
+      }
+    }
     const paradosRel = prodGiro.filter(p => {
+      const th = THRESHOLDS_ALERTA[p.categoria] || 10;
+      if (p.grupo_troca && lastGrupoRel[p.grupo_troca] && (Date.now() - lastGrupoRel[p.grupo_troca]) < th * 86400000) return false;
       const last = lastMG[p.id];
       if (!last) return true;
-      return Math.floor((Date.now() - new Date(last).getTime()) / 86400000) >= (THRESHOLDS_ALERTA[p.categoria] || 10);
+      return Math.floor((Date.now() - new Date(last).getTime()) / 86400000) >= th;
     });
     if (paradosRel.length > 0) {
       msg += `\n\n⚠️ *ALTO GIRO SEM MOVIMENTO (${paradosRel.length})*\n${paradosRel.slice(0,12).map(p => `• ${p.nome} (${p.categoria})`).join('\n')}${paradosRel.length > 12 ? `\n... +${paradosRel.length-12}` : ''}`;
