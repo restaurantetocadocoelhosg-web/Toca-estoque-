@@ -2088,35 +2088,37 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   let movQuery = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
   if (categoria) movQuery = movQuery.eq('categoria', categoria);
   const { data: allMovs } = await movQuery;
+  const { data: produtos } = await supabase.from('produtos').select('id, nome, qtd, minimo');
+  const prodPorId = {};
+  for (const p of (produtos || [])) prodPorId[p.id] = p;
+
+  // Agrupa por produto_id (estável a renomeações). Só cai no nome quando o id é null
+  // (movimentações muito antigas). Isso evita que renomear um produto divida o histórico
+  // e gere falso "sumiço".
   const groups = {};
   for (const m of (allMovs || [])) {
-    const key = m.produto_nome;
-    if (!groups[key]) groups[key] = { produto_nome: m.produto_nome, categoria: m.categoria, unidade: m.unidade, total_entrada: 0, total_saida: 0, total_perda: 0, total_ajuste_delta: 0, num_ajustes: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
+    const key = m.produto_id != null ? 'id:' + m.produto_id : 'nome:' + m.produto_nome;
+    const nomeExib = (m.produto_id != null && prodPorId[m.produto_id]) ? prodPorId[m.produto_id].nome : m.produto_nome;
+    if (!groups[key]) groups[key] = { produto_id: m.produto_id ?? null, produto_nome: nomeExib, categoria: m.categoria, unidade: m.unidade, total_entrada: 0, total_saida: 0, total_perda: 0, total_ajuste_delta: 0, num_ajustes: 0, valor_entrada: 0, valor_saida: 0, num_saidas: 0, num_entradas: 0 };
     const g = groups[key];
     if (m.tipo === 'Entrada') { g.total_entrada += Number(m.qtd); g.valor_entrada += Number(m.valor || 0); g.num_entradas++; }
     if (['Saída','Perda'].includes(m.tipo)) { g.total_saida += Number(m.qtd); g.valor_saida += Number(m.valor || 0); g.num_saidas++; }
     if (m.tipo === 'Perda') g.total_perda += Number(m.qtd);
     if (m.tipo === 'Ajuste') { g.total_ajuste_delta += (Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0)); g.num_ajustes++; }
   }
-  const { data: produtos } = await supabase.from('produtos').select('id, nome, qtd, minimo');
-  const estoqueMap = {}; const idPorNome = {};
-  for (const p of (produtos || [])) { estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) }; idPorNome[p.nome] = p.id; }
 
-  // ALERTA confiável = reconstrução cronológica do HISTÓRICO COMPLETO do produto
-  // (não só do período): Entrada soma, Saída/Perda subtrai, Ajuste DEFINE o saldo absoluto.
-  // Se o saldo calculado ficou negativo em algum momento, saiu mais do que tinha = saída
-  // sem lastro (a entrada não foi lançada). Isso não dá o falso positivo de "consumir
-  // estoque comprado antes do período", que era o que tornava a auditoria sem sentido.
-  const nomesPeriodo = Object.keys(groups);
+  // ALERTA confiável = reconstrução cronológica do HISTÓRICO COMPLETO por produto_id:
+  // Entrada soma, Saída/Perda subtrai, Ajuste DEFINE o saldo absoluto. Se o saldo ficou
+  // negativo em algum momento, saiu mais do que tinha = saída sem lastro (entrada não lançada).
+  const idsPeriodo = Object.values(groups).map(g => g.produto_id).filter(v => v != null);
   const piorSaldo = {};
-  if (nomesPeriodo.length) {
-    const idsPeriodo = nomesPeriodo.map(n => idPorNome[n]).filter(Boolean);
+  if (idsPeriodo.length) {
     const { data: hist } = await supabase.from('movimentacoes')
-      .select('produto_id, produto_nome, tipo, qtd').in('produto_id', idsPeriodo)
+      .select('produto_id, tipo, qtd').in('produto_id', idsPeriodo)
       .order('created_at', { ascending: true }).order('id', { ascending: true });
     const saldo = {};
     for (const m of (hist || [])) {
-      const k = m.produto_nome;
+      const k = m.produto_id;
       if (saldo[k] === undefined) saldo[k] = 0;
       if (m.tipo === 'Entrada') saldo[k] += Number(m.qtd);
       else if (m.tipo === 'Saída' || m.tipo === 'Perda') saldo[k] -= Number(m.qtd);
@@ -2126,9 +2128,9 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   }
 
   const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0 || g.num_ajustes > 0).map(r => {
-    const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
+    const qtdAtual = r.produto_id != null && prodPorId[r.produto_id] ? Number(prodPorId[r.produto_id].qtd) : null;
     const saldo = Number((r.total_entrada - r.total_saida + r.total_ajuste_delta).toFixed(3));
-    const pior = piorSaldo[r.produto_nome];
+    const pior = r.produto_id != null ? piorSaldo[r.produto_id] : undefined;
     const faltou = (pior !== undefined && pior < -0.01) ? Number((-pior).toFixed(3)) : 0;
     // "Consumiu até zerar e não repôs" — dica de reposição, não suspeita de sumiço.
     const zerouSemRepor = r.total_saida > 0 && r.total_entrada === 0 && (qtdAtual ?? 0) === 0;
