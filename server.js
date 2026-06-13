@@ -2098,20 +2098,46 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
     if (m.tipo === 'Perda') g.total_perda += Number(m.qtd);
     if (m.tipo === 'Ajuste') { g.total_ajuste_delta += (Number(m.qtd_depois || 0) - Number(m.qtd_antes || 0)); g.num_ajustes++; }
   }
-  const { data: produtos } = await supabase.from('produtos').select('nome, qtd, minimo');
-  const estoqueMap = {};
-  for (const p of (produtos || [])) estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) };
+  const { data: produtos } = await supabase.from('produtos').select('id, nome, qtd, minimo');
+  const estoqueMap = {}; const idPorNome = {};
+  for (const p of (produtos || [])) { estoqueMap[p.nome] = { qtd: Number(p.qtd), minimo: Number(p.minimo) }; idPorNome[p.nome] = p.id; }
+
+  // ALERTA confiável = reconstrução cronológica do HISTÓRICO COMPLETO do produto
+  // (não só do período): Entrada soma, Saída/Perda subtrai, Ajuste DEFINE o saldo absoluto.
+  // Se o saldo calculado ficou negativo em algum momento, saiu mais do que tinha = saída
+  // sem lastro (a entrada não foi lançada). Isso não dá o falso positivo de "consumir
+  // estoque comprado antes do período", que era o que tornava a auditoria sem sentido.
+  const nomesPeriodo = Object.keys(groups);
+  const piorSaldo = {};
+  if (nomesPeriodo.length) {
+    const idsPeriodo = nomesPeriodo.map(n => idPorNome[n]).filter(Boolean);
+    const { data: hist } = await supabase.from('movimentacoes')
+      .select('produto_id, produto_nome, tipo, qtd').in('produto_id', idsPeriodo)
+      .order('created_at', { ascending: true }).order('id', { ascending: true });
+    const saldo = {};
+    for (const m of (hist || [])) {
+      const k = m.produto_nome;
+      if (saldo[k] === undefined) saldo[k] = 0;
+      if (m.tipo === 'Entrada') saldo[k] += Number(m.qtd);
+      else if (m.tipo === 'Saída' || m.tipo === 'Perda') saldo[k] -= Number(m.qtd);
+      else if (m.tipo === 'Ajuste') saldo[k] = Number(m.qtd);
+      if (piorSaldo[k] === undefined || saldo[k] < piorSaldo[k]) piorSaldo[k] = saldo[k];
+    }
+  }
+
   const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0 || g.num_ajustes > 0).map(r => {
     const qtdAtual = estoqueMap[r.produto_nome]?.qtd ?? null;
-    // Saldo do PERÍODO = movimento líquido (entrada − saída ± ajustes). NÃO é o estoque
-    // absoluto — só bate com a qtd_atual se o período cobrir desde a última base do item.
     const saldo = Number((r.total_entrada - r.total_saida + r.total_ajuste_delta).toFixed(3));
+    const pior = piorSaldo[r.produto_nome];
+    const faltou = (pior !== undefined && pior < -0.01) ? Number((-pior).toFixed(3)) : 0;
+    // "Consumiu até zerar e não repôs" — dica de reposição, não suspeita de sumiço.
+    const zerouSemRepor = r.total_saida > 0 && r.total_entrada === 0 && (qtdAtual ?? 0) === 0;
     return { ...r, total_entrada: Number(r.total_entrada.toFixed(3)), total_saida: Number(r.total_saida.toFixed(3)),
       total_perda: Number(r.total_perda.toFixed(3)), total_ajuste_delta: Number(r.total_ajuste_delta.toFixed(3)),
       num_ajustes: r.num_ajustes, valor_entrada: Number(r.valor_entrada.toFixed(2)),
       valor_saida: Number(r.valor_saida.toFixed(2)), saldo, qtd_atual: qtdAtual,
-      alerta: r.total_saida > 0 && r.total_entrada > 0 && r.total_saida > r.total_entrada * 1.5,
-      sem_entrada: r.total_saida > 0 && r.total_entrada === 0 };
+      alerta: faltou > 0, faltou,
+      sem_entrada: zerouSemRepor };
   }).sort((a, b) => (a.categoria + a.produto_nome).localeCompare(b.categoria + b.produto_nome));
   const detalhesSaidas = (allMovs || []).filter(m => ['Saída','Perda'].includes(m.tipo))
     .map(m => ({ produto_nome: m.produto_nome, tipo: m.tipo, qtd: m.qtd, unidade: m.unidade, motivo: m.motivo, responsavel: m.responsavel, obs: m.obs, created_at: m.created_at }))
