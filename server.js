@@ -710,7 +710,17 @@ app.get('/api/movimentacoes', auth, async (req, res) => {
   const limit = Math.min(Math.max(parseInt(req.query?.limit || '200', 10), 1), 500);
   let query = supabase.from('movimentacoes').select('*');
   if (tipo) query = query.eq('tipo', tipo);
-  if (q) query = query.or(`produto_nome.ilike.%${q}%,motivo.ilike.%${q}%,obs.ilike.%${q}%,responsavel.ilike.%${q}%`);
+  if (q) {
+    // Busca acento-insensível: o termo é normalizado (filé→file) e o histórico já está
+    // sem acento; ainda acha por código/apelido (matcher) e por motivo/obs/responsável.
+    const qNorm = normalizeSearch(q);
+    const qSafe = q.replace(/[,()]/g, ' ').trim();
+    const { produtos: prov } = await buscarProdutos(q);
+    const ids = (prov || []).map(p => p.id).filter(Boolean);
+    const ors = [`produto_nome.ilike.%${qNorm}%`, `motivo.ilike.%${qSafe}%`, `obs.ilike.%${qSafe}%`, `responsavel.ilike.%${qSafe}%`];
+    if (ids.length) ors.push(`produto_id.in.(${ids.join(',')})`);
+    query = query.or(ors.join(','));
+  }
   const dataInicio = req.query?.data_inicio;
   const dataFim = req.query?.data_fim;
   if (dataInicio) query = query.gte('created_at', dataInicio + 'T00:00:00-03:00');
