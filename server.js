@@ -535,6 +535,45 @@ app.get('/api/produtos/:id/historico', auth, async (req, res) => {
   res.json({ produto: prod, movimentacoes: movs || [] });
 });
 
+// Resumo rico de um produto para a tela de detalhe (ao clicar na aba Produtos).
+app.get('/api/produtos/:id/resumo', auth, async (req, res) => {
+  const id = req.params.id;
+  const { data: p } = await supabase.from('produtos').select('*').eq('id', id).single();
+  if (!p) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  const desde30 = dateAgoDias(30);
+  const [ultEnt, ultSai, m30q, timeline] = await Promise.all([
+    supabase.from('movimentacoes').select('qtd, unidade, responsavel, created_at').eq('produto_id', id).eq('tipo', 'Entrada').order('created_at', { ascending: false }).limit(1),
+    supabase.from('movimentacoes').select('qtd, unidade, responsavel, created_at').eq('produto_id', id).in('tipo', ['Saída', 'Perda']).order('created_at', { ascending: false }).limit(1),
+    supabase.from('movimentacoes').select('tipo, qtd, valor').eq('produto_id', id).gte('created_at', desde30 + 'T00:00:00-03:00'),
+    supabase.from('movimentacoes').select('tipo, qtd, unidade, motivo, responsavel, obs, created_at').eq('produto_id', id).order('id', { ascending: false }).limit(15),
+  ]);
+  const m30 = m30q.data || [];
+  const agg = { entrada: 0, saida: 0, perda: 0, ajuste: 0, n_entrada: 0, n_saida: 0, n_perda: 0, n_ajuste: 0, valor_entrada: 0 };
+  for (const m of m30) {
+    if (m.tipo === 'Entrada') { agg.entrada += Number(m.qtd); agg.n_entrada++; agg.valor_entrada += Number(m.valor || 0); }
+    else if (m.tipo === 'Saída') { agg.saida += Number(m.qtd); agg.n_saida++; }
+    else if (m.tipo === 'Perda') { agg.perda += Number(m.qtd); agg.n_perda++; }
+    else if (m.tipo === 'Ajuste') { agg.ajuste += Number(m.qtd); agg.n_ajuste++; }
+  }
+  const consumo30 = agg.saida + agg.perda;
+  const mediaDiaria = consumo30 / 30;
+  const qtd = Number(p.qtd), minimo = Number(p.minimo);
+  const status = qtd === 0 ? 'ZERADO' : qtd <= minimo * 0.5 ? 'CRITICO' : qtd < minimo ? 'ATENCAO' : 'OK';
+  const cobertura = mediaDiaria > 0 ? Math.floor(qtd / mediaDiaria) : null; // dias que o estoque atual dura
+  res.json({
+    produto: { id: p.id, nome: p.nome, codigo: p.codigo || null, categoria: p.categoria, unidade: p.unidade,
+      qtd, minimo, custo: Number(p.custo || 0), grupo_troca: p.grupo_troca || null,
+      valor_em_estoque: Number((qtd * Number(p.custo || 0)).toFixed(2)), status, ativo: p.ativo },
+    ultima_entrada: (ultEnt.data && ultEnt.data[0]) || null,
+    ultima_saida: (ultSai.data && ultSai.data[0]) || null,
+    resumo30: { ...agg, entrada: Number(agg.entrada.toFixed(3)), saida: Number(agg.saida.toFixed(3)),
+      perda: Number(agg.perda.toFixed(3)), consumo: Number(consumo30.toFixed(3)),
+      media_diaria: Number(mediaDiaria.toFixed(2)), valor_entrada: Number(agg.valor_entrada.toFixed(2)) },
+    cobertura_dias: cobertura,
+    timeline: timeline.data || [],
+  });
+});
+
 // ==================== ROTAS MOVIMENTAÇÕES ====================
 app.post('/api/movimentacoes', auth, async (req, res) => {
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);

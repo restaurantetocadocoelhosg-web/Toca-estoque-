@@ -1765,12 +1765,118 @@ async function loadEstoque() {
     if (!items.length) { el.innerHTML='<div class="empty"><div class="empty-icon">📦</div><div class="empty-text">Nenhum produto encontrado.</div></div>'; return; }
     el.innerHTML = items.map(p => {
       const st = p.qtd===0?'zerado':p.qtd<=p.minimo*0.5?'critico':p.qtd<p.minimo?'atencao':'ok';
-      return `<div class="prod-row" onclick='quickLanc(${JSON.stringify(JSON.stringify(p))})'>
+      return `<div class="prod-row" onclick='abrirDetalheProduto(${JSON.stringify(JSON.stringify(p))})'>
         <div class="prod-row-left"><div class="prod-row-nome">${escapeHtml(p.nome)}</div><div class="prod-row-cat">${p.codigo ? '<b style="color:var(--accent)">'+escapeHtml(p.codigo)+'</b> · ' : ''}${escapeHtml(p.categoria)} · mín ${fmt(p.minimo)}</div></div>
         <div class="prod-row-right"><div class="prod-row-qtd ${st}">${fmt(p.qtd)}</div><div class="prod-row-unid">${escapeHtml(p.unidade)}</div></div>
       </div>`;
     }).join('');
   } catch(e) { handleApiError(e,false); }
+}
+
+function fmtDataHora(s) {
+  if (!s) return '—';
+  const d = new Date(String(s).trim().replace(' ', 'T'));
+  if (isNaN(d.getTime())) return String(s);
+  return new Intl.DateTimeFormat('pt-BR', { timeZone: 'America/Sao_Paulo', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }).format(d);
+}
+function diasAtras(s) {
+  if (!s) return null;
+  const d = new Date(String(s).trim().replace(' ', 'T'));
+  if (isNaN(d.getTime())) return null;
+  return Math.floor((Date.now() - d.getTime()) / 86400000);
+}
+
+async function abrirDetalheProduto(jsonStr) {
+  const pBasico = JSON.parse(jsonStr);
+  const old = document.getElementById('det-modal-overlay');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'det-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:18px;overflow-y:auto';
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  overlay.innerHTML = `<div style="background:var(--s1);border-radius:18px;max-width:460px;width:100%;margin:auto;border:1px solid var(--border)"><div style="padding:40px;text-align:center;color:var(--muted)">⏳ Carregando...</div></div>`;
+  document.body.appendChild(overlay);
+  try {
+    const d = await api(`/api/produtos/${pBasico.id}/resumo`);
+    const p = d.produto;
+    const STC = { ZERADO:'var(--red)', CRITICO:'#e85d26', ATENCAO:'var(--yellow)', OK:'var(--green)' };
+    const STL = { ZERADO:'🔴 Zerado', CRITICO:'🟠 Crítico', ATENCAO:'🟡 Atenção', OK:'🟢 OK' };
+    const cor = STC[p.status] || 'var(--muted)';
+    const tCor = { Entrada:'var(--green)', 'Saída':'#e85d26', Perda:'var(--red)', Ajuste:'#3b82f6' };
+    const tSinal = { Entrada:'+', 'Saída':'−', Perda:'−', Ajuste:'=' };
+    const ue = d.ultima_entrada, us = d.ultima_saida, r = d.resumo30;
+    const card = (titulo, mov) => {
+      if (!mov) return `<div style="flex:1;background:var(--s2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:12px;padding:11px"><div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.4px">${titulo}</div><div style="font-size:13px;color:var(--muted);margin-top:6px">Nunca</div></div>`;
+      const da = diasAtras(mov.created_at);
+      const quando = da === 0 ? 'hoje' : da === 1 ? 'ontem' : `há ${da} dias`;
+      return `<div style="flex:1;background:var(--s2,rgba(255,255,255,0.03));border:1px solid var(--border);border-radius:12px;padding:11px">
+        <div style="font-size:10px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.4px">${titulo}</div>
+        <div style="font-size:17px;font-weight:800;margin-top:4px">${fmt(mov.qtd)} <span style="font-size:11px;color:var(--muted)">${escapeHtml(mov.unidade||p.unidade)}</span></div>
+        <div style="font-size:11px;color:var(--text);margin-top:2px">${fmtDataHora(mov.created_at)} <span style="color:var(--muted)">(${quando})</span></div>
+        <div style="font-size:11px;color:var(--muted)">por ${escapeHtml(mov.responsavel||'?')}</div>
+      </div>`;
+    };
+    const linhaResumo = (lbl, val, sub) => `<div style="display:flex;justify-content:space-between;align-items:baseline;padding:7px 0;border-bottom:1px solid var(--border)"><span style="font-size:13px;color:var(--muted)">${lbl}</span><span style="font-size:14px;font-weight:700">${val}${sub?` <span style="font-size:11px;color:var(--muted);font-weight:400">${sub}</span>`:''}</span></div>`;
+    const cobertura = d.cobertura_dias === null ? '—' : d.cobertura_dias >= 999 ? '+999 dias' : `~${d.cobertura_dias} dias`;
+    const timeline = (d.timeline || []).map(m => `
+      <div style="display:flex;align-items:center;gap:9px;padding:8px 0;border-bottom:1px solid var(--border)">
+        <span style="width:22px;height:22px;flex:none;border-radius:7px;background:${tCor[m.tipo]||'#888'}22;color:${tCor[m.tipo]||'#888'};font-weight:800;font-size:13px;display:flex;align-items:center;justify-content:center">${tSinal[m.tipo]||'•'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;font-weight:600">${m.tipo} <span style="color:${tCor[m.tipo]||'#888'}">${fmt(m.qtd)} ${escapeHtml(m.unidade||'')}</span></div>
+          <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${fmtDataHora(m.created_at)} · ${escapeHtml(m.responsavel||'?')}${m.motivo?' · '+escapeHtml(m.motivo):''}</div>
+        </div>
+      </div>`).join('') || '<div style="color:var(--muted);font-size:13px;padding:10px 0">Sem movimentações.</div>';
+    const podeLancar = permissions.pode_lancar !== false;
+    overlay.querySelector('div').outerHTML = `
+      <div style="background:var(--s1);border-radius:18px;max-width:460px;width:100%;margin:auto;border:1px solid var(--border)">
+        <div style="padding:18px 18px 0;display:flex;justify-content:space-between;align-items:flex-start;gap:10px">
+          <div style="min-width:0">
+            <div style="font-size:18px;font-weight:800;line-height:1.2">${escapeHtml(p.nome)}</div>
+            <div style="font-size:12px;color:var(--muted);margin-top:3px">${p.codigo?'<b style="color:var(--accent)">'+escapeHtml(p.codigo)+'</b> · ':''}${escapeHtml(p.categoria)}${p.grupo_troca?' · 🔄 '+escapeHtml(p.grupo_troca):''}</div>
+          </div>
+          <button onclick="document.getElementById('det-modal-overlay').remove()" style="flex:none;background:none;border:none;color:var(--muted);font-size:24px;cursor:pointer;line-height:1">×</button>
+        </div>
+        <div style="padding:14px 18px">
+          <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:4px">
+            <span style="font-size:34px;font-weight:800;color:${cor}">${fmt(p.qtd)}</span>
+            <span style="font-size:14px;color:var(--muted)">${escapeHtml(p.unidade)}</span>
+            <span style="margin-left:auto;font-size:12px;font-weight:700;color:${cor}">${STL[p.status]||p.status}</span>
+          </div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:14px">mínimo ${fmt(p.minimo)} ${escapeHtml(p.unidade)} · custo R$ ${p.custo.toFixed(2)} · em estoque R$ ${p.valor_em_estoque.toFixed(2)}</div>
+
+          <div style="display:flex;gap:9px;margin-bottom:14px">
+            ${card('📥 Última entrada', ue)}
+            ${card('📤 Última saída', us)}
+          </div>
+
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.4px;margin-bottom:2px">Últimos 30 dias</div>
+          ${linhaResumo('📥 Entradas', `${fmt(r.entrada)} ${escapeHtml(p.unidade)}`, `em ${r.n_entrada}x`)}
+          ${linhaResumo('📤 Saídas', `${fmt(r.saida)} ${escapeHtml(p.unidade)}`, `em ${r.n_saida}x`)}
+          ${r.perda>0?linhaResumo('🗑️ Perdas', `${fmt(r.perda)} ${escapeHtml(p.unidade)}`, `em ${r.n_perda}x`):''}
+          ${r.n_ajuste>0?linhaResumo('⚙️ Ajustes', `${r.n_ajuste}x`, 'contagens'):''}
+          ${linhaResumo('📊 Consumo médio', `${fmt(r.media_diaria)} ${escapeHtml(p.unidade)}/dia`)}
+          ${linhaResumo('⏳ Estoque dura', cobertura)}
+
+          <div style="font-size:11px;color:var(--muted);text-transform:uppercase;font-weight:700;letter-spacing:.4px;margin:16px 0 2px">Movimentações recentes</div>
+          ${timeline}
+        </div>
+        <div style="padding:0 18px 18px;display:flex;gap:9px">
+          ${podeLancar?`<button onclick="lancarDoDetalhe(${p.id})" style="flex:1;padding:13px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:var(--font)">📝 Lançar</button>`:''}
+          <button onclick="document.getElementById('det-modal-overlay').remove()" style="flex:none;padding:13px 18px;background:var(--s2,rgba(255,255,255,0.06));color:var(--text);border:1px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font)">Fechar</button>
+        </div>
+      </div>`;
+    overlay._produto = p;
+  } catch(e) {
+    overlay.remove();
+    handleApiError(e);
+  }
+}
+
+function lancarDoDetalhe(id) {
+  const ov = document.getElementById('det-modal-overlay');
+  const p = ov && ov._produto;
+  if (ov) ov.remove();
+  if (p) quickLanc(JSON.stringify(p));
 }
 
 function quickLanc(jsonStr) {
