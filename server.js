@@ -2377,16 +2377,19 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     }
     const porResp = {};
     let totEnt = 0, totSai = 0, totPerda = 0, totAjuste = 0, valor = 0, anomalias = 0;
+    let valorEnt = 0, valorSai = 0, valorPerda = 0, valorAjuste = 0;
     for (const m of lista) {
       const r = m.responsavel || 'Não identificado';
       if (!porResp[r]) porResp[r] = { ent: 0, sai: 0, perda: 0, ajuste: 0 };
-      if (m.tipo === 'Entrada') { porResp[r].ent++; totEnt++; }
-      else if (m.tipo === 'Saída') { porResp[r].sai++; totSai++; }
-      else if (m.tipo === 'Perda') { porResp[r].perda++; totPerda++; }
-      else if (m.tipo === 'Ajuste') { porResp[r].ajuste++; totAjuste++; }
-      valor += Number(m.valor) || 0;
+      const v = Number(m.valor) || 0;
+      if (m.tipo === 'Entrada') { porResp[r].ent++; totEnt++; valorEnt += v; }
+      else if (m.tipo === 'Saída') { porResp[r].sai++; totSai++; valorSai += v; }
+      else if (m.tipo === 'Perda') { porResp[r].perda++; totPerda++; valorPerda += v; }
+      else if (m.tipo === 'Ajuste') { porResp[r].ajuste++; totAjuste++; valorAjuste += v; }
+      valor += v;
       if (m.obs && /anomalia/i.test(m.obs)) anomalias++;
     }
+    const saldo = valorEnt - valorSai - valorPerda;
     const linhasResp = Object.entries(porResp)
       .sort((a, b) => (b[1].ent+b[1].sai+b[1].perda+b[1].ajuste) - (a[1].ent+a[1].sai+a[1].perda+a[1].ajuste))
       .map(([r, d]) => {
@@ -2402,11 +2405,16 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     msg += `📥 Entradas: ${totEnt} | 📤 Saídas: ${totSai}`;
     if (totPerda) msg += ` | 🗑️ Perdas: ${totPerda}`;
     if (totAjuste) msg += ` | ⚙️ Ajustes: ${totAjuste}`;
-    msg += `\n💰 Valor movimentado: R$ ${valor.toFixed(2)}\n\n`;
+    msg += `\n\n💰 *Valores do dia:*\n`;
+    msg += `📥 Entradas: R$ ${valorEnt.toFixed(2)}\n`;
+    msg += `📤 Saídas:   R$ ${valorSai.toFixed(2)}\n`;
+    if (valorPerda) msg += `🗑️ Perdas:   R$ ${valorPerda.toFixed(2)}\n`;
+    if (valorAjuste) msg += `⚙️ Ajustes:  R$ ${valorAjuste.toFixed(2)}\n`;
+    msg += `📊 Saldo:    R$ ${saldo.toFixed(2)}\n\n`;
     msg += `👤 *Quem lançou hoje:*\n${linhasResp}`;
     if (anomalias > 0) msg += `\n\n⚠️ ${anomalias} lançamento(s) com quantidade anômala — revise no app.`;
     if (totPerda > 0) msg += `\n🗑️ ${totPerda} perda(s) registrada(s) hoje — confira os motivos.`;
-    return res.json({ resposta: msg, total: lista.length, entradas: totEnt, saidas: totSai, perdas: totPerda, ajustes: totAjuste, valor: Number(valor.toFixed(2)), por_responsavel: porResp, anomalias });
+    return res.json({ resposta: msg, total: lista.length, entradas: totEnt, saidas: totSai, perdas: totPerda, ajustes: totAjuste, valor: Number(valor.toFixed(2)), valor_entradas: Number(valorEnt.toFixed(2)), valor_saidas: Number(valorSai.toFixed(2)), valor_perdas: Number(valorPerda.toFixed(2)), valor_ajustes: Number(valorAjuste.toFixed(2)), saldo: Number(saldo.toFixed(2)), por_responsavel: porResp, anomalias });
   }
 
   if (acao === 'conferencia') {
@@ -2617,3 +2625,4 @@ seed().then(async () => {
     console.log(`⏰ Backup automático configurado para ${process.env.HORA_BACKUP || '18:00'}`);
   });
 }).catch(err => { console.error('❌ Erro ao inicializar:', err.message); process.exit(1); });
+
