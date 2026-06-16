@@ -21,6 +21,17 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 }
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// Cabeçalhos de segurança básicos (sem dependência externa). Não inclui CSP
+// rígido para não quebrar o frontend com scripts inline já existentes.
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'SAMEORIGIN');
+  res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.set('X-XSS-Protection', '0');
+  res.set('Permissions-Policy', 'geolocation=(), microphone=(), camera=(self)');
+  next();
+});
+
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || true }));
 app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -66,8 +77,13 @@ function hashPassword(password) {
 function verifyPassword(password, stored) {
   if (!stored || !stored.includes(':')) return false;
   const [salt, original] = stored.split(':');
+  if (!salt || !original) return false;
   const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-  return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), Buffer.from(original, 'hex'));
+  const a = Buffer.from(hash, 'hex');
+  const b = Buffer.from(original, 'hex');
+  // timingSafeEqual lança se os buffers tiverem tamanhos diferentes (hash corrompido).
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
 }
 
 function sanitizeText(value, max = 120) {
@@ -575,7 +591,7 @@ app.get('/api/produtos/:id/resumo', auth, async (req, res) => {
 });
 
 // ==================== ROTAS MOVIMENTAÇÕES ====================
-app.post('/api/movimentacoes', auth, async (req, res) => {
+app.post('/api/movimentacoes', auth, requirePerm('lancar'), async (req, res) => {
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   const tipo = sanitizeText(req.body?.tipo, 20);
   const motivo = sanitizeText(req.body?.motivo, 80);
@@ -2256,6 +2272,10 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
 
 // ==================== WEBHOOK WHATSAPP ====================
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'toca-webhook-2026';
+if (!process.env.WEBHOOK_SECRET) {
+  console.warn('⚠️  WEBHOOK_SECRET não definido — usando valor padrão público. '
+    + 'Defina a variável de ambiente WEBHOOK_SECRET para proteger as movimentações via WhatsApp/webhook.');
+}
 
 app.post('/api/webhook/whatsapp', async (req, res) => {
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
@@ -2325,7 +2345,8 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
     const { error: movErr } = await supabase.from('movimentacoes').insert({
       produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
       custo: prod.custo, valor: Number((Number(prod.custo)*qtd).toFixed(2)),
-      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
+      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp',
+      qtd_antes: qtdAntesW, qtd_depois: novaQtd, created_at: nowSP(),
     });
     if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, remetente }, null, '');
@@ -2615,7 +2636,38 @@ app.get('/api/webhook/relatorio-diario', async (req, res) => {
   res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
 
+// Verificação de saúde do sistema (uso em monitoramento/uptime e deploy).
+app.get('/api/health', async (req, res) => {
+  try {
+    const { error } = await supabase.from('produtos').select('id', { count: 'exact', head: true });
+    if (error) return res.status(503).json({ ok: false, db: 'erro', ts: nowSP() });
+    res.json({ ok: true, db: 'ok', sessions: useSupabaseSessions ? 'supabase' : 'memoria', ts: nowSP() });
+  } catch (e) {
+    res.status(503).json({ ok: false, db: 'indisponivel', ts: nowSP() });
+  }
+});
+
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
+
+// Tratador central de erros: captura JSON malformado, payload acima do limite e
+// qualquer next(err). Esconde stack trace do usuário final e registra no servidor.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('❌ Erro não tratado:', err && err.message ? err.message : err);
+  if (err && err.type === 'entity.too.large')
+    return res.status(413).json({ erro: 'Arquivo/dados muito grandes. Reduza o tamanho e tente novamente.' });
+  if (err && (err.type === 'entity.parse.failed' || err instanceof SyntaxError))
+    return res.status(400).json({ erro: 'Requisição inválida (JSON malformado).' });
+  res.status(500).json({ erro: 'Ocorreu um erro interno. Tente novamente.' });
+});
+
+// Evita derrubar o processo por erros assíncronos não capturados.
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️  unhandledRejection:', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️  uncaughtException:', err && err.message ? err.message : err);
+});
 
 // ==================== START ====================
 seed().then(async () => {
