@@ -609,7 +609,7 @@ select.big-input { font-size: 14px; }
       <div class="row2">
         <div class="field-group" style="margin:0">
           <div class="field-label">Quantidade</div>
-          <input class="qtd-input" id="f-qtd" type="number" placeholder="0" step="0.001" min="0" inputmode="decimal">
+          <input class="qtd-input" id="f-qtd" type="text" placeholder="0" inputmode="decimal" autocomplete="off">
         </div>
         <div class="field-group" style="margin:0">
           <div class="field-label">Motivo</div>
@@ -986,7 +986,7 @@ select.big-input { font-size: 14px; }
           <option value="PCT">PCT — Pacote</option>
           <option value="FD">FD — Fardo</option>
         </select>
-        <input class="small-input" id="modal-minimo" type="number" placeholder="Estoque mínimo (ex: 1)" min="0" step="0.1">
+        <input class="small-input" id="modal-minimo" type="text" placeholder="Estoque mínimo (ex: 1)" inputmode="decimal" autocomplete="off">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
           <input type="checkbox" id="modal-sin" checked> Memorizar sinônimo automaticamente
         </label>
@@ -1036,11 +1036,11 @@ select.big-input { font-size: 14px; }
       <div class="pedit-row2" style="margin-top:10px">
         <div>
           <div class="field-label-sm">Estoque mínimo</div>
-          <input class="small-input" id="pedit-minimo" type="number" min="0" step="0.1" placeholder="1">
+          <input class="small-input" id="pedit-minimo" type="text" inputmode="decimal" placeholder="1" autocomplete="off">
         </div>
         <div>
           <div class="field-label-sm">Custo unitário (R$)</div>
-          <input class="small-input" id="pedit-custo" type="number" min="0" step="0.01" placeholder="0.00">
+          <input class="small-input" id="pedit-custo" type="text" inputmode="decimal" placeholder="0,00" autocomplete="off">
         </div>
       </div>
       <button class="btn-export btn-primary" style="width:100%;padding:14px;margin-top:16px" onclick="salvarProduto()">💾 Salvar alterações</button>
@@ -1053,7 +1053,7 @@ select.big-input { font-size: 14px; }
       </div>
       <div class="field-label-sm">Quantidade atual no estoque</div>
       <div style="display:flex;align-items:center;gap:10px">
-        <input class="qtd-input" id="pedit-ajuste-qtd" type="number" min="0" step="0.001" placeholder="0" style="flex:1" oninput="peditAjustePreview()">
+        <input class="qtd-input" id="pedit-ajuste-qtd" type="text" inputmode="decimal" placeholder="0" autocomplete="off" style="flex:1" oninput="peditAjustePreview()">
         <span id="pedit-ajuste-unid" style="font-size:16px;font-weight:700;color:var(--muted)">UN</span>
       </div>
       <div id="pedit-ajuste-preview" style="font-size:13px;color:var(--muted);margin:12px 0;min-height:20px"></div>
@@ -1553,7 +1553,7 @@ function renderCupomItens() {
           ${semCandidato
             ? `<span style="font-size:12px;color:var(--muted);flex:1">Nenhum candidato encontrado</span>`
             : `<select class="ci-select" onchange="trocarProduto(${idx}, this.value)">${opcoes}</select>`}
-          <input class="ci-qtd" type="number" value="${item.qtd}" min="0.001" step="0.001" onchange="trocarQtd(${idx}, this.value)">
+          <input class="ci-qtd" type="text" inputmode="decimal" value="${item.qtd}" onchange="trocarQtd(${idx}, this.value)">
           <button class="ci-ignore${ignorado?' active':''}" onclick="toggleIgnorar(${idx})">Ignorar</button>
         </div>
         ${item.via_sinonimo ? `<div style="font-size:11px;color:var(--green);margin-top:4px">✓ Reconhecido por sinônimo salvo</div>`
@@ -1584,7 +1584,7 @@ function trocarProduto(idx, nomeProd) {
 }
 
 function trocarQtd(idx, val) {
-  cupomItens[idx].qtd = parseFloat(val) || 1;
+  cupomItens[idx].qtd = parseNumBR(val) || 1;
 }
 
 function toggleIgnorar(idx) {
@@ -1687,12 +1687,12 @@ function closeAc() { document.getElementById('ac-list').classList.remove('open')
 
 async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
-  const qtd = parseFloat(document.getElementById('f-qtd').value);
+  const qtd = parseNumBR(document.getElementById('f-qtd').value);
   if ((!qtd&&qtd!==0)||qtd<0||(tipoAtual!=='Ajuste'&&qtd<=0)) {
     toast(tipoAtual==='Ajuste'?'Informe um ajuste válido':'Informe uma quantidade maior que zero','err'); return;
   }
   // Validação prévia de estoque insuficiente no frontend
-  if ((tipoAtual === 'Saída' || tipoAtual === 'Perda') && qtd > prodAtual.qtd) {
+  if ((tipoAtual === 'Saída' || tipoAtual === 'Perda') && qtd > Number(prodAtual.qtd) + 1e-3) {
     erroModal(
       'Estoque Insuficiente',
       `Você tentou lançar <b>${fmt(qtd)} ${prodAtual.unidade}</b> de saída de <b>${prodAtual.nome}</b>, mas o estoque atual é de apenas <b>${fmt(prodAtual.qtd)} ${prodAtual.unidade}</b>.<br><br>Corrija a quantidade ou faça primeiro um lançamento de entrada.`
@@ -2037,6 +2037,17 @@ function authHeaders() { return authToken ? {'Authorization':`Bearer ${authToken
 function fmt(n) {
   if (n===null||n===undefined) return '0';
   const num=Number(n); return num%1===0?String(num):num.toFixed(3).replace(/\.?0+$/,'');
+}
+
+// Lê número digitado aceitando vírgula decimal (pt-BR): "14,5" -> 14.5.
+// Quando há vírgula, pontos são separador de milhar ("1.250,5" -> 1250.5).
+function parseNumBR(v) {
+  if (typeof v === 'number') return v;
+  if (v === null || v === undefined) return NaN;
+  let s = String(v).trim();
+  if (s === '') return NaN;
+  if (s.indexOf(',') > -1) s = s.replace(/\./g, '').replace(',', '.');
+  return parseFloat(s);
 }
 
 function fmtMoneyCompact(n) {
@@ -2626,7 +2637,7 @@ async function confirmarCadastro() {
   const nome = document.getElementById('modal-nome').value.trim();
   const categoria = document.getElementById('modal-cat').value.trim();
   const unidade = document.getElementById('modal-unidade').value;
-  const minimo = parseFloat(document.getElementById('modal-minimo').value) || 1;
+  const minimo = parseNumBR(document.getElementById('modal-minimo').value) || 1;
   if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
   try {
     const result = await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo: 0, qtd: 0 });
@@ -2754,8 +2765,8 @@ async function salvarProduto() {
   const nome     = document.getElementById('pedit-nome').value.trim();
   const categoria= document.getElementById('pedit-cat').value.trim();
   const unidade  = document.getElementById('pedit-unidade').value;
-  const minimo   = parseFloat(document.getElementById('pedit-minimo').value) || 0;
-  const custo    = parseFloat(document.getElementById('pedit-custo').value) || 0;
+  const minimo   = parseNumBR(document.getElementById('pedit-minimo').value) || 0;
+  const custo    = parseNumBR(document.getElementById('pedit-custo').value) || 0;
   if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
   try {
     if (prodEditAtual) {
@@ -2793,7 +2804,7 @@ async function arquivarProduto() {
 
 function peditAjustePreview() {
   if (!prodEditAtual) return;
-  const nova = parseFloat(document.getElementById('pedit-ajuste-qtd').value);
+  const nova = parseNumBR(document.getElementById('pedit-ajuste-qtd').value);
   if (isNaN(nova)) { document.getElementById('pedit-ajuste-preview').textContent = ''; return; }
   const diff = nova - prodEditAtual.qtd;
   const sinal = diff >= 0 ? '+' : '';
@@ -2803,7 +2814,7 @@ function peditAjustePreview() {
 
 async function ajusteRapido() {
   if (!prodEditAtual) return;
-  const nova = parseFloat(document.getElementById('pedit-ajuste-qtd').value);
+  const nova = parseNumBR(document.getElementById('pedit-ajuste-qtd').value);
   if (isNaN(nova) || nova < 0) { toast('Informe uma quantidade válida', 'err'); return; }
   try {
     await apiPost('/api/movimentacoes', {
@@ -3117,7 +3128,7 @@ async function renderInventario() {
             '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
             '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + badge + '</div>' +
           '</div>' +
-          '<input type="number" step="0.001" min="0" inputmode="decimal" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
+          '<input type="text" inputmode="decimal" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
             'style="width:84px;padding:8px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);text-align:right;font-size:14px">' +
           '<span style="font-size:11px;color:var(--muted);width:24px">' + it.unidade + '</span>' +
         '</div>';
@@ -3156,7 +3167,7 @@ function coletarContagem() {
   const itens = [];
   document.querySelectorAll('.inv-input').forEach(inp => {
     const v = inp.value.trim();
-    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : Number(v) });
+    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : parseNumBR(v) });
   });
   return itens;
 }

@@ -74,14 +74,27 @@ function sanitizeText(value, max = 120) {
   return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
+// Aceita número no formato brasileiro: a vírgula é o separador decimal
+// ("14,5" -> 14.5). Quando há vírgula, pontos são tratados como separador de
+// milhar ("1.250,5" -> 1250.5). Sem vírgula, mantém o comportamento de Number.
+function toNumberBR(value) {
+  if (typeof value === 'string') {
+    let s = value.trim();
+    if (s === '') return NaN;
+    if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+    return Number(s);
+  }
+  return Number(value);
+}
+
 function parsePositiveNumber(value) {
-  const n = Number(value);
+  const n = toNumberBR(value);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n;
 }
 
 function parseNonNegativeNumber(value) {
-  const n = Number(value);
+  const n = toNumberBR(value);
   if (!Number.isFinite(n) || n < 0) return null;
   return n;
 }
@@ -651,8 +664,10 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     qtdAntes = Number(prodAtual.qtd);
     if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
     else if (tipo === 'Saída' || tipo === 'Perda') {
-      if (qtd > qtdAntes) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}.` });
-      novaQtd = Number((qtdAntes - qtd).toFixed(3));
+      // Tolerância de 1 grama (1e-3) para não barrar a saída do total exibido por
+      // resíduo de ponto flutuante (ex.: estoque mostra 14,5 mas guarda 14,4999…).
+      if (qtd > qtdAntes + 1e-3) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${Number(qtdAntes).toFixed(3)} ${prodAtual.unidade}.` });
+      novaQtd = Math.max(0, Number((qtdAntes - qtd).toFixed(3)));
     } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
     custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
     const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
