@@ -71,7 +71,7 @@ function verifyPassword(password, stored) {
 }
 
 function sanitizeText(value, max = 120) {
-  return String(value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+  return String(value ?? '').normalize('NFC').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 
 function parsePositiveNumber(value) {
@@ -576,18 +576,19 @@ app.get('/api/produtos/:id/resumo', auth, async (req, res) => {
 
 // ==================== ROTAS MOVIMENTAÇÕES ====================
 app.post('/api/movimentacoes', auth, async (req, res) => {
+  const produto_id = Number(req.body?.produto_id || 0);
   const produto_nome = sanitizeText(req.body?.produto_nome, 120);
   const tipo = sanitizeText(req.body?.tipo, 20);
   const motivo = sanitizeText(req.body?.motivo, 80);
   let obs = sanitizeText(req.body?.obs, 200);
   const qtdInput = req.body?.qtd;
 
-  if (!produto_nome || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
+  if ((!produto_id && !produto_nome) || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
 
-  const { prod, opcoes } = await acharProdutoUnico(produto_nome);
+  const { prod, opcoes } = await acharProdutoPorIdOuNome(produto_id, produto_nome);
   if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
-  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado. Pesquise e selecione o item novamente na lista.' });
 
   let qtd = tipo === 'Ajuste' ? parseNonNegativeNumber(qtdInput) : parsePositiveNumber(qtdInput);
   if (qtd === null)
@@ -1334,6 +1335,15 @@ async function acharProdutoUnico(termo) {
   if (!alvo) return { opcoes: produtos };
   const { data } = await supabase.from('produtos').select('*').eq('id', alvo.id).single();
   return data ? { prod: data } : {};
+}
+
+async function acharProdutoPorIdOuNome(produtoId, produtoNome) {
+  const id = Number(produtoId || 0);
+  if (Number.isFinite(id) && id > 0) {
+    const { data } = await supabase.from('produtos').select('*').eq('id', id).single();
+    if (data) return { prod: data };
+  }
+  return acharProdutoUnico(produtoNome);
 }
 
 async function executarFerramenta(nome, input, user) {

@@ -1607,6 +1607,7 @@ async function lancarLote() {
   for (const item of ativos) {
     try {
       await apiPost('/api/movimentacoes', {
+        produto_id: item.produto.id,
         produto_nome: item.produto.nome,
         tipo: 'Entrada',
         qtd: item.qtd,
@@ -1703,6 +1704,7 @@ async function lancar(forcar = false) {
   btn.disabled = true; btn.textContent = '⏳ Salvando...';
   try {
     const resultado = await apiPost('/api/movimentacoes', {
+      produto_id: prodAtual.id,
       produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: prodAtual.custo,
       motivo: document.getElementById('f-motivo').value, obs: '', forcar
     });
@@ -2807,6 +2809,7 @@ async function ajusteRapido() {
   if (isNaN(nova) || nova < 0) { toast('Informe uma quantidade válida', 'err'); return; }
   try {
     await apiPost('/api/movimentacoes', {
+      produto_id: prodEditAtual.id,
       produto_nome: prodEditAtual.nome, tipo: 'Ajuste', qtd: nova,
       motivo: 'Inventário', obs: 'Ajuste rápido via Gestão de Produtos'
     });
