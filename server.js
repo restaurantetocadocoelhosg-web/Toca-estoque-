@@ -268,14 +268,23 @@ function requirePerm(key) {
 }
 
 // ==================== SEED ====================
+// Segurança: SEM senhas default no código (as antigas ficaram no histórico do git).
+// Se a env não existir no primeiro boot, gera senha aleatória e imprime UMA vez no log
+// do Railway para o responsável anotar e trocar.
+function seedPass(envVal, username) {
+  if (envVal) return envVal;
+  const gerada = require('crypto').randomBytes(9).toString('base64url');
+  console.log(`🔑 Senha gerada para "${username}" (anote e troque no primeiro login): ${gerada}`);
+  return gerada;
+}
 async function seed() {
   const { count } = await supabase.from('users').select('id', { count: 'exact', head: true });
   if (count === 0) {
     const seedUsers = [
-      { username: 'admin', nome: 'Administrador', role: 'admin', password_hash: hashPassword(process.env.ADMIN_PASSWORD || 'Toca123!'), active: 1 },
-      { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password_hash: hashPassword(process.env.SEED_PASSWORD_NAYARA || 'Nayara@2026Tc'), active: 1 },
-      { username: 'simone.gerente', nome: 'Simone', role: 'gerente', password_hash: hashPassword(process.env.SEED_PASSWORD_SIMONE || 'Simone@2026Tc'), active: 1 },
-      { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password_hash: hashPassword(process.env.SEED_PASSWORD_ESTOQUE || 'Estoque@2026Tc'), active: 1 },
+      { username: 'admin', nome: 'Administrador', role: 'admin', password_hash: hashPassword(seedPass(process.env.ADMIN_PASSWORD, 'admin')), active: 1 },
+      { username: 'nayara.admin', nome: 'Nayara', role: 'admin', password_hash: hashPassword(seedPass(process.env.SEED_PASSWORD_NAYARA, 'nayara.admin')), active: 1 },
+      { username: 'simone.gerente', nome: 'Simone', role: 'gerente', password_hash: hashPassword(seedPass(process.env.SEED_PASSWORD_SIMONE, 'simone.gerente')), active: 1 },
+      { username: 'estoque.operacao', nome: 'Estoque', role: 'operador', password_hash: hashPassword(seedPass(process.env.SEED_PASSWORD_ESTOQUE, 'estoque.operacao')), active: 1 },
     ];
     await supabase.from('users').insert(seedUsers);
     console.log('🔐 Usuários iniciais criados');
@@ -307,6 +316,21 @@ const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, max: 20,
   standardHeaders: true, legacyHeaders: false,
   message: { erro: 'Muitas tentativas de login. Aguarde 15 minutos.' },
+});
+
+// Chat IA: cada pergunta pode gerar até 12 chamadas à API Anthropic — limita custo por usuário.
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 10,
+  standardHeaders: true, legacyHeaders: false,
+  keyGenerator: (req) => (req.user && String(req.user.id)) || req.ip,
+  message: { erro: 'Muitas perguntas seguidas. Aguarde 1 minuto.' },
+});
+
+// Webhooks (bot WhatsApp/n8n): protege contra spam de lançamentos e de chamadas à IA.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000, max: 30,
+  standardHeaders: true, legacyHeaders: false,
+  message: { erro: 'Muitas requisições. Aguarde 1 minuto.' },
 });
 
 // ==================== AUTH ROUTES ====================
@@ -699,8 +723,30 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
   } else if (mov.tipo === 'Ajuste') {
     return res.status(400).json({ erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' });
   }
-  await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prod.id);
-  await supabase.from('movimentacoes').delete().eq('id', mov.id);
+  // Trava otimista com retry (mesmo padrão do lançamento): cancelamento simultâneo a
+  // outro lançamento não sobrescreve estoque. Delete só depois do update confirmado.
+  let prodAtual = prod, sucesso = false;
+  for (let tent = 0; tent < 4 && !sucesso; tent++) {
+    const base = Number(prodAtual.qtd);
+    if (mov.tipo === 'Entrada') {
+      novaQtd = Number((base - Number(mov.qtd)).toFixed(3));
+      if (novaQtd < 0) return res.status(400).json({ erro: `Não é possível cancelar: estoque ficaria negativo (${prodAtual.qtd} disponível).` });
+    } else {
+      novaQtd = Number((base + Number(mov.qtd)).toFixed(3));
+    }
+    const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+    if (upd && upd.length) { sucesso = true; break; }
+    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+    prodAtual = re;
+  }
+  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
+  const { error: delErr } = await supabase.from('movimentacoes').delete().eq('id', mov.id);
+  if (delErr) {
+    // Reverte o estoque se não conseguiu apagar a movimentação (operação não pode ficar pela metade).
+    await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd);
+    return res.status(500).json({ erro: 'Erro ao cancelar movimentação. Estoque não foi alterado.' });
+  }
   await audit('cancelar_movimentacao', { mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }, req.user, getClientIp(req));
   res.json({ ok: true, novaQtd });
 });
@@ -1095,7 +1141,7 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
     await logErroAgenda('ler-cupom', e, req.user);
-    res.status(500).json({ erro: 'Erro interno: ' + e.message });
+    res.status(500).json({ erro: 'Erro ao ler o cupom. Tente novamente.' });
   }
 });
 
@@ -1111,7 +1157,8 @@ function unidadeCompativel(uniCupom, uniProd) {
   return grupos.some(g => g.includes(a) && g.includes(b));
 }
 
-app.post('/api/webhook/ler-nota', async (req, res) => {
+app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
   const { imagem, imagens, mediaType } = req.body;
@@ -1472,29 +1519,38 @@ async function executarFerramenta(nome, input, user) {
           opcoes: cands.map(p => ({ codigo: p.codigo, nome: p.nome, qtd: p.qtd, unidade: p.unidade })) };
         const { data: prod } = await supabase.from('produtos').select('*').eq('id', cands[0].id).single();
         if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado.` };
-        let novaQtd = Number(prod.qtd);
-        if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
-        else if (tipo === 'Saída' || tipo === 'Perda') {
-          if (qtd > novaQtd) return { sucesso: false, erro: `Estoque insuficiente: disponível ${prod.qtd} ${prod.unidade}` };
-          novaQtd = Number((novaQtd - qtd).toFixed(3));
-        } else novaQtd = Number(qtd.toFixed(3));
-        const custoUnit = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || Number(prod.custo || 0)) : Number(prod.custo || 0);
-        const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - Number(prod.qtd)) : qtd;
-        const valor = Number((custoUnit * valorBase).toFixed(2));
-        const updateData = { qtd: novaQtd };
-        if (tipo === 'Entrada' && input.custo !== undefined) updateData.custo = custoUnit;
-        const { error: updErr } = await supabase.from('produtos').update(updateData).eq('id', prod.id);
-        if (updErr) return { sucesso: false, erro: 'Erro ao atualizar estoque' };
+        // Trava otimista com retry — mesmo padrão do endpoint REST: dois comandos
+        // simultâneos ao assistente não corrompem o estoque.
+        let novaQtd, qtdAntes, custoUnit, valor, prodAtual = prod, sucesso = false;
+        for (let tent = 0; tent < 4 && !sucesso; tent++) {
+          qtdAntes = Number(prodAtual.qtd);
+          if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
+          else if (tipo === 'Saída' || tipo === 'Perda') {
+            if (qtd > qtdAntes) return { sucesso: false, erro: `Estoque insuficiente: disponível ${prodAtual.qtd} ${prodAtual.unidade}` };
+            novaQtd = Number((qtdAntes - qtd).toFixed(3));
+          } else novaQtd = Number(qtd.toFixed(3));
+          custoUnit = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || Number(prodAtual.custo || 0)) : Number(prodAtual.custo || 0);
+          const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
+          valor = Number((custoUnit * valorBase).toFixed(2));
+          const updateData = { qtd: novaQtd };
+          if (tipo === 'Entrada' && input.custo !== undefined) updateData.custo = custoUnit;
+          const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+          if (upd && upd.length) { sucesso = true; break; }
+          const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+          if (!re) return { sucesso: false, erro: 'Erro ao atualizar estoque' };
+          prodAtual = re;
+        }
+        if (!sucesso) return { sucesso: false, erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' };
         const { error: movErr } = await supabase.from('movimentacoes').insert({
           produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
           tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
           custo: custoUnit, valor, motivo: sanitizeText(input.motivo || 'Via assistente IA', 80),
           responsavel: user && user.nome ? user.nome : 'IA', obs: 'Registrado pelo assistente IA',
-          qtd_antes: Number(prod.qtd), qtd_depois: novaQtd, created_at: nowSP(),
+          qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: nowSP(),
         });
-        if (movErr) { await supabase.from('produtos').update({ qtd: prod.qtd }).eq('id', prod.id); return { sucesso: false, erro: 'Erro ao registrar movimentação' }; }
+        if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd); return { sucesso: false, erro: 'Erro ao registrar movimentação' }; }
         await audit('movimentacao_ia', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd }, user, '');
-        return { sucesso: true, produto: prod.nome, tipo, qtd, qtd_antes: Number(prod.qtd), qtd_depois: novaQtd, unidade: prod.unidade };
+        return { sucesso: true, produto: prod.nome, tipo, qtd, qtd_antes: qtdAntes, qtd_depois: novaQtd, unidade: prod.unidade };
       }
 
       case 'atualizar_produto': {
@@ -1547,7 +1603,7 @@ async function executarFerramenta(nome, input, user) {
 // Varredura automática (init): roda no MÁXIMO 1x por dia e SOMENTE para o admin.
 // Resultado do dia fica em cache p/ não reprocessar a cada abertura da aba IA.
 let varreduraCache = { dia: null, resposta: null };
-app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
+app.post('/api/chat', auth, requirePerm('ia'), chatLimiter, async (req, res) => {
   let isInit = !!(req.body && req.body.init);
   const tsVarredura = nowSP();
   const forcar = !!(req.body && req.body.forcar);
@@ -1660,8 +1716,9 @@ app.post('/api/chat', auth, requirePerm('ia'), async (req, res) => {
     await audit('chat_ia', { pergunta: isInit ? '__boot__' : pergunta.slice(0, 100), lancamentos: movimentosExecutados.length }, req.user, getClientIp(req));
     res.json({ resposta: textoFinal, movimentos_executados: movimentosExecutados });
   } catch(e) {
+    console.error('Erro chat:', e);
     await logErroAgenda('chat', e, req.user);
-    res.status(500).json({ erro: 'Erro interno: ' + e.message });
+    res.status(500).json({ erro: 'Erro no assistente. Tente novamente em instantes.' });
   }
 });
 
@@ -1721,7 +1778,7 @@ app.get('/api/alertas/estoque-parado', auth, async (req, res) => {
       silenciados_por_grupo: silenciadosPorGrupo };
     await audit('alertas_estoque_parado', resumo, req.user, getClientIp(req));
     res.json({ alertas, resumo });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 app.get('/api/alertas/fantasmas', auth, async (req, res) => {
@@ -1784,7 +1841,7 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
     const ordem = { sumico: 0, desync: 1 };
     fantasmas.sort((a, b) => (ordem[a.classe] - ordem[b.classe]) || (new Date(b.ultimo_movimento) - new Date(a.ultimo_movimento)));
     res.json({ fantasmas });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Reconcilia "dado furado": grava um Ajuste corretivo que alinha o histórico ao
@@ -1832,7 +1889,7 @@ app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'geren
     }
     await audit('reconciliar_fantasmas', { reconciliados, alvo: alvoId || 'todos' }, req.user, getClientIp(req));
     res.json({ reconciliados });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // ==================== INVENTÁRIO SEMANAL ====================
@@ -1866,7 +1923,7 @@ app.post('/api/inventario/abrir', auth, requireRole('admin', 'gerente'), async (
     for (let i = 0; i < itens.length; i += 200) await supabase.from('inventario_itens').insert(itens.slice(i, i + 200));
     await audit('inventario_abrir', { inventario_id: inv.id, categoria, total: produtos.length }, req.user, getClientIp(req));
     res.json({ ok: true, inventario: inv, total_itens: produtos.length });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Retorna o inventário aberto (se houver) com seus itens para contagem.
@@ -1876,7 +1933,7 @@ app.get('/api/inventario/aberto', auth, async (req, res) => {
     if (!inv) return res.json({ inventario: null });
     const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', inv.id).order('categoria').order('produto_nome');
     res.json({ inventario: inv, itens: itens || [] });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Salva contagens parciais (a equipe vai preenchendo). Não altera estoque ainda.
@@ -1896,7 +1953,7 @@ app.post('/api/inventario/contar', auth, async (req, res) => {
       salvos++;
     }
     res.json({ ok: true, salvos });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Fecha o inventário: aplica a contagem como verdade (Ajustes marcados obs='inventario'),
@@ -1974,15 +2031,23 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
     await audit('inventario_fechar', { inventario_id: invId, divergentes, suspeitos, valor_sumico: valorSumico }, req.user, getClientIp(req));
     res.json({ ok: true, divergentes, suspeitos, valor_sumico: Number(valorSumico.toFixed(2)),
       valor_sobra: Number(valorSobra.toFixed(2)), top_sumico: topSumico.slice(0, 10), suspeitos_lista: suspeitosList });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Aplica a contagem de um item como Ajuste rastreável (obs='inventario'): a conferência
 // reconhece esse ajuste como "acertado no inventário", não como sumiço misterioso.
+// Race condition corrigida: o qtd_antes do log usa a quantidade ATUAL do produto (lida
+// agora), não o qtd_sistema capturado na abertura — movimentos feitos DURANTE a contagem
+// (saída da cozinha, entrada de compra) ficam com log correto e não inflam o "sumiço".
 async function aplicarAjusteInventario(item, novaQtd, inv, responsavel, causa) {
-  const antes = Number(item.qtd_sistema);
   const alvo = Number(Number(novaQtd).toFixed(3));
   const custo = Number(item.custo || 0);
+  // Lê a quantidade atual (a contagem física é a verdade, mas o log precisa do valor real de antes).
+  const { data: prodAtual } = await supabase.from('produtos').select('qtd').eq('id', item.produto_id).maybeSingle();
+  const antes = prodAtual ? Number(prodAtual.qtd) : Number(item.qtd_sistema);
+  if (Math.abs(antes - Number(item.qtd_sistema)) > 0.001) {
+    console.warn(`⚠️ Inventário #${inv.id}: "${item.produto_nome}" mudou durante a contagem (abertura: ${item.qtd_sistema}, agora: ${antes}). Ajuste aplicado com base no valor atual.`);
+  }
   await supabase.from('produtos').update({ qtd: alvo }).eq('id', item.produto_id);
   await supabase.from('movimentacoes').insert({
     produto_id: item.produto_id, produto_nome: item.produto_nome, categoria: item.categoria,
@@ -1999,7 +2064,7 @@ app.get('/api/inventario/historico', auth, async (req, res) => {
   try {
     const { data } = await supabase.from('inventarios').select('*').order('id', { ascending: false }).limit(30);
     res.json(data || []);
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Detalhe de um inventário (itens + divergências).
@@ -2009,7 +2074,7 @@ app.get('/api/inventario/:id', auth, async (req, res) => {
     if (!inv) return res.status(404).json({ erro: 'Inventário não encontrado.' });
     const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', inv.id).order('valor_divergencia', { ascending: true });
     res.json({ inventario: inv, itens: itens || [] });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // Edita a causa/obs de um item já inventariado (classificar a divergência depois do fechamento).
@@ -2031,7 +2096,7 @@ app.put('/api/inventario/item/:id', auth, requireRole('admin', 'gerente'), async
     }
     await audit('inventario_item_causa', { item_id: item.id, produto: item.produto_nome, causa }, req.user, getClientIp(req));
     res.json({ ok: true });
-  } catch(e) { res.status(500).json({ erro: 'Erro interno: ' + e.message }); }
+  } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
 
 // ==================== GERENCIAR USUÁRIOS ====================
@@ -2265,9 +2330,13 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
 });
 
 // ==================== WEBHOOK WHATSAPP ====================
-const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || 'toca-webhook-2026';
+// Segurança: SEM fallback hardcoded — o secret antigo ficou exposto no histórico do git.
+// Se a variável não estiver no Railway, o webhook fica desativado (503) em vez de aceitar default.
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
+if (!WEBHOOK_SECRET) console.error('⚠️ FATAL: WEBHOOK_SECRET não definido — webhook WhatsApp DESATIVADO até configurar no Railway.');
 
-app.post('/api/webhook/whatsapp', async (req, res) => {
+app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
   const acao = sanitizeText(req.body?.acao, 40);
@@ -2581,7 +2650,8 @@ app.post('/api/webhook/whatsapp', async (req, res) => {
   res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | conferencia | conferencia_mensal` });
 });
 
-app.get('/api/webhook/relatorio-diario', async (req, res) => {
+app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.query?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
   const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
