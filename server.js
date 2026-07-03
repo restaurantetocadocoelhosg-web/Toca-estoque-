@@ -103,11 +103,13 @@ async function logErroAgenda(contexto, err, user) {
 }
 
 // ==================== PERMISSÕES (liberações por usuário) ====================
-const PERM_KEYS = ['lancar','exportar','ia','auditoria','alertas','agenda','admin'];
+const PERM_KEYS = ['lancar','exportar','ia','auditoria','alertas','agenda','pendencias','admin'];
 function permsPorRole(role) {
-  if (role === 'admin')   return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:true };
-  if (role === 'gerente') return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:false };
-  return { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria por pessoa)
+  // 'pendencias' (resolver itens em dúvida da nota do WhatsApp): admin-only por padrão;
+  // admin libera por pessoa no painel de liberações.
+  if (role === 'admin')   return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true };
+  if (role === 'gerente') return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false };
+  return { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
 function permsEfetivas(role, permissoes) {
   const base = permsPorRole(role);
@@ -1170,11 +1172,17 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler a nota: ${r.erro}` });
     if (r.aviso || !r.itens.length) return res.json({ resposta: `⚠️ Não achei itens na nota. ${r.aviso || 'Tente uma foto mais nítida e inteira.'}` });
 
-    const lancados = [], confirmar = [], naoachados = [];
+    const lancados = [], confirmar = [], naoachados = [], pendencias = [];
     for (const item of r.itens) {
       // Auto-lança SÓ apelido/nome exato (certeza real) com unidade compatível; 'forte' é palpite — vai pra confirmação.
       const auto = item.produto && (item.via === 'apelido' || item.via === 'nome_exato') && unidadeCompativel(item.unidade_cupom, item.produto.unidade);
       if (!auto) {
+        // Guarda a pendência pra resolver no app (aba Histórico → Pendentes), sem refazer foto.
+        pendencias.push({
+          produto_cupom: item.nome_cupom, qtd: item.qtd, unidade_cupom: item.unidade_cupom || null,
+          candidatos: (item.candidatos || []).map(c => ({ id: c.id, nome: c.nome, unidade: c.unidade, codigo: c.codigo || null })),
+          remetente, status: 'pendente', created_at: nowSP(),
+        });
         if (item.candidatos && item.candidatos.length) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.candidatos[0].nome });
         else naoachados.push(`${item.nome_cupom} (${item.qtd})`);
         continue;
@@ -1198,7 +1206,9 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
       });
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd });
     }
-    await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length }, null, '');
+    // Salva os itens em dúvida como pendências (resolver no app, aba Histórico → Pendentes).
+    if (pendencias.length) { try { await supabase.from('nota_pendencias').insert(pendencias); } catch (e) { console.error('pendencias insert:', e.message); } }
+    await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length }, null, '');
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
     if (lancados.length) {
@@ -1207,13 +1217,69 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
     if (confirmar.length) msg += `\n⚠️ *Confira no app (${confirmar.length}) — não lancei no chute:*\n` + confirmar.map(c => `• "${c.nome_cupom}" (${c.qtd}) → seria ${c.sugestao}?`).join('\n') + '\n';
     if (naoachados.length) msg += `\n❓ *Não achei no estoque:*\n` + naoachados.map(n => `• ${n}`).join('\n') + '\n';
     if (!lancados.length && !confirmar.length && !naoachados.length) msg += 'Nada para lançar.';
-    if (confirmar.length || naoachados.length) msg += `\n💡 Dica: cadastre o apelido no app (Admin → Sinônimos) que da próxima vez lanço sozinho.`;
-    res.json({ resposta: msg, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length });
+    if (pendencias.length) msg += `\n💡 Resolva no app: aba *Histórico → Pendentes* (${pendencias.length}) — escolha o produto e confirme. Marque "memorizar" que da próxima eu lanço sozinho.`;
+    res.json({ resposta: msg, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length });
   } catch(e) {
     console.error('Erro ler-nota webhook:', e.message);
     await logErroAgenda('ler-nota-whatsapp', e, { nome: remetente });
     res.json({ resposta: '❌ Erro ao processar a nota: ' + e.message });
   }
+});
+
+// ==================== PENDÊNCIAS DE NOTA (resolver no app) ====================
+// Itens que a IA teve dúvida ao ler a nota no WhatsApp. Admin resolve escolhendo o
+// produto certo (ou libera a permissão 'pendencias' pra um funcionário).
+app.get('/api/pendencias', auth, requirePerm('pendencias'), async (req, res) => {
+  const { data } = await supabase.from('nota_pendencias').select('*').eq('status', 'pendente').order('id', { ascending: false }).limit(200);
+  res.json(data || []);
+});
+
+app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async (req, res) => {
+  const produtoId = req.body?.produto_id;
+  const memorizar = !!req.body?.memorizar;
+  if (!produtoId) return res.status(400).json({ erro: 'Escolha o produto.' });
+  const { data: pend } = await supabase.from('nota_pendencias').select('*').eq('id', req.params.id).single();
+  if (!pend || pend.status !== 'pendente') return res.status(404).json({ erro: 'Pendência não encontrada ou já resolvida.' });
+  const { data: prod } = await supabase.from('produtos').select('*').eq('id', produtoId).single();
+  if (!prod) return res.status(404).json({ erro: 'Produto não encontrado.' });
+  const qtd = Number(pend.qtd) || 0;
+  if (qtd <= 0) return res.status(400).json({ erro: 'Quantidade inválida na pendência.' });
+
+  // Entrada com trava otimista (mesma blindagem dos outros lançamentos).
+  let prodAtual = prod, novaQtd = 0, sucesso = false;
+  for (let tent = 0; tent < 4 && !sucesso; tent++) {
+    novaQtd = Number((Number(prodAtual.qtd) + qtd).toFixed(3));
+    const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+    if (upd && upd.length) { sucesso = true; break; }
+    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+    prodAtual = re;
+  }
+  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente de novo.' });
+
+  const { error: movErr } = await supabase.from('movimentacoes').insert({
+    produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+    tipo: 'Entrada', qtd, unidade: prod.unidade,
+    custo: prod.custo, valor: Number((Number(prod.custo) * qtd).toFixed(2)),
+    motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
+  });
+  if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
+
+  // "Memorizar": salva o apelido (nome da nota → produto), pra próxima lançar sozinho.
+  if (memorizar && pend.produto_cupom) {
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: 'termo' }); } catch (e) {}
+  }
+  await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+  await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, memorizar }, req.user, getClientIp(req));
+  res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd });
+});
+
+app.post('/api/pendencias/:id/ignorar', auth, requirePerm('pendencias'), async (req, res) => {
+  const { data: pend } = await supabase.from('nota_pendencias').select('id,status').eq('id', req.params.id).single();
+  if (!pend || pend.status !== 'pendente') return res.status(404).json({ erro: 'Pendência não encontrada ou já resolvida.' });
+  await supabase.from('nota_pendencias').update({ status: 'ignorado', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+  await audit('pendencia_ignorar', { pendencia_id: pend.id }, req.user, getClientIp(req));
+  res.json({ ok: true });
 });
 
 // ==================== ASSISTENTE IA AGÊNTICO ====================

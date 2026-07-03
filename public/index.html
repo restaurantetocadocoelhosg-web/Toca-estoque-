@@ -305,6 +305,24 @@ select.big-input { font-size: 14px; }
 
 /* ====== ADMIN PAGE ====== */
 .admin-section { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+/* Pendentes no topo do Histórico */
+.pend-wrap { margin: 0 0 14px; }
+.pend-head { font-size: 13px; font-weight: 800; color: var(--yellow); margin: 4px 2px 8px; display: flex; align-items: center; gap: 6px; }
+.pend-card { background: var(--s1); border: 1.5px solid var(--yellow); border-radius: 14px; padding: 12px 13px; margin-bottom: 10px; box-shadow: var(--shadow); }
+.pend-card .pc-cupom { font-size: 14px; font-weight: 700; color: var(--text); }
+.pend-card .pc-meta { font-size: 11.5px; color: var(--muted); margin: 2px 0 9px; }
+.pend-card .pc-sel { width: 100%; background: var(--bg); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 14px; padding: 10px 12px; outline: none; -webkit-appearance: none; }
+.pend-card .pc-search { width: 100%; background: var(--bg); border: 1.5px solid var(--border); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 14px; padding: 10px 12px; outline: none; margin-top: 6px; }
+.pend-card .pc-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 160px; overflow-y: auto; }
+.pend-card .pc-res { background: var(--s2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; cursor: pointer; }
+.pend-card .pc-res:active { border-color: var(--accent); }
+.pend-card .pc-res.sel { border-color: var(--green); background: rgba(16,185,129,0.1); }
+.pend-card .pc-memo { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); margin: 10px 0; cursor: pointer; }
+.pend-card .pc-memo input { width: 17px; height: 17px; accent-color: var(--accent); }
+.pend-card .pc-acoes { display: flex; gap: 8px; }
+.pend-card .pc-acoes button { flex: 1; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 700; border: none; cursor: pointer; font-family: var(--font); }
+.pend-card .pc-conf { background: var(--green); color: #fff; }
+.pend-card .pc-ign { background: var(--s2); color: var(--muted); border: 1.5px solid var(--border) !important; }
 .app-ver-row { display: flex; justify-content: flex-end; margin: -4px 0 -4px; }
 .app-ver { background: var(--s2); border: 1.5px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.5px; padding: 4px 12px; border-radius: 100px; }
 .app-ver b { color: var(--accent); }
@@ -671,6 +689,7 @@ select.big-input { font-size: 14px; }
       <label>Até</label><input type="date" id="hist-data-fim" onchange="loadHist()">
       <button class="btn-clear-date" onclick="limparDatas()">✕ Limpar</button>
     </div>
+    <div id="pend-wrap" class="pend-wrap" style="padding:0 14px"></div>
     <div class="hist-list" id="hist-list"><div class="loading">Carregando...</div></div>
   </div>
 
@@ -736,7 +755,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v35</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v36</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1213,14 +1232,15 @@ async function loadSession() {
   // Liberações com FALLBACK por papel (à prova de falha — admin sempre vê tudo,
   // mesmo se /api/me não trouxer as permissões).
   const ROLE_DEF = {
-    admin:    { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:true },
-    gerente:  { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, admin:false },
-    operador: { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, admin:false }
+    admin:    { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true },
+    gerente:  { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false },
+    operador: { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }
   };
   const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
   const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
   const P = {};
-  ['lancar','exportar','ia','auditoria','alertas','agenda','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
+  ['lancar','exportar','ia','auditoria','alertas','agenda','pendencias','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
+  window.permPendencias = P.pendencias;
   const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
   gate('nav-admin', P.admin);
   gate('nav-chat', P.ia);
@@ -1910,7 +1930,88 @@ function selStatus(el) {
   el.classList.add('active'); estStatus = el.dataset.st; loadEstoque();
 }
 
+// ===== PENDENTES (itens em dúvida da nota do WhatsApp) — só quem tem a permissão =====
+let pendState = {}; // id -> { produtoId, buscando }
+async function loadPendencias() {
+  const wrap = document.getElementById('pend-wrap');
+  if (!wrap) return;
+  if (!window.permPendencias) { wrap.innerHTML = ''; return; }
+  let lista = [];
+  try { lista = await api('/api/pendencias'); } catch(e) { wrap.innerHTML = ''; return; }
+  if (!lista.length) { wrap.innerHTML = ''; return; }
+  wrap.innerHTML = `<div class="pend-head">⚠️ Pendentes da nota (${lista.length}) — a IA ficou em dúvida, escolha o produto</div>` +
+    lista.map(p => renderPendCard(p)).join('');
+}
+function renderPendCard(p) {
+  const st = pendState[p.id] || (pendState[p.id] = { produtoId: (p.candidatos[0] && p.candidatos[0].id) || '', buscando: false });
+  const cands = Array.isArray(p.candidatos) ? p.candidatos : [];
+  const opts = cands.map(c => `<option value="${c.id}" ${String(st.produtoId)===String(c.id)?'selected':''}>${escapeHtml(c.nome)}${c.unidade?' ('+escapeHtml(c.unidade)+')':''}</option>`).join('');
+  const selBox = `<select class="pc-sel" onchange="pendPick(${p.id}, this.value)">
+      ${opts || ''}
+      <option value="__buscar__" ${st.buscando?'selected':''}>🔍 Buscar outro produto…</option>
+    </select>`;
+  const searchBox = st.buscando ? `
+    <input class="pc-search" placeholder="Digite o nome do produto…" oninput="pendBuscar(${p.id}, this.value)">
+    <div class="pc-results" id="pc-res-${p.id}"></div>` : '';
+  const memo = `<label class="pc-memo"><input type="checkbox" id="pc-memo-${p.id}" checked> 💾 Memorizar apelido "<b>${escapeHtml(p.produto_cupom)}</b>" (lanço sozinho da próxima)</label>`;
+  return `<div class="pend-card" id="pend-${p.id}">
+    <div class="pc-cupom">🧾 ${escapeHtml(p.produto_cupom)}</div>
+    <div class="pc-meta">Quantidade: <b>${fmt(p.qtd)} ${escapeHtml(p.unidade_cupom||'')}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
+    ${selBox}${searchBox}${memo}
+    <div class="pc-acoes">
+      <button class="pc-conf" onclick="resolverPendencia(${p.id})">✅ Confirmar entrada</button>
+      <button class="pc-ign" onclick="ignorarPendencia(${p.id})">Ignorar</button>
+    </div>
+  </div>`;
+}
+function pendPick(id, val) {
+  const st = pendState[id] || (pendState[id] = {});
+  if (val === '__buscar__') { st.buscando = true; st.produtoId = ''; }
+  else { st.buscando = false; st.produtoId = val; }
+  loadPendencias();
+}
+let _pendBuscaTimer = null;
+function pendBuscar(id, termo) {
+  clearTimeout(_pendBuscaTimer);
+  _pendBuscaTimer = setTimeout(async () => {
+    const box = document.getElementById('pc-res-' + id);
+    if (!box) return;
+    if (!termo || termo.trim().length < 2) { box.innerHTML = ''; return; }
+    try {
+      const rs = await api('/api/produtos/buscar?q=' + encodeURIComponent(termo.trim()));
+      const st = pendState[id] || (pendState[id] = {});
+      box.innerHTML = (rs||[]).map(r => `<div class="pc-res ${String(st.produtoId)===String(r.id)?'sel':''}" data-pid="${r.id}" onclick="pendPickSearch(${id},'${r.id}')">${escapeHtml(r.nome)}${r.unidade?' · '+escapeHtml(r.unidade):''}${r.codigo?' · '+escapeHtml(r.codigo):''}</div>`).join('') || '<div style="font-size:12px;color:var(--muted);padding:6px">Nada encontrado.</div>';
+    } catch(e) { box.innerHTML = ''; }
+  }, 300);
+}
+function pendPickSearch(id, produtoId) {
+  const st = pendState[id] || (pendState[id] = {});
+  st.produtoId = String(produtoId); st.buscando = true;
+  const box = document.getElementById('pc-res-' + id);
+  if (box) box.querySelectorAll('.pc-res').forEach(el => el.classList.toggle('sel', el.getAttribute('data-pid') === String(produtoId)));
+}
+async function resolverPendencia(id) {
+  const st = pendState[id] || {};
+  if (!st.produtoId) { toast('Escolha o produto certo primeiro.', 'err'); return; }
+  const memo = document.getElementById('pc-memo-' + id);
+  try {
+    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true });
+    toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})`, 'ok');
+    delete pendState[id];
+    await loadPendencias();
+    await loadHist();
+  } catch(e) { handleApiError(e, true); }
+}
+async function ignorarPendencia(id) {
+  try {
+    await apiPost(`/api/pendencias/${id}/ignorar`, {});
+    delete pendState[id];
+    await loadPendencias();
+  } catch(e) { handleApiError(e, true); }
+}
+
 async function loadHist() {
+  loadPendencias();
   const q = document.getElementById('hist-search').value;
   const tipo = document.getElementById('hist-tipo').value;
   const dataIni = document.getElementById('hist-data-ini').value;
@@ -2108,7 +2209,7 @@ async function loadUsers() {
     if (!users.length) { el.innerHTML = '<div style="color:var(--muted);font-size:13px">Nenhum usuário encontrado.</div>'; return; }
     const roleLabel = { admin: 'Admin', gerente: 'Gerente', operador: 'Operador' };
     const roleCls = { admin: 'role-admin', gerente: 'role-gerente', operador: 'role-operador' };
-    const PERM_UI = [{k:'lancar',l:'Lançar'},{k:'ia',l:'IA'},{k:'exportar',l:'Exportar'},{k:'auditoria',l:'Auditoria'},{k:'alertas',l:'Alertas'},{k:'agenda',l:'Agenda'},{k:'admin',l:'Admin'}];
+    const PERM_UI = [{k:'lancar',l:'Lançar'},{k:'ia',l:'IA'},{k:'exportar',l:'Exportar'},{k:'auditoria',l:'Auditoria'},{k:'alertas',l:'Alertas'},{k:'agenda',l:'Agenda'},{k:'pendencias',l:'Pendências'},{k:'admin',l:'Admin'}];
     el.innerHTML = users.map(u => {
       const pe = u.permissoes_efetivas || {};
       const chips = PERM_UI.map(p => {
