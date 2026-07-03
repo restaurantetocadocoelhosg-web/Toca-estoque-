@@ -305,6 +305,9 @@ select.big-input { font-size: 14px; }
 
 /* ====== ADMIN PAGE ====== */
 .admin-section { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.app-ver-row { display: flex; justify-content: flex-end; margin: -4px 0 -4px; }
+.app-ver { background: var(--s2); border: 1.5px solid var(--border); color: var(--muted); font-size: 12px; font-weight: 700; letter-spacing: 0.5px; padding: 4px 12px; border-radius: 100px; }
+.app-ver b { color: var(--accent); }
 .admin-card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
 .admin-card-title { font-size: 14px; font-weight: 700; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; color: var(--text); }
 .user-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); gap: 8px; }
@@ -731,6 +734,9 @@ select.big-input { font-size: 14px; }
   <!-- ADMIN -->
   <div id="p-admin" class="page">
     <div class="admin-section">
+
+      <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v35</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
