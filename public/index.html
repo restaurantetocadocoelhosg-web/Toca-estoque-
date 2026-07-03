@@ -288,9 +288,10 @@ select.big-input { font-size: 14px; }
 .chat-bubble.ia .ia-val { color: var(--green); font-weight: 700; }
 .chat-bubble.ia b { color: var(--text); font-weight: 700; }
 .chat-input-wrap { padding: 10px 14px; padding-bottom: calc(10px + var(--safe-bottom)); background: var(--s1); border-top: 1px solid var(--border); display: flex; gap: 8px; align-items: flex-end; flex-shrink: 0; box-shadow: 0 -1px 0 var(--border); }
-.chat-input { flex: 1; background: var(--bg); border: 1.5px solid var(--border); border-radius: 12px; color: var(--text); font-family: var(--font); font-size: 15px; padding: 11px 14px; outline: none; resize: none; max-height: 100px; -webkit-appearance: none; transition: border-color 0.15s; }
-.chat-input:focus { border-color: var(--accent); }
-.btn-send { background: var(--accent); border: none; border-radius: 10px; color: #fff; font-size: 18px; padding: 11px 14px; cursor: pointer; flex-shrink: 0; transition: all 0.15s; box-shadow: 0 2px 8px rgba(232,93,38,0.3); }
+.chat-input { flex: 1; background: var(--bg); border: 1.5px solid var(--border); border-radius: 14px; color: var(--text); font-family: var(--font); font-size: 16px; line-height: 1.45; padding: 13px 15px; outline: none; resize: none; min-height: 52px; max-height: 200px; -webkit-appearance: none; transition: border-color 0.15s; }
+.chat-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(232,93,38,0.12); }
+.chat-hint { font-size: 11px; color: var(--muted); text-align: center; padding: 0 14px 8px; background: var(--s1); flex-shrink: 0; }
+.btn-send { background: var(--accent); border: none; border-radius: 12px; color: #fff; font-size: 20px; min-width: 52px; height: 52px; padding: 0 14px; cursor: pointer; flex-shrink: 0; transition: all 0.15s; box-shadow: 0 2px 8px rgba(232,93,38,0.3); }
 .btn-send:active { transform: scale(0.93); }
 .btn-send:disabled { opacity: 0.4; cursor: not-allowed; transform: none; box-shadow: none; }
 .chat-sugestoes { padding: 0 14px 10px; display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none; flex-shrink: 0; background: var(--s1); }
@@ -718,8 +719,9 @@ select.big-input { font-size: 14px; }
         <div class="chat-sug" onclick="enviarSugestao(this)">Resumo do estoque hoje</div>
         <div class="chat-sug" onclick="enviarSugestao(this)">Itens críticos por categoria</div>
       </div>
+      <div class="chat-hint">Enter pula linha · toque no ➤ para enviar</div>
       <div class="chat-input-wrap">
-        <textarea class="chat-input" id="chat-input" placeholder="Pergunte sobre o estoque..." rows="1"
+        <textarea class="chat-input" id="chat-input" placeholder="Escreva à vontade — pode usar várias linhas…" rows="2"
           oninput="autoResize(this)" onkeydown="chatEnter(event)"></textarea>
         <button class="btn-send" id="btn-send" onclick="enviarChat()">➤</button>
       </div>
@@ -2447,7 +2449,7 @@ function limparChat() {
 
 function autoResize(el) {
   el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 140) + 'px';
+  el.style.height = Math.min(el.scrollHeight, 200) + 'px';
 }
 
 // Formata a resposta da IA: texto puro/emoji -> HTML organizado e colorido.
@@ -2478,7 +2480,9 @@ function formatIA(texto) {
 }
 
 function chatEnter(e) {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); enviarChat(); }
+  // Enter agora PULA LINHA (não envia mais) — evita mandar mensagem pela metade.
+  // Em teclado com Ctrl/Cmd (desktop), Ctrl+Enter ainda envia rápido.
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); enviarChat(); }
 }
 
 function enviarSugestao(el) {
