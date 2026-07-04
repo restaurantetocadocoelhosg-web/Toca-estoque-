@@ -319,7 +319,12 @@ select.big-input { font-size: 14px; }
 .pend-card .pc-res.sel { border-color: var(--green); background: rgba(16,185,129,0.1); }
 .pend-card .pc-memo { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); margin: 10px 0; cursor: pointer; }
 .pend-card .pc-memo input { width: 17px; height: 17px; accent-color: var(--accent); }
-.pend-card .pc-acoes { display: flex; gap: 8px; }
+.pend-card .pc-qtd-wrap { margin: 9px 0 4px; }
+.pend-card .pc-qtd-lbl { font-size: 11.5px; color: var(--muted); display: block; margin-bottom: 5px; }
+.pend-card .pc-qtd-row { display: flex; align-items: center; gap: 8px; }
+.pend-card .pc-qtd { width: 120px; background: var(--bg); border: 1.5px solid var(--accent); border-radius: 10px; color: var(--text); font-family: var(--font); font-size: 16px; font-weight: 700; padding: 9px 12px; outline: none; -webkit-appearance: none; }
+.pend-card .pc-qtd-un { font-size: 14px; font-weight: 700; color: var(--muted); text-transform: uppercase; }
+.pend-card .pc-acoes { display: flex; gap: 8px; margin-top: 10px; }
 .pend-card .pc-acoes button { flex: 1; padding: 10px; border-radius: 10px; font-size: 13px; font-weight: 700; border: none; cursor: pointer; font-family: var(--font); }
 .pend-card .pc-conf { background: var(--green); color: #fff; }
 .pend-card .pc-ign { background: var(--s2); color: var(--muted); border: 1.5px solid var(--border) !important; }
@@ -755,7 +760,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v38</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v39</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1954,10 +1959,15 @@ function renderPendCard(p) {
     <input class="pc-search" placeholder="Digite o nome do produto…" oninput="pendBuscar(${p.id}, this.value)">
     <div class="pc-results" id="pc-res-${p.id}"></div>` : '';
   const memo = `<label class="pc-memo"><input type="checkbox" id="pc-memo-${p.id}" checked> 💾 Memorizar apelido "<b>${escapeHtml(p.produto_cupom)}</b>" (lanço sozinho da próxima)</label>`;
+  const uni = escapeHtml(p.unidade_cupom || '');
+  const qtdBox = `<div class="pc-qtd-wrap">
+      <span class="pc-qtd-lbl">Quantidade (corrija o peso se a IA errou):</span>
+      <div class="pc-qtd-row"><input type="number" step="0.001" min="0" class="pc-qtd" id="pc-qtd-${p.id}" value="${fmt(p.qtd)}"><span class="pc-qtd-un">${uni}</span></div>
+    </div>`;
   return `<div class="pend-card" id="pend-${p.id}">
     <div class="pc-cupom">🧾 ${escapeHtml(p.produto_cupom)}</div>
-    <div class="pc-meta">Quantidade: <b>${fmt(p.qtd)} ${escapeHtml(p.unidade_cupom||'')}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
-    ${selBox}${searchBox}${memo}
+    <div class="pc-meta">Lido da nota: <b>${fmt(p.qtd)} ${uni}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
+    ${selBox}${searchBox}${qtdBox}${memo}
     <div class="pc-acoes">
       <button class="pc-conf" onclick="resolverPendencia(${p.id})">✅ Confirmar entrada</button>
       <button class="pc-ign" onclick="ignorarPendencia(${p.id})">Ignorar</button>
@@ -1994,8 +2004,11 @@ async function resolverPendencia(id) {
   const st = pendState[id] || {};
   if (!st.produtoId) { toast('Escolha o produto certo primeiro.', 'err'); return; }
   const memo = document.getElementById('pc-memo-' + id);
+  const qtdEl = document.getElementById('pc-qtd-' + id);
+  const qtd = qtdEl ? Number(String(qtdEl.value).replace(',', '.')) : null;
+  if (qtdEl && (!qtd || qtd <= 0)) { toast('Quantidade inválida.', 'err'); return; }
   try {
-    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true });
+    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd });
     toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})`, 'ok');
     delete pendState[id];
     await loadPendencias();
