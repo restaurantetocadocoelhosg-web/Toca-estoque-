@@ -1278,6 +1278,44 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd });
 });
 
+// Cadastra um produto NOVO direto da pendência (quando não existe no estoque) e lança a entrada.
+app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), async (req, res) => {
+  const nome = sanitizeText(req.body?.nome, 120);
+  const categoria = sanitizeText(req.body?.categoria, 80);
+  const unidade = sanitizeText(req.body?.unidade, 20);
+  const memorizar = !!req.body?.memorizar;
+  if (!nome || !categoria || !unidade) return res.status(400).json({ erro: 'Nome, categoria e unidade são obrigatórios.' });
+  const { data: pend } = await supabase.from('nota_pendencias').select('*').eq('id', req.params.id).single();
+  if (!pend || pend.status !== 'pendente') return res.status(404).json({ erro: 'Pendência não encontrada ou já resolvida.' });
+  const qtdCorrigida = parsePositiveNumber(req.body?.qtd);
+  const qtd = qtdCorrigida !== null ? qtdCorrigida : (Number(pend.qtd) || 0);
+  if (qtd <= 0) return res.status(400).json({ erro: 'Quantidade inválida.' });
+  const custo = parseNonNegativeNumber(req.body?.custo ?? 0) ?? 0;
+
+  // Cria o produto já com a quantidade da nota (é a primeira entrada).
+  const { data: novo, error } = await supabase.from('produtos').insert({
+    nome, nome_search: normalizeSearch(nome), categoria, unidade,
+    qtd, minimo: 1, custo, ativo: 1,
+  }).select().single();
+  if (error) {
+    if (error.code === '23505') return res.status(400).json({ erro: 'Já existe um produto com esse nome. Use "Buscar outro produto".' });
+    return res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
+  }
+  // Registra a movimentação de Entrada correspondente (rastreabilidade).
+  await supabase.from('movimentacoes').insert({
+    produto_id: novo.id, produto_nome: novo.nome, categoria: novo.categoria,
+    tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
+    valor: Number((custo * qtd).toFixed(2)), motivo: 'Compra',
+    responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
+  });
+  if (memorizar && pend.produto_cupom) {
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: 'termo' }); } catch (e) {}
+  }
+  await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+  await audit('pendencia_criar_produto', { pendencia_id: pend.id, produto: novo.nome, qtd, categoria, unidade }, req.user, getClientIp(req));
+  res.json({ ok: true, produto: novo.nome, qtd });
+});
+
 app.post('/api/pendencias/:id/ignorar', auth, requirePerm('pendencias'), async (req, res) => {
   const { data: pend } = await supabase.from('nota_pendencias').select('id,status').eq('id', req.params.id).single();
   if (!pend || pend.status !== 'pendente') return res.status(404).json({ erro: 'Pendência não encontrada ou já resolvida.' });

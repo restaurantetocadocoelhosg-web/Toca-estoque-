@@ -319,6 +319,8 @@ select.big-input { font-size: 14px; }
 .pend-card .pc-res.sel { border-color: var(--green); background: rgba(16,185,129,0.1); }
 .pend-card .pc-memo { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); margin: 10px 0; cursor: pointer; }
 .pend-card .pc-memo input { width: 17px; height: 17px; accent-color: var(--accent); }
+.pend-card .pc-cria { margin: 8px 0 2px; padding: 10px; background: var(--s2); border: 1.5px dashed var(--accent); border-radius: 12px; }
+.pend-card .pc-cria .pc-search { margin: 0; }
 .pend-card .pc-qtd-wrap { margin: 9px 0 4px; }
 .pend-card .pc-qtd-lbl { font-size: 11.5px; color: var(--muted); display: block; margin-bottom: 5px; }
 .pend-card .pc-qtd-row { display: flex; align-items: center; gap: 8px; }
@@ -760,7 +762,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v39</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v40</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1944,7 +1946,10 @@ async function loadPendencias() {
   let lista = [];
   try { lista = await api('/api/pendencias'); } catch(e) { wrap.innerHTML = ''; return; }
   if (!lista.length) { wrap.innerHTML = ''; return; }
-  wrap.innerHTML = `<div class="pend-head">⚠️ Pendentes da nota (${lista.length}) — a IA ficou em dúvida, escolha o produto</div>` +
+  // Categorias pro datalist do "cadastrar novo" (busca 1x e reaproveita).
+  if (!window._pendCats) { try { window._pendCats = (await api('/api/categorias')) || []; } catch(e) { window._pendCats = []; } }
+  const dl = `<datalist id="pend-cats">${(window._pendCats||[]).map(c => `<option value="${escapeHtml(typeof c==='string'?c:(c.nome||c.categoria||''))}">`).join('')}</datalist>`;
+  wrap.innerHTML = dl + `<div class="pend-head">⚠️ Pendentes da nota (${lista.length}) — a IA ficou em dúvida, escolha o produto</div>` +
     lista.map(p => renderPendCard(p)).join('');
 }
 function renderPendCard(p) {
@@ -1954,31 +1959,65 @@ function renderPendCard(p) {
   const selBox = `<select class="pc-sel" onchange="pendPick(${p.id}, this.value)">
       ${opts || ''}
       <option value="__buscar__" ${st.buscando?'selected':''}>🔍 Buscar outro produto…</option>
+      <option value="__novo__" ${st.criando?'selected':''}>➕ Cadastrar produto novo…</option>
     </select>`;
   const searchBox = st.buscando ? `
     <input class="pc-search" placeholder="Digite o nome do produto…" oninput="pendBuscar(${p.id}, this.value)">
     <div class="pc-results" id="pc-res-${p.id}"></div>` : '';
-  const memo = `<label class="pc-memo"><input type="checkbox" id="pc-memo-${p.id}" checked> 💾 Memorizar apelido "<b>${escapeHtml(p.produto_cupom)}</b>" (lanço sozinho da próxima)</label>`;
   const uni = escapeHtml(p.unidade_cupom || '');
+  const UNIDADES = ['KG','G','L','ML','UN','CX','PCT','FD'];
+  const uniPadrao = UNIDADES.includes((p.unidade_cupom||'').toUpperCase()) ? (p.unidade_cupom||'').toUpperCase() : 'UN';
+  const criaBox = st.criando ? `
+    <div class="pc-cria">
+      <span class="pc-qtd-lbl">Cadastrar novo produto:</span>
+      <input class="pc-search" id="pc-nome-${p.id}" placeholder="Nome do produto" value="${escapeHtml(p.produto_cupom)}">
+      <input class="pc-search" id="pc-cat-${p.id}" list="pend-cats" placeholder="Categoria (ex: Hortifruti)" style="margin-top:6px">
+      <select class="pc-sel" id="pc-uni-${p.id}" style="margin-top:6px">
+        ${UNIDADES.map(u => `<option value="${u}" ${u===uniPadrao?'selected':''}>${u}</option>`).join('')}
+      </select>
+    </div>` : '';
+  const memoTxt = st.criando ? 'lanço sozinho da próxima' : 'lanço sozinho da próxima';
+  const memo = `<label class="pc-memo"><input type="checkbox" id="pc-memo-${p.id}" checked> 💾 Memorizar apelido "<b>${escapeHtml(p.produto_cupom)}</b>" (${memoTxt})</label>`;
   const qtdBox = `<div class="pc-qtd-wrap">
       <span class="pc-qtd-lbl">Quantidade (corrija o peso se a IA errou):</span>
       <div class="pc-qtd-row"><input type="number" step="0.001" min="0" class="pc-qtd" id="pc-qtd-${p.id}" value="${fmt(p.qtd)}"><span class="pc-qtd-un">${uni}</span></div>
     </div>`;
+  const btnConf = st.criando
+    ? `<button class="pc-conf" onclick="criarProdutoPendencia(${p.id})">➕ Cadastrar e lançar</button>`
+    : `<button class="pc-conf" onclick="resolverPendencia(${p.id})">✅ Confirmar entrada</button>`;
   return `<div class="pend-card" id="pend-${p.id}">
     <div class="pc-cupom">🧾 ${escapeHtml(p.produto_cupom)}</div>
     <div class="pc-meta">Lido da nota: <b>${fmt(p.qtd)} ${uni}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
-    ${selBox}${searchBox}${qtdBox}${memo}
+    ${selBox}${searchBox}${criaBox}${qtdBox}${memo}
     <div class="pc-acoes">
-      <button class="pc-conf" onclick="resolverPendencia(${p.id})">✅ Confirmar entrada</button>
+      ${btnConf}
       <button class="pc-ign" onclick="ignorarPendencia(${p.id})">Ignorar</button>
     </div>
   </div>`;
 }
 function pendPick(id, val) {
   const st = pendState[id] || (pendState[id] = {});
-  if (val === '__buscar__') { st.buscando = true; st.produtoId = ''; }
-  else { st.buscando = false; st.produtoId = val; }
+  st.buscando = false; st.criando = false; st.produtoId = '';
+  if (val === '__buscar__') st.buscando = true;
+  else if (val === '__novo__') st.criando = true;
+  else st.produtoId = val;
   loadPendencias();
+}
+async function criarProdutoPendencia(id) {
+  const nome = (document.getElementById('pc-nome-' + id).value || '').trim();
+  const categoria = (document.getElementById('pc-cat-' + id).value || '').trim();
+  const unidade = document.getElementById('pc-uni-' + id).value;
+  if (!nome || !categoria) { toast('Preencha nome e categoria.', 'err'); return; }
+  const qtdEl = document.getElementById('pc-qtd-' + id);
+  const qtd = qtdEl ? Number(String(qtdEl.value).replace(',', '.')) : null;
+  if (!qtd || qtd <= 0) { toast('Quantidade inválida.', 'err'); return; }
+  const memo = document.getElementById('pc-memo-' + id);
+  try {
+    const r = await apiPost(`/api/pendencias/${id}/criar-produto`, { nome, categoria, unidade, qtd, memorizar: memo ? memo.checked : true });
+    toast(`✅ ${r.produto} cadastrado: +${fmt(r.qtd)} ${unidade}`, 'ok');
+    delete pendState[id];
+    await loadPendencias(); await loadHist();
+  } catch(e) { handleApiError(e, true); }
 }
 let _pendBuscaTimer = null;
 function pendBuscar(id, termo) {
