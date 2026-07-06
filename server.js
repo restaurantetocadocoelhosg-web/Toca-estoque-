@@ -832,6 +832,37 @@ function dataBR(data) {
   return String(data).split('-').reverse().join('/');
 }
 
+function mesAtualISO() {
+  return dateSP().slice(0, 7);
+}
+
+function validarMesISO(mes) {
+  return /^\d{4}-\d{2}$/.test(String(mes || '')) ? String(mes) : mesAtualISO();
+}
+
+function fimMesISO(mes) {
+  const [ano, mesNum] = String(mes).split('-').map(Number);
+  return new Date(Date.UTC(ano, mesNum, 0)).toISOString().slice(0, 10);
+}
+
+function datasEntreISO(inicio, fim) {
+  const out = [];
+  for (let d = inicio; d <= fim; d = addDiasISO(d, 1)) out.push(d);
+  return out;
+}
+
+function diaSemanaBR(data) {
+  const dt = new Date(String(data) + 'T12:00:00Z');
+  return new Intl.DateTimeFormat('pt-BR', { weekday: 'short', timeZone: 'UTC' }).format(dt).replace('.', '');
+}
+
+function dataISOFromTimestampSP(ts) {
+  if (!ts) return '';
+  const dt = new Date(ts);
+  if (Number.isNaN(dt.getTime())) return String(ts).slice(0, 10);
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' }).format(dt);
+}
+
 function pct(valor, total) {
   const v = Number(valor || 0), t = Number(total || 0);
   if (!t) return null;
@@ -917,6 +948,45 @@ function linhaFinanceiraTexto(row, comQtd = false) {
   const qtd = comQtd && row.qtd !== null && row.qtd !== undefined ? `${String(row.qtd).padStart(2, '0')} ` : '';
   const obs = row.obs ? ` ${row.obs}` : '';
   return `${qtd}${row.descricao} ${fmtBRL(row.valor)}${obs}`;
+}
+
+function formaPagamentoInfo(descricao) {
+  const n = normalizeSearch(descricao);
+  if (/dinheiro|especie/.test(n)) return { key: 'dinheiro', label: 'Dinheiro' };
+  if (/stone/.test(n)) return { key: 'stone', label: 'Stone' };
+  if (/pag\s*bank|pagbank/.test(n)) return { key: 'pagbank', label: 'PagBank' };
+  if (/pix/.test(n)) return { key: 'pix', label: 'Pix' };
+  if (/ifood|i-food|entrega|delivery/.test(n)) return { key: 'ifood', label: 'Ifood/Entrega' };
+  if (/cartao|cart|credito|debito|visa|master|elo|hipercard|amex|voucher/.test(n)) return { key: 'cartao', label: 'Cartão' };
+  return { key: 'outros', label: 'Outros' };
+}
+
+function resumoFormasPagamento(pagamentos) {
+  const base = {
+    dinheiro: { key: 'dinheiro', forma: 'Dinheiro', qtd: 0, valor: 0 },
+    stone: { key: 'stone', forma: 'Stone', qtd: 0, valor: 0 },
+    pagbank: { key: 'pagbank', forma: 'PagBank', qtd: 0, valor: 0 },
+    pix: { key: 'pix', forma: 'Pix', qtd: 0, valor: 0 },
+    cartao: { key: 'cartao', forma: 'Cartão', qtd: 0, valor: 0 },
+    ifood: { key: 'ifood', forma: 'Ifood/Entrega', qtd: 0, valor: 0 },
+    outros: { key: 'outros', forma: 'Outros', qtd: 0, valor: 0 },
+  };
+  for (const p of normalizarLinhasFinanceiras(pagamentos, { comQtd: true })) {
+    const info = formaPagamentoInfo(p.descricao);
+    const row = base[info.key] || base.outros;
+    row.qtd += Number(p.qtd || 0);
+    row.valor += Number(p.valor || 0);
+  }
+  for (const row of Object.values(base)) row.valor = Number(row.valor.toFixed(2));
+  return base;
+}
+
+function somarResumoFormas(destino, origem) {
+  for (const [key, row] of Object.entries(origem || {})) {
+    if (!destino[key]) destino[key] = { key, forma: row.forma || key, qtd: 0, valor: 0 };
+    destino[key].qtd += Number(row.qtd || 0);
+    destino[key].valor = Number((Number(destino[key].valor || 0) + Number(row.valor || 0)).toFixed(2));
+  }
 }
 
 function resumirResponsaveis(porResp) {
@@ -1092,6 +1162,183 @@ async function montarRealidadeDia(dataDiaParam) {
         dif_despesas: Number((despesasCaixa - despesasOntem).toFixed(2)),
       }
     }
+  };
+}
+
+function movimentoVazioDia() {
+  return {
+    total: 0,
+    compras: 0, consumo: 0, perdas: 0, ajustes: 0,
+    n_compras: 0, n_consumo: 0, n_perdas: 0, n_ajustes: 0,
+    anomalias: 0,
+  };
+}
+
+async function montarPlanilhaMensal(mesParam) {
+  const mes = validarMesISO(mesParam);
+  const inicio = `${mes}-01`;
+  const fim = fimMesISO(mes);
+  const datas = datasEntreISO(inicio, fim);
+  const movPorDia = Object.fromEntries(datas.map(d => [d, movimentoVazioDia()]));
+  let configuracaoPendente = false;
+
+  const { data: movimentos, error: movErr } = await supabase.from('movimentacoes')
+    .select('created_at, tipo, valor, obs')
+    .gte('created_at', inicio + 'T00:00:00-03:00')
+    .lte('created_at', fim + 'T23:59:59-03:00');
+  if (movErr) throw movErr;
+
+  for (const m of (movimentos || [])) {
+    const dia = dataISOFromTimestampSP(m.created_at);
+    if (!movPorDia[dia]) continue;
+    const mov = movPorDia[dia];
+    const valor = Number(m.valor || 0);
+    const tipo = m.tipo || '';
+    mov.total++;
+    if (m.obs && /anomalia/i.test(m.obs)) mov.anomalias++;
+    if (tipo === 'Entrada') { mov.compras += valor; mov.n_compras++; }
+    else if (tipo === 'Saída') { mov.consumo += valor; mov.n_consumo++; }
+    else if (tipo === 'Perda') { mov.perdas += valor; mov.n_perdas++; }
+    else if (tipo === 'Ajuste') { mov.ajustes += valor; mov.n_ajustes++; }
+  }
+  for (const mov of Object.values(movPorDia)) {
+    mov.compras = Number(mov.compras.toFixed(2));
+    mov.consumo = Number(mov.consumo.toFixed(2));
+    mov.perdas = Number(mov.perdas.toFixed(2));
+    mov.ajustes = Number(mov.ajustes.toFixed(2));
+  }
+
+  let fechamentos = [];
+  const { data: fechData, error: fechErr } = await supabase.from('fechamentos_diarios')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto')
+    .gte('data', inicio)
+    .lte('data', fim)
+    .order('data', { ascending: true });
+  if (fechErr) {
+    if (isTabelaFechamentoMissing(fechErr)) configuracaoPendente = true;
+    else throw fechErr;
+  } else {
+    fechamentos = fechData || [];
+  }
+
+  const fechPorDia = Object.fromEntries(fechamentos.map(row => [String(row.data).slice(0, 10), row]));
+  const formasMes = resumoFormasPagamento([]);
+  const totais = {
+    dias_mes: datas.length,
+    dias_com_caixa: 0,
+    dias_com_estoque: 0,
+    dias_com_movimento: 0,
+    dias_sem_caixa: 0,
+    pratos_vendidos: 0,
+    vendas: 0,
+    total_pagamentos: 0,
+    cortes: 0,
+    despesas: 0,
+    compras_estoque: 0,
+    consumo_estoque: 0,
+    perdas: 0,
+    ajustes: 0,
+    lucro_bruto_estimado: 0,
+    resultado_dia_estimado: 0,
+    fluxo_caixa: 0,
+    anomalias: 0,
+    ticket_medio: null,
+  };
+
+  const dias = datas.map(dataDia => {
+    const row = fechPorDia[dataDia] || null;
+    const mov = movPorDia[dataDia] || movimentoVazioDia();
+    const pagamentos = normalizarLinhasFinanceiras(row?.pagamentos || [], { comQtd: true });
+    const cortes = normalizarLinhasFinanceiras(row?.cortes || [], { comQtd: true });
+    const despesasLista = normalizarLinhasFinanceiras(row?.despesas || [], { comQtd: false });
+    const formas = resumoFormasPagamento(pagamentos);
+    somarResumoFormas(formasMes, formas);
+
+    const totalPagamentos = somaLinhasFinanceiras(pagamentos);
+    const vendas = Number(row?.vendas || totalPagamentos || 0);
+    const totalCortes = somaLinhasFinanceiras(cortes);
+    const despesas = somaLinhasFinanceiras(despesasLista);
+    const pratosVendidos = parseNonNegativeInteger(row?.pratos_vendidos || 0);
+    const lucroBruto = Number((vendas - mov.consumo - mov.perdas).toFixed(2));
+    const resultadoDia = Number((lucroBruto - despesas).toFixed(2));
+    const fluxoCaixa = Number((vendas - despesas).toFixed(2));
+    const vendaLancada = !!row;
+    const temEstoque = mov.total > 0;
+    const temMovimento = vendaLancada || temEstoque;
+    const status = vendaLancada ? (temEstoque ? 'fechado' : 'caixa') : (temEstoque ? 'sem_caixa' : 'vazio');
+
+    totais.dias_com_caixa += vendaLancada ? 1 : 0;
+    totais.dias_com_estoque += temEstoque ? 1 : 0;
+    totais.dias_com_movimento += temMovimento ? 1 : 0;
+    totais.pratos_vendidos += pratosVendidos;
+    totais.vendas += vendas;
+    totais.total_pagamentos += totalPagamentos;
+    totais.cortes += totalCortes;
+    totais.despesas += despesas;
+    totais.compras_estoque += mov.compras;
+    totais.consumo_estoque += mov.consumo;
+    totais.perdas += mov.perdas;
+    totais.ajustes += mov.ajustes;
+    totais.lucro_bruto_estimado += lucroBruto;
+    totais.resultado_dia_estimado += resultadoDia;
+    totais.fluxo_caixa += fluxoCaixa;
+    totais.anomalias += mov.anomalias;
+
+    return {
+      data: dataDia,
+      data_br: dataBR(dataDia),
+      dia_semana: diaSemanaBR(dataDia),
+      status,
+      venda_lancada: vendaLancada,
+      tem_movimento: temMovimento,
+      pratos_vendidos: pratosVendidos,
+      vendas,
+      pagamentos,
+      formas,
+      total_pagamentos: totalPagamentos,
+      cortes,
+      total_cortes: totalCortes,
+      despesas_lista: despesasLista,
+      despesas,
+      compras_estoque: mov.compras,
+      consumo_estoque: mov.consumo,
+      perdas: mov.perdas,
+      ajustes: mov.ajustes,
+      lucro_bruto_estimado: lucroBruto,
+      resultado_dia_estimado: resultadoDia,
+      fluxo_caixa: fluxoCaixa,
+      movimentos_total: mov.total,
+      movimentos: mov,
+      responsavel: row?.responsavel || '',
+      observacao: row?.observacao || '',
+      atualizado_em: row?.updated_at || row?.created_at || null,
+    };
+  });
+
+  for (const key of ['vendas','total_pagamentos','cortes','despesas','compras_estoque','consumo_estoque','perdas','ajustes','lucro_bruto_estimado','resultado_dia_estimado','fluxo_caixa']) {
+    totais[key] = Number(totais[key].toFixed(2));
+  }
+  totais.dias_sem_caixa = dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).length;
+  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas / totais.pratos_vendidos).toFixed(2)) : null;
+
+  const formasPagamento = Object.values(formasMes)
+    .map(row => ({ ...row, valor: Number(Number(row.valor || 0).toFixed(2)) }))
+    .filter(row => row.valor > 0 || row.qtd > 0)
+    .sort((a, b) => b.valor - a.valor);
+
+  return {
+    mes,
+    mes_label: mes.split('-').reverse().join('/'),
+    inicio,
+    fim,
+    configuracao_pendente: configuracaoPendente,
+    totais,
+    formas_pagamento: formasPagamento,
+    pendencias: {
+      sem_caixa: dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).map(d => d.data),
+      vazios: dias.filter(d => !d.tem_movimento).map(d => d.data),
+    },
+    dias,
   };
 }
 
@@ -1287,6 +1534,16 @@ app.post('/api/realidade-dia/mover', auth, requirePerm('lancar'), async (req, re
   }
 });
 
+app.get('/api/planilha-mensal', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const planilha = await montarPlanilhaMensal(req.query?.mes);
+    res.json(planilha);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar planilha mensal.' });
+  }
+});
+
 // ==================== EXPORTAR ====================
 app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
   const { tipo } = req.params;
@@ -1310,6 +1567,34 @@ app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) =
     rows = (data || []).filter(r => Number(r.qtd) <= Number(r.minimo) * 0.5)
       .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
     filename = 'lista_compras_toca_coelho.csv';
+  } else if (tipo === 'fechamentos') {
+    const planilha = await montarPlanilhaMensal(req.query?.mes);
+    headers = ['Data','Dia','Status','Pratos','Vendas','Dinheiro','Stone','PagBank','Pix','Cartão','Ifood/Entrega','Outros','Cortes','Despesas','Compras Estoque','Consumo Estoque','Perdas','Resultado','Caixa','Mov. Estoque','Responsável','Observação'];
+    rows = planilha.dias.map(d => [
+      d.data_br,
+      d.dia_semana,
+      d.status,
+      d.pratos_vendidos,
+      d.vendas.toFixed(2),
+      (d.formas?.dinheiro?.valor || 0).toFixed(2),
+      (d.formas?.stone?.valor || 0).toFixed(2),
+      (d.formas?.pagbank?.valor || 0).toFixed(2),
+      (d.formas?.pix?.valor || 0).toFixed(2),
+      (d.formas?.cartao?.valor || 0).toFixed(2),
+      (d.formas?.ifood?.valor || 0).toFixed(2),
+      (d.formas?.outros?.valor || 0).toFixed(2),
+      d.total_cortes.toFixed(2),
+      d.despesas.toFixed(2),
+      d.compras_estoque.toFixed(2),
+      d.consumo_estoque.toFixed(2),
+      d.perdas.toFixed(2),
+      d.resultado_dia_estimado.toFixed(2),
+      d.fluxo_caixa.toFixed(2),
+      d.movimentos_total,
+      d.responsavel,
+      d.observacao,
+    ]);
+    filename = `fechamento_mensal_${planilha.mes}.csv`;
   } else return res.status(400).json({ erro: 'Tipo inválido' });
   await audit('exportar', { tipo }, req.user, getClientIp(req));
   const csv = [headers, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
@@ -1448,6 +1733,41 @@ app.get('/api/relatorio/:tipo', auth, requirePerm('exportar'), async (req, res) 
           `<table><tr><th>Hora</th><th>Produto</th><th>Tipo</th><th class="num">Qtd</th><th class="num">Valor</th><th>Por</th><th>Motivo</th></tr>${linhas}</table></div>`;
       }
       html = paginaRelatorio('Movimentações', 'Últimos lançamentos agrupados por dia (até 400).', corpo || '<div class="cat"><div style="padding:24px;text-align:center;color:#64748b">Sem movimentações.</div></div>');
+
+    } else if (tipo === 'fechamento') {
+      const planilha = await montarPlanilhaMensal(req.query?.mes);
+      const t = planilha.totais;
+      const chips =
+        `<div class="chip" style="color:#16a34a">Vendas<b>${fmtBRL(t.vendas)}</b></div>` +
+        `<div class="chip">Pratos<b>${t.pratos_vendidos}</b></div>` +
+        `<div class="chip" style="color:#ea580c">Consumo<b>${fmtBRL(t.consumo_estoque)}</b></div>` +
+        `<div class="chip" style="color:#ef4444">Perdas<b>${fmtBRL(t.perdas)}</b></div>` +
+        `<div class="chip" style="color:#ef4444">Despesas<b>${fmtBRL(t.despesas)}</b></div>` +
+        `<div class="chip" style="color:${t.resultado_dia_estimado < 0 ? '#ef4444' : '#16a34a'}">Resultado<b>${fmtBRL(t.resultado_dia_estimado)}</b></div>`;
+
+      const formas = planilha.formas_pagamento.length
+        ? `<div class="cat"><div class="cat-h" style="background:#0f766e"><span>Recebimentos por forma</span><span>${fmtBRL(t.vendas)}</span></div><table><tr><th>Forma</th><th class="num">Qtd</th><th class="num">Valor</th><th class="num">% vendas</th></tr>` +
+          planilha.formas_pagamento.map(f => `<tr><td>${escHtml(f.forma)}</td><td class="num">${f.qtd || ''}</td><td class="num">${fmtBRL(f.valor)}</td><td class="num">${pct(f.valor, t.vendas)?.toFixed(2).replace('.', ',') || '0,00'}%</td></tr>`).join('') +
+          `</table></div>`
+        : '';
+
+      const linhas = planilha.dias.map(d => {
+        const statusLabel = d.status === 'fechado' ? 'Fechado' : d.status === 'caixa' ? 'Só caixa' : d.status === 'sem_caixa' ? 'Falta caixa' : 'Sem movimento';
+        const cor = d.status === 'fechado' ? '#16a34a' : d.status === 'sem_caixa' ? '#ef4444' : d.status === 'caixa' ? '#f59e0b' : '#94a3b8';
+        return `<tr><td>${escHtml(d.data_br)}</td><td>${escHtml(d.dia_semana)}</td>` +
+          `<td><span class="badge" style="background:${cor}22;color:${cor}">${statusLabel}</span></td>` +
+          `<td class="num">${d.pratos_vendidos || ''}</td><td class="num">${fmtBRL(d.vendas)}</td>` +
+          `<td class="num">${fmtBRL(d.formas?.dinheiro?.valor || 0)}</td><td class="num">${fmtBRL(d.formas?.stone?.valor || 0)}</td>` +
+          `<td class="num">${fmtBRL(d.formas?.pagbank?.valor || 0)}</td><td class="num">${fmtBRL(d.formas?.pix?.valor || 0)}</td>` +
+          `<td class="num">${fmtBRL(d.despesas)}</td><td class="num">${fmtBRL(d.consumo_estoque)}</td>` +
+          `<td class="num">${fmtBRL(d.perdas)}</td><td class="num">${fmtBRL(d.resultado_dia_estimado)}</td></tr>`;
+      }).join('');
+      const tabela = `<div class="cat"><div class="cat-h" style="background:#334155"><span>Dias do mês</span><span>${t.dias_com_movimento}/${t.dias_mes} movimentados</span></div>` +
+        `<table><tr><th>Data</th><th>Dia</th><th>Status</th><th class="num">Pratos</th><th class="num">Vendas</th><th class="num">Dinheiro</th><th class="num">Stone</th><th class="num">PagBank</th><th class="num">Pix</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th></tr>${linhas}</table></div>`;
+      const pend = planilha.pendencias.sem_caixa.length
+        ? `<div class="cat"><div style="padding:16px;color:#ef4444;font-weight:700">Atenção: ${planilha.pendencias.sem_caixa.length} dia(s) têm movimentação de estoque, mas ainda não têm movimento do caixa lançado: ${planilha.pendencias.sem_caixa.map(dataBR).join(', ')}.</div></div>`
+        : '';
+      html = paginaRelatorio('Fechamento Mensal', `Planilha do mês ${planilha.mes_label}, no estilo fluxo de caixa.`, `<div class="barra">${chips}</div>${pend}${formas}${tabela}`);
 
     } else return res.status(400).send('Tipo inválido');
 

@@ -297,9 +297,33 @@ select.big-input { font-size: 14px; }
 .real-loss-name { font-size: 13px; font-weight: 800; color: var(--text); }
 .real-loss-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .real-loss-val { font-size: 14px; font-weight: 800; color: var(--red); white-space: nowrap; }
+.sheet-section { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.sheet-head { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; }
+.sheet-head .small-input { background: var(--s1); }
+.sheet-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.sheet-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg); }
+.sheet-table { width: 100%; min-width: 980px; border-collapse: collapse; }
+.sheet-table th, .sheet-table td { padding: 9px 10px; border-bottom: 1px solid var(--border); font-size: 12px; text-align: left; white-space: nowrap; }
+.sheet-table th { position: sticky; top: 0; background: var(--s2); color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.4px; z-index: 1; }
+.sheet-table td.num, .sheet-table th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.sheet-table tr:last-child td { border-bottom: 0; }
+.sheet-table tr.sheet-row-open { cursor: pointer; }
+.sheet-table tr.sheet-row-open:active { background: rgba(232,93,38,0.06); }
+.sheet-status { display: inline-flex; align-items: center; gap: 5px; border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 800; }
+.sheet-status.fechado { background: rgba(16,185,129,0.12); color: var(--green); }
+.sheet-status.caixa { background: rgba(245,158,11,0.14); color: #9a6400; }
+.sheet-status.sem_caixa { background: rgba(239,68,68,0.1); color: var(--red); }
+.sheet-status.vazio { background: var(--s2); color: var(--muted); }
+.sheet-pay-list, .sheet-pendency-list { display: flex; flex-direction: column; gap: 8px; }
+.sheet-pay-row, .sheet-pendency-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+.sheet-pay-row b, .sheet-pendency-row b { color: var(--text); }
+.sheet-muted { color: var(--muted); font-size: 12px; }
+.sheet-card-title-actions { display: flex; gap: 6px; align-items: center; }
 @media (max-width: 380px) {
   .real-money-row { grid-template-columns: 1fr 58px 92px 32px; gap: 5px; }
   .real-money-row.no-qtd { grid-template-columns: 1fr 92px 32px; }
+  .sheet-head { grid-template-columns: 1fr 1fr; }
+  .sheet-head .btn-sm:first-of-type { grid-column: 1 / -1; }
 }
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty-icon { font-size: 36px; margin-bottom: 10px; }
@@ -806,6 +830,51 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- PLANILHA MENSAL -->
+  <div id="p-planilha" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">📈 Planilha mensal</div>
+        <div class="sheet-head">
+          <input type="month" class="small-input" id="planilha-mes" onchange="loadPlanilhaMensal()">
+          <button class="btn-sm" onclick="planilhaMesAtual()">Este mês</button>
+          <button class="btn-sm" onclick="loadPlanilhaMensal()">↻</button>
+        </div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button class="btn-export btn-success" onclick="exportarPlanilhaMensal()">⬇️ CSV / Excel</button>
+          <button class="btn-export btn-primary" onclick="relatorioPlanilhaMensal()">🖨️ PDF</button>
+        </div>
+        <div id="planilha-config" class="real-alert" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Resumo do mês</div>
+        <div class="real-grid" id="planilha-resumo"><div class="loading">Carregando...</div></div>
+        <div class="real-insight" id="planilha-insight" style="margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Recebimentos por forma</div>
+        <div id="planilha-formas" class="sheet-pay-list"><div class="empty"><div class="empty-text">—</div></div></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>Dias do mês</span>
+          <span class="sheet-muted">toque para abrir o dia</span>
+        </div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="planilha-tabela"></table>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Pendências de fechamento</div>
+        <div id="planilha-pendencias" class="sheet-pendency-list"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- EXPORTAR -->
   <div id="p-export" class="page">
     <div class="export-list">
@@ -868,7 +937,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v45</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v46</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1071,6 +1140,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('estoque', this)"><span class="icon">📦</span>Estoque</button>
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
+  <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
@@ -1219,6 +1289,7 @@ let prodAtual = null;
 let estStatus = '';
 let cupomItens = []; // estado dos itens do cupom
 let realidadeCache = null;
+let planilhaCache = null;
 let mostrarOkConferenciaCaixa = false;
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
@@ -1362,6 +1433,7 @@ async function loadSession() {
   gate('nav-chat', P.ia);
   gate('nav-audit', P.auditoria);
   gate('nav-export', P.exportar);
+  gate('nav-planilha', P.exportar);
   gate('nav-alertas', P.alertas);
   gate('nav-agenda', P.agenda);
   // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
@@ -1370,7 +1442,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-alertas','nav-agenda'].forEach(id => {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-planilha','nav-alertas','nav-agenda'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -1423,6 +1495,7 @@ function goPage(id, btn) {
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
   if (id === 'realidade') loadRealidade();
+  if (id === 'planilha') loadPlanilhaMensal();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
@@ -2710,6 +2783,195 @@ async function limparRealidadeDia() {
     renderRealidade(d);
     toast('Movimento limpo', 'ok');
   } catch(e) { handleApiError(e, true); }
+}
+
+function mesAtualClient() {
+  return hojeSPClient().slice(0, 7);
+}
+
+function planilhaMesAtual() {
+  const el = document.getElementById('planilha-mes');
+  if (el) el.value = mesAtualClient();
+  loadPlanilhaMensal();
+}
+
+function sheetStatusLabel(status) {
+  return {
+    fechado: 'Fechado',
+    caixa: 'Só caixa',
+    sem_caixa: 'Falta caixa',
+    vazio: 'Vazio',
+  }[status] || status || '—';
+}
+
+function fmtSheetMoney(n) {
+  const val = Number(n || 0);
+  return val ? fmtBRLMoney(val) : '—';
+}
+
+async function loadPlanilhaMensal() {
+  const mesEl = document.getElementById('planilha-mes');
+  if (!mesEl) return;
+  if (!mesEl.value) mesEl.value = mesAtualClient();
+  const resumoEl = document.getElementById('planilha-resumo');
+  const tabelaEl = document.getElementById('planilha-tabela');
+  const formasEl = document.getElementById('planilha-formas');
+  const pendEl = document.getElementById('planilha-pendencias');
+  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
+  tabelaEl.innerHTML = '';
+  formasEl.innerHTML = '<div class="loading">Carregando...</div>';
+  pendEl.innerHTML = '';
+  try {
+    const d = await api('/api/planilha-mensal?mes=' + encodeURIComponent(mesEl.value));
+    planilhaCache = d;
+    renderPlanilhaMensal(d);
+  } catch(e) {
+    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar planilha.</div></div>';
+    formasEl.innerHTML = '';
+    handleApiError(e, true);
+  }
+}
+
+function renderPlanilhaMensal(d) {
+  const t = d.totais || {};
+  const configEl = document.getElementById('planilha-config');
+  const resumoEl = document.getElementById('planilha-resumo');
+  const insightEl = document.getElementById('planilha-insight');
+  const formasEl = document.getElementById('planilha-formas');
+  const tabelaEl = document.getElementById('planilha-tabela');
+  const pendEl = document.getElementById('planilha-pendencias');
+
+  if (d.configuracao_pendente) {
+    configEl.style.display = 'block';
+    configEl.textContent = 'Configure a tabela fechamentos_diarios no Supabase para usar a planilha mensal.';
+  } else {
+    configEl.style.display = 'none';
+  }
+
+  resumoEl.innerHTML = `
+    <div class="real-kpi big">
+      <div class="real-label">Resultado do mês</div>
+      <div class="real-val ${Number(t.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_dia_estimado)}</div>
+      <div class="real-sub">vendas - consumo - perdas - despesas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Vendas</div>
+      <div class="real-val green">${fmtBRLMoney(t.vendas)}</div>
+      <div class="real-sub">${t.pratos_vendidos || 0} pratos · ticket ${fmtBRLMoney(t.ticket_medio)}</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Caixa</div>
+      <div class="real-val ${Number(t.fluxo_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.fluxo_caixa)}</div>
+      <div class="real-sub">vendas - despesas</div>
+    </div>
+    <div class="real-kpi warn">
+      <div class="real-label">Compras</div>
+      <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
+      <div class="real-sub">investimento separado</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Consumo</div>
+      <div class="real-val">${fmtBRLMoney(t.consumo_estoque)}</div>
+      <div class="real-sub">${fmtPct(t.vendas ? (t.consumo_estoque / t.vendas) * 100 : null)} das vendas</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Perdas</div>
+      <div class="real-val red">${fmtBRLMoney(t.perdas)}</div>
+      <div class="real-sub">${fmtPct(t.vendas ? (t.perdas / t.vendas) * 100 : null)} das vendas</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Despesas</div>
+      <div class="real-val red">${fmtBRLMoney(t.despesas)}</div>
+      <div class="real-sub">${fmtPct(t.vendas ? (t.despesas / t.vendas) * 100 : null)} das vendas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Dias fechados</div>
+      <div class="real-val">${t.dias_com_caixa || 0}/${t.dias_mes || 0}</div>
+      <div class="real-sub">${t.dias_sem_caixa || 0} com estoque sem caixa</div>
+    </div>`;
+
+  insightEl.textContent = `Mês ${d.mes_label}: ${t.dias_com_movimento || 0} dia(s) com movimento. Compras aparecem separadas do resultado, igual combinamos.`;
+
+  if (d.formas_pagamento?.length) {
+    formasEl.innerHTML = d.formas_pagamento.map(f => `
+      <div class="sheet-pay-row">
+        <div><b>${escapeHtml(f.forma)}</b><div class="sheet-muted">${f.qtd ? f.qtd + ' lançamento(s)' : 'sem quantidade'}</div></div>
+        <b>${fmtBRLMoney(f.valor)}</b>
+      </div>`).join('');
+  } else {
+    formasEl.innerHTML = '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum recebimento lançado neste mês.</div></div>';
+  }
+
+  tabelaEl.innerHTML = `
+    <thead><tr>
+      <th>Data</th><th>Dia</th><th>Status</th><th class="num">Pratos</th><th class="num">Vendas</th>
+      <th class="num">Dinheiro</th><th class="num">Stone</th><th class="num">PagBank</th><th class="num">Pix</th>
+      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Mov.</th>
+    </tr></thead>
+    <tbody>${(d.dias || []).map(row => `
+      <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
+        <td><b>${escapeHtml(row.data_br)}</b></td>
+        <td>${escapeHtml(row.dia_semana || '')}</td>
+        <td><span class="sheet-status ${escapeHtml(row.status)}">${sheetStatusLabel(row.status)}</span></td>
+        <td class="num">${row.pratos_vendidos || '—'}</td>
+        <td class="num">${fmtSheetMoney(row.vendas)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.dinheiro?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.stone?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.pagbank?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.pix?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.total_cortes)}</td>
+        <td class="num">${fmtSheetMoney(row.despesas)}</td>
+        <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
+        <td class="num">${fmtSheetMoney(row.perdas)}</td>
+        <td class="num"><b class="${Number(row.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_dia_estimado)}</b></td>
+        <td class="num">${row.movimentos_total || '—'}</td>
+      </tr>`).join('')}</tbody>`;
+
+  const pendencias = [];
+  if (d.pendencias?.sem_caixa?.length) {
+    pendencias.push(`<div class="sheet-pendency-row"><div><b>Falta lançar caixa</b><div class="sheet-muted">${d.pendencias.sem_caixa.map(dataBRClient).join(', ')}</div></div><b>${d.pendencias.sem_caixa.length}</b></div>`);
+  }
+  if (!pendencias.length) {
+    pendEl.innerHTML = '<div class="sheet-pendency-row"><div><b>Tudo certo no cruzamento principal</b><div class="sheet-muted">Nenhum dia com estoque movimentado sem caixa lançado.</div></div><b class="green">OK</b></div>';
+  } else {
+    pendEl.innerHTML = pendencias.join('');
+  }
+}
+
+function abrirDiaPlanilha(data) {
+  const dataEl = document.getElementById('real-data');
+  if (dataEl) dataEl.value = data;
+  goPage('realidade', document.getElementById('nav-realidade'));
+}
+
+async function exportarPlanilhaMensal() {
+  const mes = document.getElementById('planilha-mes')?.value || mesAtualClient();
+  try {
+    const res = await fetch(API + `/api/exportar/fechamentos?mes=${encodeURIComponent(mes)}`, { headers: authHeaders() });
+    if (!res.ok) { const t = await res.text(); let msg = 'Erro ao exportar'; try { msg = JSON.parse(t).erro || msg; } catch(_) {} throw new Error(msg); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `fechamento_mensal_${mes}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  } catch(e) { handleApiError(e); }
+}
+
+async function relatorioPlanilhaMensal() {
+  const mes = document.getElementById('planilha-mes')?.value || mesAtualClient();
+  const win = window.open('', '_blank');
+  if (win) win.document.write('<p style="font-family:sans-serif;padding:24px;color:#475569">Gerando relatório mensal…</p>');
+  try {
+    const res = await fetch(API + `/api/relatorio/fechamento?mes=${encodeURIComponent(mes)}`, { headers: authHeaders() });
+    if (!res.ok) { const t = await res.text(); throw new Error((t || '').slice(0, 180) || 'Erro ao gerar relatório'); }
+    const html = await res.text();
+    if (win) { win.document.open(); win.document.write(html); win.document.close(); }
+    else { const blob = new Blob([html], { type: 'text/html' }); window.location.href = URL.createObjectURL(blob); }
+  } catch(e) {
+    if (win) win.document.write('<p style="color:#dc2626;font-family:sans-serif;padding:24px">Erro: ' + (e.message || '?') + '</p>');
+    handleApiError(e);
+  }
 }
 
 function irLancarPerda() {
