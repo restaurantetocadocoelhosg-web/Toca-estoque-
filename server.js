@@ -878,6 +878,15 @@ function isTabelaFechamentoMissing(error) {
   );
 }
 
+function isTabelaPagamentosMissing(error) {
+  const msg = String(error?.message || error?.details || '');
+  return error && (
+    error.code === '42P01' ||
+    error.code === 'PGRST205' ||
+    /pagamentos_comprovantes|schema cache|does not exist|relation|column/i.test(msg)
+  );
+}
+
 function parseMoneyNumber(value) {
   if (value === null || value === undefined || value === '') return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -987,6 +996,285 @@ function somarResumoFormas(destino, origem) {
     destino[key].qtd += Number(row.qtd || 0);
     destino[key].valor = Number((Number(destino[key].valor || 0) + Number(row.valor || 0)).toFixed(2));
   }
+}
+
+function normalizarFormaPagamentoTexto(value) {
+  const raw = sanitizeText(value || '', 40);
+  const n = normalizeSearch(raw);
+  if (/stone/.test(n)) return 'Stone';
+  if (/pag\s*bank|pagbank/.test(n)) return 'PagBank';
+  if (/pix/.test(n)) return 'Pix';
+  if (/dinheiro|especie/.test(n)) return 'Dinheiro';
+  if (/debito/.test(n)) return 'Débito';
+  if (/credito/.test(n)) return 'Crédito';
+  if (/cartao|visa|master|elo|hipercard|amex/.test(n)) return 'Cartão';
+  return raw || 'Outro';
+}
+
+function normalizarPagamentoInput(input = {}) {
+  const data = validarDataISO(input.data);
+  const forma = normalizarFormaPagamentoTexto(input.forma || input.tipo || input.meio || input.operadora || '');
+  const operadora = sanitizeText(input.operadora || '', 40);
+  const bandeira = sanitizeText(input.bandeira || '', 40);
+  let valorBruto = parseNonNegativeMoney(input.valor_bruto ?? input.valor ?? input.total) ?? 0;
+  const taxa = parseNonNegativeMoney(input.taxa) ?? 0;
+  let valorLiquido = parseNonNegativeMoney(input.valor_liquido ?? input.liquido) ?? null;
+  if (valorLiquido === null) valorLiquido = Math.max(0, Number((valorBruto - taxa).toFixed(2)));
+  if (!valorBruto && valorLiquido) valorBruto = Number((valorLiquido + taxa).toFixed(2));
+  const parcelas = parseNonNegativeInteger(input.parcelas || 0);
+  const nsu = sanitizeText(input.nsu || '', 60);
+  const autorizacao = sanitizeText(input.autorizacao || input.aut || '', 60);
+  const descricao = sanitizeText(input.descricao || input.observacao || '', 180);
+  const comprovanteTexto = sanitizeLongText(input.comprovante_texto || input.texto || '', 3000);
+  const origem = sanitizeText(input.origem || '', 30);
+
+  return {
+    data,
+    forma,
+    operadora,
+    bandeira,
+    valor_bruto: Number(valorBruto.toFixed(2)),
+    taxa: Number(taxa.toFixed(2)),
+    valor_liquido: Number(valorLiquido.toFixed(2)),
+    nsu,
+    autorizacao,
+    parcelas,
+    descricao,
+    comprovante_texto: comprovanteTexto,
+    origem,
+  };
+}
+
+function normalizarPagamentoDb(row) {
+  return {
+    id: row.id,
+    data: String(row.data || '').slice(0, 10),
+    data_br: dataBR(String(row.data || '').slice(0, 10)),
+    forma: row.forma || '',
+    operadora: row.operadora || '',
+    bandeira: row.bandeira || '',
+    valor_bruto: Number(row.valor_bruto || 0),
+    taxa: Number(row.taxa || 0),
+    valor_liquido: Number(row.valor_liquido || 0),
+    nsu: row.nsu || '',
+    autorizacao: row.autorizacao || '',
+    parcelas: Number(row.parcelas || 0),
+    descricao: row.descricao || '',
+    comprovante_texto: row.comprovante_texto || '',
+    origem: row.origem || '',
+    responsavel: row.responsavel || '',
+    created_at: row.created_at || null,
+    updated_at: row.updated_at || null,
+  };
+}
+
+function agruparPagamentos(rows, campo) {
+  const out = {};
+  for (const p of rows) {
+    const key = p[campo] || 'Não informado';
+    if (!out[key]) out[key] = { nome: key, qtd: 0, valor_bruto: 0, taxa: 0, valor_liquido: 0 };
+    out[key].qtd++;
+    out[key].valor_bruto += Number(p.valor_bruto || 0);
+    out[key].taxa += Number(p.taxa || 0);
+    out[key].valor_liquido += Number(p.valor_liquido || 0);
+  }
+  return Object.values(out)
+    .map(r => ({
+      ...r,
+      valor_bruto: Number(r.valor_bruto.toFixed(2)),
+      taxa: Number(r.taxa.toFixed(2)),
+      valor_liquido: Number(r.valor_liquido.toFixed(2)),
+    }))
+    .sort((a, b) => b.valor_bruto - a.valor_bruto);
+}
+
+async function montarPagamentosMensal(mesParam) {
+  const mes = validarMesISO(mesParam);
+  const inicio = `${mes}-01`;
+  const fim = fimMesISO(mes);
+  const { data, error } = await supabase.from('pagamentos_comprovantes')
+    .select('*')
+    .gte('data', inicio)
+    .lte('data', fim)
+    .order('data', { ascending: false })
+    .order('id', { ascending: false });
+  if (error) {
+    if (isTabelaPagamentosMissing(error)) {
+      return {
+        mes,
+        mes_label: mes.split('-').reverse().join('/'),
+        configuracao_pendente: true,
+        totais: { qtd: 0, valor_bruto: 0, taxa: 0, valor_liquido: 0, ticket_medio: null },
+        por_forma: [],
+        por_operadora: [],
+        pagamentos: [],
+      };
+    }
+    throw error;
+  }
+  const pagamentos = (data || []).map(normalizarPagamentoDb);
+  const totais = pagamentos.reduce((acc, p) => {
+    acc.qtd++;
+    acc.valor_bruto += Number(p.valor_bruto || 0);
+    acc.taxa += Number(p.taxa || 0);
+    acc.valor_liquido += Number(p.valor_liquido || 0);
+    return acc;
+  }, { qtd: 0, valor_bruto: 0, taxa: 0, valor_liquido: 0, ticket_medio: null });
+  totais.valor_bruto = Number(totais.valor_bruto.toFixed(2));
+  totais.taxa = Number(totais.taxa.toFixed(2));
+  totais.valor_liquido = Number(totais.valor_liquido.toFixed(2));
+  totais.ticket_medio = totais.qtd ? Number((totais.valor_bruto / totais.qtd).toFixed(2)) : null;
+  return {
+    mes,
+    mes_label: mes.split('-').reverse().join('/'),
+    configuracao_pendente: false,
+    totais,
+    por_forma: agruparPagamentos(pagamentos, 'forma'),
+    por_operadora: agruparPagamentos(pagamentos, 'operadora'),
+    pagamentos,
+  };
+}
+
+function extrairValoresFinanceirosTexto(texto) {
+  const matches = String(texto || '').match(/(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$?\s*)?\d+[,.]\d{2}/g) || [];
+  return matches.map(raw => ({ raw, valor: parseMoneyNumber(raw) })).filter(v => v.valor !== null);
+}
+
+function extrairValorPorRotulo(texto, rotulos) {
+  const escaped = rotulos.map(r => r.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp(`(?:${escaped})[^\\n\\dR$]{0,40}((?:R\\$?\\s*)?\\d{1,3}(?:\\.\\d{3})*,\\d{2}|(?:R\\$?\\s*)?\\d+[,.]\\d{2})`, 'i');
+  const m = String(texto || '').match(re);
+  return m ? parseMoneyNumber(m[1]) : null;
+}
+
+function extrairPagamentoTextoLocal(texto, dataPadrao) {
+  const s = String(texto || '');
+  const sNorm = normalizeSearch(s);
+  const dataMatch = s.match(/\b(\d{1,2})[\/.-](\d{1,2})(?:[\/.-](\d{2,4}))?\b/);
+  let data = validarDataISO(dataPadrao);
+  if (dataMatch) {
+    const dia = Number(dataMatch[1]);
+    const mes = Number(dataMatch[2]);
+    let ano = dataMatch[3] ? Number(dataMatch[3]) : Number(data.slice(0, 4));
+    if (ano < 100) ano += 2000;
+    const dt = new Date(Date.UTC(ano, mes - 1, dia));
+    if (dt.getUTCFullYear() === ano && dt.getUTCMonth() === mes - 1 && dt.getUTCDate() === dia) {
+      data = `${ano}-${String(mes).padStart(2, '0')}-${String(dia).padStart(2, '0')}`;
+    }
+  }
+
+  const valores = extrairValoresFinanceirosTexto(s);
+  let valorBruto =
+    extrairValorPorRotulo(s, ['valor da venda', 'valor total', 'valor', 'total', 'bruto']) ??
+    (valores.length ? Math.max(...valores.map(v => v.valor)) : 0);
+  const taxa = extrairValorPorRotulo(s, ['taxa', 'tarifa', 'desconto']) ?? 0;
+  const valorLiquido = extrairValorPorRotulo(s, ['valor liquido', 'valor líquido', 'liquido', 'líquido', 'a receber', 'repasse']) ?? Math.max(0, valorBruto - taxa);
+
+  const forma = normalizarFormaPagamentoTexto(
+    /stone/.test(sNorm) ? 'Stone' :
+    /pag\s*bank|pagbank/.test(sNorm) ? 'PagBank' :
+    /pix/.test(sNorm) ? 'Pix' :
+    /dinheiro|especie/.test(sNorm) ? 'Dinheiro' :
+    /debito/.test(sNorm) ? 'Débito' :
+    /credito/.test(sNorm) ? 'Crédito' :
+    /cartao/.test(sNorm) ? 'Cartão' : ''
+  );
+  const operadora = /stone/.test(sNorm) ? 'Stone' : (/pag\s*bank|pagbank/.test(sNorm) ? 'PagBank' : '');
+  const bandeira = (s.match(/\b(VISA|MASTERCARD|MASTER|ELO|HIPERCARD|AMEX|AMERICAN EXPRESS)\b/i)?.[1] || '').replace(/MASTER$/i, 'Mastercard');
+  const nsu = sanitizeText(s.match(/\bNSU[:\s-]*([A-Z0-9.-]+)/i)?.[1] || '', 60);
+  const autorizacao = sanitizeText(s.match(/\b(?:AUT|AUTORIZA(?:CAO|ÇÃO)|COD\.?\s*AUT)[:\s-]*([A-Z0-9.-]+)/i)?.[1] || '', 60);
+
+  return normalizarPagamentoInput({
+    data,
+    forma,
+    operadora,
+    bandeira,
+    valor_bruto: valorBruto,
+    taxa,
+    valor_liquido: valorLiquido,
+    nsu,
+    autorizacao,
+    comprovante_texto: s,
+    origem: 'texto',
+  });
+}
+
+async function lerComprovantePagamentoComIA({ imagens = [], mediaType, texto = '', dataPadrao }, userLog) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    if (texto) return extrairPagamentoTextoLocal(texto, dataPadrao);
+    const err = new Error('ANTHROPIC_API_KEY não configurada no servidor.');
+    err.status = 500;
+    throw err;
+  }
+
+  const prompt = `Você está lendo um comprovante de pagamento de restaurante brasileiro (máquina de cartão, Stone, PagBank, Pix, débito, crédito ou recibo).
+Extraia os campos financeiros e responda SOMENTE JSON válido, sem markdown:
+{
+  "data":"YYYY-MM-DD",
+  "forma":"Stone|PagBank|Pix|Dinheiro|Crédito|Débito|Cartão|Outro",
+  "operadora":"Stone|PagBank|...",
+  "bandeira":"Visa|Mastercard|Elo|Hipercard|...",
+  "valor_bruto":0.00,
+  "taxa":0.00,
+  "valor_liquido":0.00,
+  "nsu":"",
+  "autorizacao":"",
+  "parcelas":0,
+  "descricao":""
+}
+
+Regras:
+- Valor bruto é o valor da venda/total pago pelo cliente.
+- Taxa é tarifa/desconto da maquininha quando aparecer; se não aparecer, use 0.
+- Valor líquido é o valor a receber/repassado; se não aparecer, use valor_bruto - taxa.
+- Se a data não aparecer, use ${validarDataISO(dataPadrao)}.
+- Se a operadora aparecer como Stone ou PagBank, coloque também em forma quando for o jeito que o restaurante controla.
+- NSU e autorização são códigos, preserve como texto.
+${texto ? `\nTexto copiado do comprovante:\n${texto.slice(0, 5000)}` : ''}`;
+
+  const content = [
+    ...imagens.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
+    { type: 'text', text: prompt }
+  ];
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content }]
+    })
+  });
+  if (!response.ok) {
+    const body = (await response.text()).slice(0, 500);
+    await logErroAgenda('ler-comprovante pagamento api', body, userLog);
+    const err = new Error('Erro na leitura do comprovante (' + response.status + ').');
+    err.status = 502;
+    throw err;
+  }
+  const data = await response.json();
+  const raw = (data.content || []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); }
+  catch(e) {
+    const ini = raw.indexOf('{'), fim = raw.lastIndexOf('}');
+    if (ini >= 0 && fim > ini) {
+      try { parsed = JSON.parse(raw.slice(ini, fim + 1)); } catch(_) {}
+    }
+  }
+  if (!parsed) {
+    await logErroAgenda('ler-comprovante pagamento parse', raw.slice(0, 180), userLog);
+    const err = new Error('Não consegui ler os dados do comprovante. Tente uma imagem mais nítida ou cole o texto.');
+    err.status = 422;
+    throw err;
+  }
+  return normalizarPagamentoInput({
+    ...parsed,
+    data: parsed.data || dataPadrao,
+    comprovante_texto: texto,
+    origem: imagens.length ? 'imagem_ia' : 'texto_ia',
+  });
 }
 
 function resumirResponsaveis(porResp) {
@@ -1544,6 +1832,92 @@ app.get('/api/planilha-mensal', auth, requirePerm('exportar'), async (req, res) 
   }
 });
 
+app.get('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const d = await montarPagamentosMensal(req.query?.mes);
+    res.json(d);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar pagamentos.' });
+  }
+});
+
+app.post('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const p = normalizarPagamentoInput(req.body || {});
+    if (p.valor_bruto <= 0 && p.valor_liquido <= 0) return res.status(400).json({ erro: 'Informe o valor do pagamento.' });
+    const { error } = await supabase.from('pagamentos_comprovantes').insert({
+      ...p,
+      responsavel: req.user.nome || req.user.username,
+      updated_at: nowSP(),
+    });
+    if (error) {
+      if (isTabelaPagamentosMissing(error)) return res.status(500).json({ erro: 'Tabela pagamentos_comprovantes precisa ser criada. Rode o arquivo SUPABASE_PAGAMENTOS_COMPROVANTES.sql no Supabase.' });
+      throw error;
+    }
+    await audit('pagamento_salvar', { data: p.data, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
+    res.json(await montarPagamentosMensal(p.data.slice(0, 7)));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar pagamento.' });
+  }
+});
+
+app.put('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Pagamento inválido.' });
+    const p = normalizarPagamentoInput(req.body || {});
+    if (p.valor_bruto <= 0 && p.valor_liquido <= 0) return res.status(400).json({ erro: 'Informe o valor do pagamento.' });
+    const { error } = await supabase.from('pagamentos_comprovantes').update({
+      ...p,
+      responsavel: req.user.nome || req.user.username,
+      updated_at: nowSP(),
+    }).eq('id', id);
+    if (error) throw error;
+    await audit('pagamento_editar', { id, data: p.data, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
+    res.json(await montarPagamentosMensal(p.data.slice(0, 7)));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao editar pagamento.' });
+  }
+});
+
+app.delete('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Pagamento inválido.' });
+    const { data: old } = await supabase.from('pagamentos_comprovantes').select('data').eq('id', id).maybeSingle();
+    const { error } = await supabase.from('pagamentos_comprovantes').delete().eq('id', id);
+    if (error) throw error;
+    await audit('pagamento_excluir', { id }, req.user, getClientIp(req));
+    res.json(await montarPagamentosMensal(String(old?.data || dateSP()).slice(0, 7)));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao excluir pagamento.' });
+  }
+});
+
+app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('exportar'), async (req, res) => {
+  try {
+    const texto = sanitizeLongText(req.body?.texto || '', 5000);
+    const imagens = (Array.isArray(req.body?.imagens) ? req.body.imagens : (req.body?.imagem ? [req.body.imagem] : []))
+      .filter(Boolean)
+      .slice(0, 4);
+    if (!texto && !imagens.length) return res.status(400).json({ erro: 'Envie o texto ou a imagem do comprovante.' });
+    const pagamento = imagens.length
+      ? await lerComprovantePagamentoComIA({ imagens, mediaType: req.body?.mediaType || 'image/jpeg', texto, dataPadrao: req.body?.data }, req.user)
+      : extrairPagamentoTextoLocal(texto, req.body?.data);
+    if (pagamento.valor_bruto <= 0 && pagamento.valor_liquido <= 0) {
+      return res.status(422).json({ erro: 'Não encontrei valor no comprovante. Confira o texto/imagem.' });
+    }
+    res.json({ pagamento });
+  } catch(e) {
+    console.error(e);
+    res.status(e.status || 500).json({ erro: e.message || 'Erro ao ler comprovante.' });
+  }
+});
+
 // ==================== EXPORTAR ====================
 app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
   const { tipo } = req.params;
@@ -1595,6 +1969,25 @@ app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) =
       d.observacao,
     ]);
     filename = `fechamento_mensal_${planilha.mes}.csv`;
+  } else if (tipo === 'pagamentos') {
+    const d = await montarPagamentosMensal(req.query?.mes);
+    headers = ['Data','Forma','Operadora','Bandeira','Valor Bruto','Taxa','Valor Líquido','NSU','Autorização','Parcelas','Descrição','Responsável','Origem'];
+    rows = d.pagamentos.map(p => [
+      p.data_br,
+      p.forma,
+      p.operadora,
+      p.bandeira,
+      p.valor_bruto.toFixed(2),
+      p.taxa.toFixed(2),
+      p.valor_liquido.toFixed(2),
+      p.nsu,
+      p.autorizacao,
+      p.parcelas || '',
+      p.descricao,
+      p.responsavel,
+      p.origem,
+    ]);
+    filename = `pagamentos_${d.mes}.csv`;
   } else return res.status(400).json({ erro: 'Tipo inválido' });
   await audit('exportar', { tipo }, req.user, getClientIp(req));
   const csv = [headers, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');

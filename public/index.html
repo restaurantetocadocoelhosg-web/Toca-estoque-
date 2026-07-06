@@ -319,11 +319,21 @@ select.big-input { font-size: 14px; }
 .sheet-pay-row b, .sheet-pendency-row b { color: var(--text); }
 .sheet-muted { color: var(--muted); font-size: 12px; }
 .sheet-card-title-actions { display: flex; gap: 6px; align-items: center; }
+.pay-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pay-form-grid .full { grid-column: 1 / -1; }
+.pay-list { display: flex; flex-direction: column; gap: 8px; }
+.pay-item { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
+.pay-item-title { font-size: 14px; font-weight: 800; color: var(--text); }
+.pay-item-meta { font-size: 11px; color: var(--muted); margin-top: 3px; line-height: 1.35; }
+.pay-item-value { text-align: right; font-size: 15px; font-weight: 800; color: var(--green); white-space: nowrap; }
+.pay-item-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
+.pay-file { width: 100%; font-size: 13px; color: var(--muted); background: var(--bg); border: 1px dashed var(--border); border-radius: 12px; padding: 11px; }
 @media (max-width: 380px) {
   .real-money-row { grid-template-columns: 1fr 58px 92px 32px; gap: 5px; }
   .real-money-row.no-qtd { grid-template-columns: 1fr 92px 32px; }
   .sheet-head { grid-template-columns: 1fr 1fr; }
   .sheet-head .btn-sm:first-of-type { grid-column: 1 / -1; }
+  .pay-form-grid { grid-template-columns: 1fr; }
 }
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty-icon { font-size: 36px; margin-bottom: 10px; }
@@ -875,6 +885,70 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- PAGAMENTOS / COMPROVANTES -->
+  <div id="p-pagamentos" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">💳 Pagamentos</div>
+        <div class="sheet-head">
+          <input type="month" class="small-input" id="pag-mes" onchange="loadPagamentos()">
+          <button class="btn-sm" onclick="pagMesAtual()">Este mês</button>
+          <button class="btn-sm" onclick="loadPagamentos()">↻</button>
+        </div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button class="btn-export btn-success" onclick="exportarPagamentos()">⬇️ CSV / Excel</button>
+          <button class="btn-export" style="background:var(--s2);color:var(--text)" onclick="limparPagamentoForm()">Limpar formulário</button>
+        </div>
+        <div id="pag-config" class="real-alert" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Lançar comprovante</div>
+        <div class="pay-form-grid">
+          <input class="small-input" id="pag-data" type="date">
+          <select class="small-input" id="pag-forma">
+            <option value="Stone">Stone</option>
+            <option value="PagBank">PagBank</option>
+            <option value="Pix">Pix</option>
+            <option value="Dinheiro">Dinheiro</option>
+            <option value="Crédito">Crédito</option>
+            <option value="Débito">Débito</option>
+            <option value="Cartão">Cartão</option>
+            <option value="Outro">Outro</option>
+          </select>
+          <input class="small-input" id="pag-operadora" type="text" maxlength="40" placeholder="Operadora">
+          <input class="small-input" id="pag-bandeira" type="text" maxlength="40" placeholder="Bandeira">
+          <input class="small-input" id="pag-bruto" type="text" inputmode="decimal" placeholder="Valor bruto R$">
+          <input class="small-input" id="pag-taxa" type="text" inputmode="decimal" placeholder="Taxa R$">
+          <input class="small-input" id="pag-liquido" type="text" inputmode="decimal" placeholder="Valor líquido R$">
+          <input class="small-input" id="pag-parcelas" type="number" min="0" step="1" inputmode="numeric" placeholder="Parcelas">
+          <input class="small-input" id="pag-nsu" type="text" maxlength="60" placeholder="NSU">
+          <input class="small-input" id="pag-autorizacao" type="text" maxlength="60" placeholder="Autorização">
+          <input class="small-input full" id="pag-descricao" type="text" maxlength="180" placeholder="Descrição / observação">
+          <textarea class="small-input full" id="pag-texto" maxlength="5000" placeholder="Cole aqui o texto do comprovante, se tiver"></textarea>
+          <input class="pay-file full" id="pag-arquivo" type="file" accept="image/*" onchange="processarPagamentoArquivo(this)">
+          <button class="btn-sm full" onclick="lerPagamentoTexto()">Ler texto do comprovante</button>
+          <button class="btn-export btn-success full" id="pag-btn-salvar" onclick="salvarPagamento()">Salvar pagamento</button>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Resumo</div>
+        <div class="real-grid" id="pag-resumo"><div class="loading">Carregando...</div></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Por forma</div>
+        <div id="pag-formas" class="sheet-pay-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Comprovantes do mês</div>
+        <div id="pag-lista" class="pay-list"><div class="loading">Carregando...</div></div>
+      </div>
+    </div>
+  </div>
+
   <!-- EXPORTAR -->
   <div id="p-export" class="page">
     <div class="export-list">
@@ -937,7 +1011,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v46</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v47</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1141,6 +1215,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
+  <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Pagamentos</button>
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
@@ -1290,6 +1365,8 @@ let estStatus = '';
 let cupomItens = []; // estado dos itens do cupom
 let realidadeCache = null;
 let planilhaCache = null;
+let pagamentosCache = null;
+let pagamentoEditId = null;
 let mostrarOkConferenciaCaixa = false;
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
@@ -1434,6 +1511,7 @@ async function loadSession() {
   gate('nav-audit', P.auditoria);
   gate('nav-export', P.exportar);
   gate('nav-planilha', P.exportar);
+  gate('nav-pagamentos', P.exportar);
   gate('nav-alertas', P.alertas);
   gate('nav-agenda', P.agenda);
   // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
@@ -1442,7 +1520,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-planilha','nav-alertas','nav-agenda'].forEach(id => {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-planilha','nav-pagamentos','nav-alertas','nav-agenda'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -1496,6 +1574,7 @@ function goPage(id, btn) {
   if (id === 'hist') loadHist();
   if (id === 'realidade') loadRealidade();
   if (id === 'planilha') loadPlanilhaMensal();
+  if (id === 'pagamentos') loadPagamentos();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
@@ -2972,6 +3051,224 @@ async function relatorioPlanilhaMensal() {
     if (win) win.document.write('<p style="color:#dc2626;font-family:sans-serif;padding:24px">Erro: ' + (e.message || '?') + '</p>');
     handleApiError(e);
   }
+}
+
+function pagMesAtual() {
+  const el = document.getElementById('pag-mes');
+  if (el) el.value = mesAtualClient();
+  loadPagamentos();
+}
+
+function pagamentoFormData() {
+  const moneyField = (id) => {
+    const raw = document.getElementById(id).value.trim();
+    return raw ? moneyFromText(raw) : null;
+  };
+  return {
+    data: document.getElementById('pag-data').value || hojeSPClient(),
+    forma: document.getElementById('pag-forma').value || 'Outro',
+    operadora: document.getElementById('pag-operadora').value.trim(),
+    bandeira: document.getElementById('pag-bandeira').value.trim(),
+    valor_bruto: moneyField('pag-bruto'),
+    taxa: moneyField('pag-taxa'),
+    valor_liquido: moneyField('pag-liquido'),
+    parcelas: Number(document.getElementById('pag-parcelas').value || 0),
+    nsu: document.getElementById('pag-nsu').value.trim(),
+    autorizacao: document.getElementById('pag-autorizacao').value.trim(),
+    descricao: document.getElementById('pag-descricao').value.trim(),
+    comprovante_texto: document.getElementById('pag-texto').value.trim(),
+    origem: pagamentoEditId ? 'editado' : 'manual',
+  };
+}
+
+function preencherPagamentoForm(p = {}) {
+  pagamentoEditId = p.id || null;
+  document.getElementById('pag-data').value = p.data || hojeSPClient();
+  document.getElementById('pag-forma').value = p.forma || 'Outro';
+  document.getElementById('pag-operadora').value = p.operadora || '';
+  document.getElementById('pag-bandeira').value = p.bandeira || '';
+  document.getElementById('pag-bruto').value = p.valor_bruto !== undefined ? moneyInputValue(p.valor_bruto) : '';
+  document.getElementById('pag-taxa').value = p.taxa !== undefined ? moneyInputValue(p.taxa) : '';
+  document.getElementById('pag-liquido').value = p.valor_liquido !== undefined ? moneyInputValue(p.valor_liquido) : '';
+  document.getElementById('pag-parcelas').value = p.parcelas || '';
+  document.getElementById('pag-nsu').value = p.nsu || '';
+  document.getElementById('pag-autorizacao').value = p.autorizacao || '';
+  document.getElementById('pag-descricao').value = p.descricao || '';
+  document.getElementById('pag-texto').value = p.comprovante_texto || '';
+  const btn = document.getElementById('pag-btn-salvar');
+  if (btn) btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar pagamento';
+}
+
+function limparPagamentoForm() {
+  pagamentoEditId = null;
+  preencherPagamentoForm({ data: hojeSPClient(), forma: 'Stone', valor_bruto: undefined, taxa: undefined, valor_liquido: undefined });
+  const file = document.getElementById('pag-arquivo');
+  if (file) file.value = '';
+}
+
+async function loadPagamentos() {
+  const mesEl = document.getElementById('pag-mes');
+  if (!mesEl) return;
+  if (!mesEl.value) mesEl.value = mesAtualClient();
+  if (!document.getElementById('pag-data').value) document.getElementById('pag-data').value = hojeSPClient();
+  const resumoEl = document.getElementById('pag-resumo');
+  const formasEl = document.getElementById('pag-formas');
+  const listaEl = document.getElementById('pag-lista');
+  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
+  formasEl.innerHTML = '';
+  listaEl.innerHTML = '<div class="loading">Carregando...</div>';
+  try {
+    const d = await api('/api/pagamentos?mes=' + encodeURIComponent(mesEl.value));
+    pagamentosCache = d;
+    renderPagamentos(d);
+  } catch(e) {
+    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar pagamentos.</div></div>';
+    listaEl.innerHTML = '';
+    handleApiError(e, true);
+  }
+}
+
+function renderPagamentos(d) {
+  const t = d.totais || {};
+  const configEl = document.getElementById('pag-config');
+  const resumoEl = document.getElementById('pag-resumo');
+  const formasEl = document.getElementById('pag-formas');
+  const listaEl = document.getElementById('pag-lista');
+
+  if (d.configuracao_pendente) {
+    configEl.style.display = 'block';
+    configEl.textContent = 'Configure a tabela pagamentos_comprovantes no Supabase para salvar comprovantes.';
+  } else {
+    configEl.style.display = 'none';
+  }
+
+  resumoEl.innerHTML = `
+    <div class="real-kpi big">
+      <div class="real-label">Valor bruto</div>
+      <div class="real-val green">${fmtBRLMoney(t.valor_bruto)}</div>
+      <div class="real-sub">${t.qtd || 0} comprovante(s) no mês ${escapeHtml(d.mes_label || '')}</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Taxas</div>
+      <div class="real-val red">${fmtBRLMoney(t.taxa)}</div>
+      <div class="real-sub">tarifas/descontos informados</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Líquido</div>
+      <div class="real-val ${Number(t.valor_liquido || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.valor_liquido)}</div>
+      <div class="real-sub">bruto - taxas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Ticket médio</div>
+      <div class="real-val">${fmtBRLMoney(t.ticket_medio)}</div>
+      <div class="real-sub">média por comprovante</div>
+    </div>`;
+
+  if (d.por_forma?.length) {
+    formasEl.innerHTML = d.por_forma.map(f => `
+      <div class="sheet-pay-row">
+        <div><b>${escapeHtml(f.nome)}</b><div class="sheet-muted">${f.qtd} comprovante(s) · taxa ${fmtBRLMoney(f.taxa)}</div></div>
+        <b>${fmtBRLMoney(f.valor_bruto)}</b>
+      </div>`).join('');
+  } else {
+    formasEl.innerHTML = '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum pagamento neste mês.</div></div>';
+  }
+
+  if (!d.pagamentos?.length) {
+    listaEl.innerHTML = '<div class="empty" style="padding:28px 10px"><div class="empty-text">Nenhum comprovante salvo ainda.</div></div>';
+    return;
+  }
+  listaEl.innerHTML = d.pagamentos.map(p => `
+    <div class="pay-item">
+      <div>
+        <div class="pay-item-title">${escapeHtml(p.data_br)} · ${escapeHtml(p.forma || 'Outro')}${p.operadora ? ' · ' + escapeHtml(p.operadora) : ''}</div>
+        <div class="pay-item-meta">${p.bandeira ? escapeHtml(p.bandeira) + ' · ' : ''}${p.nsu ? 'NSU ' + escapeHtml(p.nsu) + ' · ' : ''}${p.autorizacao ? 'Aut ' + escapeHtml(p.autorizacao) + ' · ' : ''}${escapeHtml(p.descricao || '')}</div>
+      </div>
+      <div class="pay-item-value">${fmtBRLMoney(p.valor_bruto)}<div class="sheet-muted">liq. ${fmtBRLMoney(p.valor_liquido)}</div></div>
+      <div class="pay-item-actions">
+        <button class="btn-sm" onclick="editarPagamento(${p.id})">Editar</button>
+        <button class="btn-sm danger" onclick="excluirPagamento(${p.id})">Excluir</button>
+      </div>
+    </div>`).join('');
+}
+
+async function salvarPagamento() {
+  const p = pagamentoFormData();
+  if (!p.valor_bruto && !p.valor_liquido) { toast('Informe o valor do pagamento', 'err'); return; }
+  const btn = document.getElementById('pag-btn-salvar');
+  btn.disabled = true; btn.textContent = 'Salvando...';
+  try {
+    const d = await apiPost(pagamentoEditId ? `/api/pagamentos/${pagamentoEditId}` : '/api/pagamentos', p, pagamentoEditId ? 'PUT' : 'POST');
+    pagamentosCache = d;
+    document.getElementById('pag-mes').value = d.mes || p.data.slice(0, 7);
+    renderPagamentos(d);
+    limparPagamentoForm();
+    toast('Pagamento salvo', 'ok');
+  } catch(e) { handleApiError(e, true); }
+  finally { btn.disabled = false; btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar pagamento'; }
+}
+
+function editarPagamento(id) {
+  const p = pagamentosCache?.pagamentos?.find(x => Number(x.id) === Number(id));
+  if (!p) return;
+  preencherPagamentoForm(p);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+async function excluirPagamento(id) {
+  if (!confirm('Excluir este pagamento da mini planilha?')) return;
+  try {
+    const res = await fetch(API + `/api/pagamentos/${id}`, { method: 'DELETE', headers: authHeaders() });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.erro || 'Erro ao excluir');
+    pagamentosCache = d;
+    renderPagamentos(d);
+    toast('Pagamento excluído', 'ok');
+  } catch(e) { handleApiError(e, true); }
+}
+
+async function lerPagamentoTexto() {
+  const texto = document.getElementById('pag-texto').value.trim();
+  if (!texto) { toast('Cole o texto do comprovante primeiro', 'err'); return; }
+  try {
+    const r = await apiPost('/api/pagamentos/ler-comprovante', {
+      texto,
+      data: document.getElementById('pag-data').value || hojeSPClient(),
+    });
+    preencherPagamentoForm({ ...r.pagamento, comprovante_texto: texto });
+    toast('Comprovante lido', 'ok');
+  } catch(e) { handleApiError(e, true); }
+}
+
+async function processarPagamentoArquivo(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  toast('Lendo comprovante...', 'ok');
+  try {
+    const fatias = await prepararCupomImagens(file);
+    const r = await apiPost('/api/pagamentos/ler-comprovante', {
+      imagens: fatias.slice(0, 4),
+      mediaType: 'image/jpeg',
+      texto: document.getElementById('pag-texto').value.trim(),
+      data: document.getElementById('pag-data').value || hojeSPClient(),
+    });
+    preencherPagamentoForm({ ...r.pagamento, comprovante_texto: r.pagamento.comprovante_texto || document.getElementById('pag-texto').value.trim() });
+    toast('Comprovante preenchido', 'ok');
+  } catch(e) { handleApiError(e, true); }
+}
+
+async function exportarPagamentos() {
+  const mes = document.getElementById('pag-mes')?.value || mesAtualClient();
+  try {
+    const res = await fetch(API + `/api/exportar/pagamentos?mes=${encodeURIComponent(mes)}`, { headers: authHeaders() });
+    if (!res.ok) { const t = await res.text(); let msg = 'Erro ao exportar'; try { msg = JSON.parse(t).erro || msg; } catch(_) {} throw new Error(msg); }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pagamentos_${mes}.csv`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  } catch(e) { handleApiError(e); }
 }
 
 function irLancarPerda() {
