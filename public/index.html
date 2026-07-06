@@ -321,6 +321,8 @@ select.big-input { font-size: 14px; }
 .sheet-card-title-actions { display: flex; gap: 6px; align-items: center; }
 .pay-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .pay-form-grid .full { grid-column: 1 / -1; }
+.pay-field { min-width: 0; }
+.pay-field .small-input, .pay-field .pay-file { width: 100%; }
 .pay-list { display: flex; flex-direction: column; gap: 8px; }
 .pay-item { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start; }
 .pay-item-title { font-size: 14px; font-weight: 800; color: var(--text); }
@@ -885,50 +887,99 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
-  <!-- PAGAMENTOS / COMPROVANTES -->
+  <!-- CONTAS PAGAS / COMPROVANTES -->
   <div id="p-pagamentos" class="page">
     <div class="sheet-section">
       <div class="real-card">
-        <div class="real-card-title">💳 Pagamentos</div>
+        <div class="real-card-title">💳 Contas pagas</div>
         <div class="sheet-head">
           <input type="month" class="small-input" id="pag-mes" onchange="loadPagamentos()">
           <button class="btn-sm" onclick="pagMesAtual()">Este mês</button>
           <button class="btn-sm" onclick="loadPagamentos()">↻</button>
         </div>
         <div class="sheet-actions" style="margin-top:10px">
-          <button class="btn-export btn-success" onclick="exportarPagamentos()">⬇️ CSV / Excel</button>
+          <button class="btn-export btn-success" onclick="exportarPagamentos()">⬇️ Planilha organizada</button>
           <button class="btn-export" style="background:var(--s2);color:var(--text)" onclick="limparPagamentoForm()">Limpar formulário</button>
         </div>
         <div id="pag-config" class="real-alert" style="display:none;margin-top:10px"></div>
       </div>
 
       <div class="real-card">
-        <div class="real-card-title">Lançar comprovante</div>
+        <div class="real-card-title">Lançar conta paga</div>
         <div class="pay-form-grid">
-          <input class="small-input" id="pag-data" type="date">
-          <select class="small-input" id="pag-forma">
-            <option value="Stone">Stone</option>
-            <option value="PagBank">PagBank</option>
-            <option value="Pix">Pix</option>
-            <option value="Dinheiro">Dinheiro</option>
-            <option value="Crédito">Crédito</option>
-            <option value="Débito">Débito</option>
-            <option value="Cartão">Cartão</option>
-            <option value="Outro">Outro</option>
-          </select>
-          <input class="small-input" id="pag-operadora" type="text" maxlength="40" placeholder="Operadora">
-          <input class="small-input" id="pag-bandeira" type="text" maxlength="40" placeholder="Bandeira">
-          <input class="small-input" id="pag-bruto" type="text" inputmode="decimal" placeholder="Valor bruto R$">
-          <input class="small-input" id="pag-taxa" type="text" inputmode="decimal" placeholder="Taxa R$">
-          <input class="small-input" id="pag-liquido" type="text" inputmode="decimal" placeholder="Valor líquido R$">
-          <input class="small-input" id="pag-parcelas" type="number" min="0" step="1" inputmode="numeric" placeholder="Parcelas">
-          <input class="small-input" id="pag-nsu" type="text" maxlength="60" placeholder="NSU">
-          <input class="small-input" id="pag-autorizacao" type="text" maxlength="60" placeholder="Autorização">
-          <input class="small-input full" id="pag-descricao" type="text" maxlength="180" placeholder="Descrição / observação">
-          <textarea class="small-input full" id="pag-texto" maxlength="5000" placeholder="Cole aqui o texto do comprovante, se tiver"></textarea>
+          <div class="pay-field">
+            <div class="field-label-sm">Data do pagamento</div>
+            <input class="small-input" id="pag-data" type="date">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Vencimento</div>
+            <input class="small-input" id="pag-vencimento" type="date">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Grupo da planilha</div>
+            <select class="small-input" id="pag-grupo" onchange="atualizarPagCategorias()"></select>
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Conta</div>
+            <select class="small-input" id="pag-categoria"></select>
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Fornecedor / pessoa</div>
+            <input class="small-input" id="pag-fornecedor" type="text" maxlength="120" placeholder="Ex: Enel, Simone, contador">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Forma de pagamento</div>
+            <select class="small-input" id="pag-forma">
+              <option value="Boleto">Boleto</option>
+              <option value="Pix">Pix</option>
+              <option value="Transferência">Transferência</option>
+              <option value="Débito automático">Débito automático</option>
+              <option value="Dinheiro">Dinheiro</option>
+              <option value="Cartão">Cartão</option>
+              <option value="Crédito">Crédito</option>
+              <option value="Débito">Débito</option>
+              <option value="Stone">Stone</option>
+              <option value="PagBank">PagBank</option>
+              <option value="Outro">Outro</option>
+            </select>
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Valor pago</div>
+            <input class="small-input" id="pag-bruto" type="text" inputmode="decimal" placeholder="R$">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Taxa / desconto</div>
+            <input class="small-input" id="pag-taxa" type="text" inputmode="decimal" placeholder="R$">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Valor líquido</div>
+            <input class="small-input" id="pag-liquido" type="text" inputmode="decimal" placeholder="R$">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Operadora / banco</div>
+            <input class="small-input" id="pag-operadora" type="text" maxlength="40" placeholder="Banco, Stone, PagBank">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Documento / NSU</div>
+            <input class="small-input" id="pag-nsu" type="text" maxlength="60" placeholder="Código do comprovante">
+          </div>
+          <div class="pay-field">
+            <div class="field-label-sm">Autorização</div>
+            <input class="small-input" id="pag-autorizacao" type="text" maxlength="60" placeholder="Autorização">
+          </div>
+          <div class="pay-field full">
+            <div class="field-label-sm">Descrição / observação</div>
+            <input class="small-input" id="pag-descricao" type="text" maxlength="180" placeholder="Ex: conta de água, gratificação, boleto do sistema">
+          </div>
+          <input class="small-input" id="pag-bandeira" type="hidden">
+          <input class="small-input" id="pag-parcelas" type="hidden">
+          <div class="pay-field full">
+            <div class="field-label-sm">Texto do comprovante</div>
+            <textarea class="small-input" id="pag-texto" maxlength="5000" placeholder="Cole aqui o texto do comprovante, se tiver"></textarea>
+          </div>
           <input class="pay-file full" id="pag-arquivo" type="file" accept="image/*" onchange="processarPagamentoArquivo(this)">
           <button class="btn-sm full" onclick="lerPagamentoTexto()">Ler texto do comprovante</button>
-          <button class="btn-export btn-success full" id="pag-btn-salvar" onclick="salvarPagamento()">Salvar pagamento</button>
+          <button class="btn-export btn-success full" id="pag-btn-salvar" onclick="salvarPagamento()">Salvar conta paga</button>
         </div>
       </div>
 
@@ -938,12 +989,12 @@ select.big-input { font-size: 14px; }
       </div>
 
       <div class="real-card">
-        <div class="real-card-title">Por forma</div>
+        <div class="real-card-title">Por conta da planilha</div>
         <div id="pag-formas" class="sheet-pay-list"></div>
       </div>
 
       <div class="real-card">
-        <div class="real-card-title">Comprovantes do mês</div>
+        <div class="real-card-title">Lançamentos do mês</div>
         <div id="pag-lista" class="pay-list"><div class="loading">Carregando...</div></div>
       </div>
     </div>
@@ -1011,7 +1062,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v47</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v48</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1215,7 +1266,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
-  <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Pagamentos</button>
+  <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
@@ -1368,6 +1419,21 @@ let planilhaCache = null;
 let pagamentosCache = null;
 let pagamentoEditId = null;
 let mostrarOkConferenciaCaixa = false;
+
+const CONTAS_PAGAMENTO = [
+  { grupo: 'Despesas Variáveis - CMV', contas: ['Condimentos', 'Embutidos', 'Estoque Congelado', 'Estoque Seco (Farinha)', 'Hortifruti', 'Kit (descartáveis)', 'Lácteos', 'Massa Fresca', 'Óleos', 'Pescados', 'Proteína Aves', 'Proteína Bovina', 'Proteína Suína'] },
+  { grupo: 'CMV Bebidas', contas: ['Cerveja', 'Destilados', 'Não Alcoólicos', 'Vinho'] },
+  { grupo: 'Despesas Fixas / CMO', contas: ['Almoço Funcionários', 'Auxílio Uniforme', 'Combustível', 'Décimo Terceiro Salário', 'Despesas com Admissão e Demissão', 'Férias', 'FGTS', 'Freelance', 'Gorjeta / Gratificação', 'INSS', 'IRRF', 'Plano de Saúde', 'Pró-labore', 'Salários', 'Seguro de Vida', 'Vale Refeição', 'Vale Transporte'] },
+  { grupo: 'Contas Públicas', contas: ['Água', 'Eletricidade', 'Internet', 'Lixo', 'Telefone'] },
+  { grupo: 'Despesas de Produção', contas: ['Embalagens (guardanapos, palito, sal, açúcar em sachê)', 'Gás', 'Gelo', 'Higiene, Limpeza', 'Sistema'] },
+  { grupo: 'Custos de Ocupação', contas: ['Aluguel', 'IPTU', 'Condomínio'] },
+  { grupo: 'Despesas com Marketing', contas: ['Ações de Marketing', 'Anúncios', 'Guia', 'Mídias Sociais'] },
+  { grupo: 'Despesas de Manutenção', contas: ['Máquinas e Equipamentos', 'Predial', 'Preventiva'] },
+  { grupo: 'Despesas Eventuais', contas: ['Cardápio', 'Despesas com Veículo (IPVA, multas, manutenção)', 'Frete', 'Material de Escritório e Informática', 'Utensílios e Equipamentos', 'Taxa de Incêndio'] },
+  { grupo: 'Despesas Administrativas', contas: ['Contador', 'Taxa Ifood 12%'] },
+  { grupo: 'Despesas Financeiras', contas: ['Alvará', 'Parcelamento', 'Renegociação de Dívida', 'Simples / MEI', 'Tarifa Bancária', 'Taxa de Antecipação', 'Empréstimo Bancário', 'Taxas de Cartão', 'Taxa Pix'] },
+  { grupo: 'Outras Despesas', contas: ['Boleto / Conta avulsa', 'Retirada', 'Outros'] },
+];
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
 let _idleTimer = null;
@@ -3053,6 +3119,36 @@ async function relatorioPlanilhaMensal() {
   }
 }
 
+function grupoDaContaPagamento(categoria) {
+  const alvo = norm(categoria);
+  for (const grupo of CONTAS_PAGAMENTO) {
+    if (grupo.contas.some(conta => norm(conta) === alvo)) return grupo.grupo;
+  }
+  return '';
+}
+
+function initPagamentoSelects(grupoAtual = '', categoriaAtual = '') {
+  const grupoEl = document.getElementById('pag-grupo');
+  if (!grupoEl) return;
+  const criadoAgora = !grupoEl.options.length;
+  if (criadoAgora) {
+    grupoEl.innerHTML = CONTAS_PAGAMENTO.map(g => `<option value="${escapeHtml(g.grupo)}">${escapeHtml(g.grupo)}</option>`).join('');
+  }
+  const grupoEscolhido = grupoAtual || grupoDaContaPagamento(categoriaAtual) || (criadoAgora ? 'Outras Despesas' : grupoEl.value) || 'Outras Despesas';
+  grupoEl.value = CONTAS_PAGAMENTO.some(g => g.grupo === grupoEscolhido) ? grupoEscolhido : 'Outras Despesas';
+  atualizarPagCategorias(categoriaAtual);
+}
+
+function atualizarPagCategorias(categoriaAtual = '') {
+  const grupoEl = document.getElementById('pag-grupo');
+  const catEl = document.getElementById('pag-categoria');
+  if (!grupoEl || !catEl) return;
+  const grupo = CONTAS_PAGAMENTO.find(g => g.grupo === grupoEl.value) || CONTAS_PAGAMENTO[CONTAS_PAGAMENTO.length - 1];
+  const alvo = categoriaAtual || catEl.value || (grupo.grupo === 'Outras Despesas' ? 'Boleto / Conta avulsa' : grupo.contas[0]);
+  catEl.innerHTML = grupo.contas.map(conta => `<option value="${escapeHtml(conta)}">${escapeHtml(conta)}</option>`).join('');
+  catEl.value = grupo.contas.includes(alvo) ? alvo : grupo.contas[0];
+}
+
 function pagMesAtual() {
   const el = document.getElementById('pag-mes');
   if (el) el.value = mesAtualClient();
@@ -3066,12 +3162,16 @@ function pagamentoFormData() {
   };
   return {
     data: document.getElementById('pag-data').value || hojeSPClient(),
+    grupo: document.getElementById('pag-grupo')?.value || 'Outras Despesas',
+    categoria: document.getElementById('pag-categoria')?.value || 'Boleto / Conta avulsa',
     forma: document.getElementById('pag-forma').value || 'Outro',
     operadora: document.getElementById('pag-operadora').value.trim(),
     bandeira: document.getElementById('pag-bandeira').value.trim(),
     valor_bruto: moneyField('pag-bruto'),
     taxa: moneyField('pag-taxa'),
     valor_liquido: moneyField('pag-liquido'),
+    fornecedor: document.getElementById('pag-fornecedor').value.trim(),
+    vencimento: document.getElementById('pag-vencimento').value || '',
     parcelas: Number(document.getElementById('pag-parcelas').value || 0),
     nsu: document.getElementById('pag-nsu').value.trim(),
     autorizacao: document.getElementById('pag-autorizacao').value.trim(),
@@ -3083,8 +3183,15 @@ function pagamentoFormData() {
 
 function preencherPagamentoForm(p = {}) {
   pagamentoEditId = p.id || null;
+  initPagamentoSelects(p.grupo || '', p.categoria || '');
   document.getElementById('pag-data').value = p.data || hojeSPClient();
-  document.getElementById('pag-forma').value = p.forma || 'Outro';
+  document.getElementById('pag-vencimento').value = p.vencimento || '';
+  const formaEl = document.getElementById('pag-forma');
+  if (p.forma && ![...formaEl.options].some(opt => opt.value === p.forma)) {
+    formaEl.add(new Option(p.forma, p.forma));
+  }
+  formaEl.value = p.forma || 'Boleto';
+  document.getElementById('pag-fornecedor').value = p.fornecedor || '';
   document.getElementById('pag-operadora').value = p.operadora || '';
   document.getElementById('pag-bandeira').value = p.bandeira || '';
   document.getElementById('pag-bruto').value = p.valor_bruto !== undefined ? moneyInputValue(p.valor_bruto) : '';
@@ -3096,12 +3203,12 @@ function preencherPagamentoForm(p = {}) {
   document.getElementById('pag-descricao').value = p.descricao || '';
   document.getElementById('pag-texto').value = p.comprovante_texto || '';
   const btn = document.getElementById('pag-btn-salvar');
-  if (btn) btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar pagamento';
+  if (btn) btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar conta paga';
 }
 
 function limparPagamentoForm() {
   pagamentoEditId = null;
-  preencherPagamentoForm({ data: hojeSPClient(), forma: 'Stone', valor_bruto: undefined, taxa: undefined, valor_liquido: undefined });
+  preencherPagamentoForm({ data: hojeSPClient(), grupo: 'Outras Despesas', categoria: 'Boleto / Conta avulsa', forma: 'Boleto', valor_bruto: undefined, taxa: undefined, valor_liquido: undefined });
   const file = document.getElementById('pag-arquivo');
   if (file) file.value = '';
 }
@@ -3110,6 +3217,7 @@ async function loadPagamentos() {
   const mesEl = document.getElementById('pag-mes');
   if (!mesEl) return;
   if (!mesEl.value) mesEl.value = mesAtualClient();
+  initPagamentoSelects();
   if (!document.getElementById('pag-data').value) document.getElementById('pag-data').value = hojeSPClient();
   const resumoEl = document.getElementById('pag-resumo');
   const formasEl = document.getElementById('pag-formas');
@@ -3144,47 +3252,48 @@ function renderPagamentos(d) {
 
   resumoEl.innerHTML = `
     <div class="real-kpi big">
-      <div class="real-label">Valor bruto</div>
+      <div class="real-label">Total pago</div>
       <div class="real-val green">${fmtBRLMoney(t.valor_bruto)}</div>
-      <div class="real-sub">${t.qtd || 0} comprovante(s) no mês ${escapeHtml(d.mes_label || '')}</div>
+      <div class="real-sub">${t.qtd || 0} lançamento(s) no mês ${escapeHtml(d.mes_label || '')}</div>
     </div>
     <div class="real-kpi loss">
-      <div class="real-label">Taxas</div>
+      <div class="real-label">Taxas/descontos</div>
       <div class="real-val red">${fmtBRLMoney(t.taxa)}</div>
-      <div class="real-sub">tarifas/descontos informados</div>
+      <div class="real-sub">quando informado no comprovante</div>
     </div>
     <div class="real-kpi">
-      <div class="real-label">Líquido</div>
+      <div class="real-label">Valor líquido</div>
       <div class="real-val ${Number(t.valor_liquido || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.valor_liquido)}</div>
-      <div class="real-sub">bruto - taxas</div>
+      <div class="real-sub">total pago - taxas/descontos</div>
     </div>
     <div class="real-kpi">
-      <div class="real-label">Ticket médio</div>
+      <div class="real-label">Média</div>
       <div class="real-val">${fmtBRLMoney(t.ticket_medio)}</div>
-      <div class="real-sub">média por comprovante</div>
+      <div class="real-sub">por lançamento</div>
     </div>`;
 
-  if (d.por_forma?.length) {
-    formasEl.innerHTML = d.por_forma.map(f => `
+  if (d.por_categoria?.length) {
+    formasEl.innerHTML = d.por_categoria.map(f => `
       <div class="sheet-pay-row">
-        <div><b>${escapeHtml(f.nome)}</b><div class="sheet-muted">${f.qtd} comprovante(s) · taxa ${fmtBRLMoney(f.taxa)}</div></div>
+        <div><b>${escapeHtml(f.categoria)}</b><div class="sheet-muted">${escapeHtml(f.grupo)} · ${f.qtd} lançamento(s)</div></div>
         <b>${fmtBRLMoney(f.valor_bruto)}</b>
       </div>`).join('');
   } else {
-    formasEl.innerHTML = '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum pagamento neste mês.</div></div>';
+    formasEl.innerHTML = '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhuma conta paga neste mês.</div></div>';
   }
 
   if (!d.pagamentos?.length) {
-    listaEl.innerHTML = '<div class="empty" style="padding:28px 10px"><div class="empty-text">Nenhum comprovante salvo ainda.</div></div>';
+    listaEl.innerHTML = '<div class="empty" style="padding:28px 10px"><div class="empty-text">Nenhuma conta paga salva ainda.</div></div>';
     return;
   }
   listaEl.innerHTML = d.pagamentos.map(p => `
     <div class="pay-item">
       <div>
-        <div class="pay-item-title">${escapeHtml(p.data_br)} · ${escapeHtml(p.forma || 'Outro')}${p.operadora ? ' · ' + escapeHtml(p.operadora) : ''}</div>
-        <div class="pay-item-meta">${p.bandeira ? escapeHtml(p.bandeira) + ' · ' : ''}${p.nsu ? 'NSU ' + escapeHtml(p.nsu) + ' · ' : ''}${p.autorizacao ? 'Aut ' + escapeHtml(p.autorizacao) + ' · ' : ''}${escapeHtml(p.descricao || '')}</div>
+        <div class="pay-item-title">${escapeHtml(p.data_br)} · ${escapeHtml(p.categoria || 'Outros')}</div>
+        <div class="pay-item-meta">${escapeHtml(p.grupo || 'Outras Despesas')}${p.fornecedor ? ' · ' + escapeHtml(p.fornecedor) : ''}${p.forma ? ' · ' + escapeHtml(p.forma) : ''}${p.vencimento_br ? ' · venc. ' + escapeHtml(p.vencimento_br) : ''}</div>
+        <div class="pay-item-meta">${p.nsu ? 'Doc/NSU ' + escapeHtml(p.nsu) + ' · ' : ''}${p.autorizacao ? 'Aut ' + escapeHtml(p.autorizacao) + ' · ' : ''}${escapeHtml(p.descricao || '')}</div>
       </div>
-      <div class="pay-item-value">${fmtBRLMoney(p.valor_bruto)}<div class="sheet-muted">liq. ${fmtBRLMoney(p.valor_liquido)}</div></div>
+      <div class="pay-item-value">${fmtBRLMoney(p.valor_bruto)}<div class="sheet-muted">${Number(p.taxa || 0) ? 'liq. ' + fmtBRLMoney(p.valor_liquido) : escapeHtml(p.forma || '')}</div></div>
       <div class="pay-item-actions">
         <button class="btn-sm" onclick="editarPagamento(${p.id})">Editar</button>
         <button class="btn-sm danger" onclick="excluirPagamento(${p.id})">Excluir</button>
@@ -3203,9 +3312,9 @@ async function salvarPagamento() {
     document.getElementById('pag-mes').value = d.mes || p.data.slice(0, 7);
     renderPagamentos(d);
     limparPagamentoForm();
-    toast('Pagamento salvo', 'ok');
+    toast('Conta paga salva', 'ok');
   } catch(e) { handleApiError(e, true); }
-  finally { btn.disabled = false; btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar pagamento'; }
+  finally { btn.disabled = false; btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar conta paga'; }
 }
 
 function editarPagamento(id) {
@@ -3216,14 +3325,14 @@ function editarPagamento(id) {
 }
 
 async function excluirPagamento(id) {
-  if (!confirm('Excluir este pagamento da mini planilha?')) return;
+  if (!confirm('Excluir esta conta paga da planilha?')) return;
   try {
     const res = await fetch(API + `/api/pagamentos/${id}`, { method: 'DELETE', headers: authHeaders() });
     const d = await res.json();
     if (!res.ok) throw new Error(d.erro || 'Erro ao excluir');
     pagamentosCache = d;
     renderPagamentos(d);
-    toast('Pagamento excluído', 'ok');
+    toast('Conta paga excluída', 'ok');
   } catch(e) { handleApiError(e, true); }
 }
 
@@ -3236,7 +3345,7 @@ async function lerPagamentoTexto() {
       data: document.getElementById('pag-data').value || hojeSPClient(),
     });
     preencherPagamentoForm({ ...r.pagamento, comprovante_texto: texto });
-    toast('Comprovante lido', 'ok');
+    toast('Comprovante lido e classificado', 'ok');
   } catch(e) { handleApiError(e, true); }
 }
 
@@ -3253,7 +3362,7 @@ async function processarPagamentoArquivo(input) {
       data: document.getElementById('pag-data').value || hojeSPClient(),
     });
     preencherPagamentoForm({ ...r.pagamento, comprovante_texto: r.pagamento.comprovante_texto || document.getElementById('pag-texto').value.trim() });
-    toast('Comprovante preenchido', 'ok');
+    toast('Comprovante preenchido e classificado', 'ok');
   } catch(e) { handleApiError(e, true); }
 }
 
@@ -3266,7 +3375,7 @@ async function exportarPagamentos() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `pagamentos_${mes}.csv`;
+    a.download = `contas_pagas_${mes}.csv`;
     document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
   } catch(e) { handleApiError(e); }
 }

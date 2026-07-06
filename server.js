@@ -823,6 +823,11 @@ function isDataISO(data) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(data || ''));
 }
 
+function dataISOOuNull(data) {
+  const s = String(data || '').slice(0, 10);
+  return isDataISO(s) ? s : null;
+}
+
 function addDiasISO(data, dias) {
   const [y, m, d] = String(data).split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
@@ -1001,6 +1006,9 @@ function somarResumoFormas(destino, origem) {
 function normalizarFormaPagamentoTexto(value) {
   const raw = sanitizeText(value || '', 40);
   const n = normalizeSearch(raw);
+  if (/boleto/.test(n)) return 'Boleto';
+  if (/debito automatico|debito em conta/.test(n)) return 'Débito automático';
+  if (/transferencia|ted|doc/.test(n)) return 'Transferência';
   if (/stone/.test(n)) return 'Stone';
   if (/pag\s*bank|pagbank/.test(n)) return 'PagBank';
   if (/pix/.test(n)) return 'Pix';
@@ -1011,9 +1019,130 @@ function normalizarFormaPagamentoTexto(value) {
   return raw || 'Outro';
 }
 
+const CONTAS_PLANILHA_PAGAMENTOS = [
+  { grupo: 'Despesas Variáveis - CMV', contas: ['Condimentos', 'Embutidos', 'Estoque Congelado', 'Estoque Seco (Farinha)', 'Hortifruti', 'Kit (descartáveis)', 'Lácteos', 'Massa Fresca', 'Óleos', 'Pescados', 'Proteína Aves', 'Proteína Bovina', 'Proteína Suína'] },
+  { grupo: 'CMV Bebidas', contas: ['Cerveja', 'Destilados', 'Não Alcoólicos', 'Vinho'] },
+  { grupo: 'Despesas Fixas / CMO', contas: ['Almoço Funcionários', 'Auxílio Uniforme', 'Combustível', 'Décimo Terceiro Salário', 'Despesas com Admissão e Demissão', 'Férias', 'FGTS', 'Freelance', 'Gorjeta / Gratificação', 'INSS', 'IRRF', 'Plano de Saúde', 'Pró-labore', 'Salários', 'Seguro de Vida', 'Vale Refeição', 'Vale Transporte'] },
+  { grupo: 'Contas Públicas', contas: ['Água', 'Eletricidade', 'Internet', 'Lixo', 'Telefone'] },
+  { grupo: 'Despesas de Produção', contas: ['Embalagens (guardanapos, palito, sal, açúcar em sachê)', 'Gás', 'Gelo', 'Higiene, Limpeza', 'Sistema'] },
+  { grupo: 'Custos de Ocupação', contas: ['Aluguel', 'IPTU', 'Condomínio'] },
+  { grupo: 'Despesas com Marketing', contas: ['Ações de Marketing', 'Anúncios', 'Guia', 'Mídias Sociais'] },
+  { grupo: 'Despesas de Manutenção', contas: ['Máquinas e Equipamentos', 'Predial', 'Preventiva'] },
+  { grupo: 'Despesas Eventuais', contas: ['Cardápio', 'Despesas com Veículo (IPVA, multas, manutenção)', 'Frete', 'Material de Escritório e Informática', 'Utensílios e Equipamentos', 'Taxa de Incêndio'] },
+  { grupo: 'Despesas Administrativas', contas: ['Contador', 'Taxa Ifood 12%'] },
+  { grupo: 'Despesas Financeiras', contas: ['Alvará', 'Parcelamento', 'Renegociação de Dívida', 'Simples / MEI', 'Tarifa Bancária', 'Taxa de Antecipação', 'Empréstimo Bancário', 'Taxas de Cartão', 'Taxa Pix'] },
+  { grupo: 'Outras Despesas', contas: ['Boleto / Conta avulsa', 'Retirada', 'Outros'] },
+];
+
+const CONTAS_PLANILHA_FLAT = CONTAS_PLANILHA_PAGAMENTOS.flatMap(g =>
+  g.contas.map((conta, ordem) => ({ grupo: g.grupo, categoria: conta, ordem }))
+);
+
+function acharContaPagamento(categoria) {
+  const alvo = normalizeSearch(categoria);
+  if (!alvo) return null;
+  return CONTAS_PLANILHA_FLAT.find(c => normalizeSearch(c.categoria) === alvo) || null;
+}
+
+function inferirContaPagamentoPorTexto(texto) {
+  const n = normalizeSearch(texto);
+  const regras = [
+    [/agua|sabesp|cedae/, 'Água'],
+    [/eletric|energia|enel|light|edp/, 'Eletricidade'],
+    [/internet|wifi|wi-fi|vivo fibra|claro net/, 'Internet'],
+    [/\blixo\b|coleta/, 'Lixo'],
+    [/telefone|celular|vivo|claro|tim|oi\b/, 'Telefone'],
+    [/\bgas\b|botijao|botijão/, 'Gás'],
+    [/\bgelo\b/, 'Gelo'],
+    [/higiene|limpeza|detergente|sanit|desinfet|papel/, 'Higiene, Limpeza'],
+    [/sistema|software|mensalidade sistema|pdv|gestao|gestão/, 'Sistema'],
+    [/aluguel|locacao|locação/, 'Aluguel'],
+    [/iptu/, 'IPTU'],
+    [/condominio|condomínio/, 'Condomínio'],
+    [/salario|salários|salarios|folha/, 'Salários'],
+    [/freela|freelance/, 'Freelance'],
+    [/gratific|gorjeta|caixinha/, 'Gorjeta / Gratificação'],
+    [/pro labore|pro-labore|pró-labore/, 'Pró-labore'],
+    [/\binss\b/, 'INSS'],
+    [/\birrf\b|imposto de renda/, 'IRRF'],
+    [/\bfgts\b/, 'FGTS'],
+    [/ferias|férias/, 'Férias'],
+    [/decimo terceiro|decimo salario|13o salario|13 salario/, 'Décimo Terceiro Salário'],
+    [/vale transporte|passagem|transporte/, 'Vale Transporte'],
+    [/vale refeicao|vale refeição|vr\b/, 'Vale Refeição'],
+    [/uniforme/, 'Auxílio Uniforme'],
+    [/almoco funcionario|almoço funcionário|refeicao funcionario|refeição funcionário/, 'Almoço Funcionários'],
+    [/contador|contabilidade/, 'Contador'],
+    [/ifood|i-food/, 'Taxa Ifood 12%'],
+    [/simples|mei\b|das\b/, 'Simples / MEI'],
+    [/alvara|alvará/, 'Alvará'],
+    [/parcelamento/, 'Parcelamento'],
+    [/renegociacao|renegociação|divida|dívida/, 'Renegociação de Dívida'],
+    [/tarifa bancaria|tarifa bancária|cesta bancaria|cesta bancária/, 'Tarifa Bancária'],
+    [/antecipacao|antecipação/, 'Taxa de Antecipação'],
+    [/emprestimo|empréstimo|financiamento/, 'Empréstimo Bancário'],
+    [/taxa.*cartao|cartao.*taxa|credito|debito|master|visa|elo|stone|pagbank/, 'Taxas de Cartão'],
+    [/taxa.*pix|pix.*taxa/, 'Taxa Pix'],
+    [/condimento|tempero/, 'Condimentos'],
+    [/embutido|presunto|mortadela|linguica|linguiça/, 'Embutidos'],
+    [/congelado/, 'Estoque Congelado'],
+    [/farinha|estoque seco|seco/, 'Estoque Seco (Farinha)'],
+    [/hortifruti|verdura|legume|fruta|sacolao|sacolão/, 'Hortifruti'],
+    [/descartavel|descartáveis|kit|embalagem descartavel/, 'Kit (descartáveis)'],
+    [/leite|lacteo|lácteo|queijo|mussarela|manteiga/, 'Lácteos'],
+    [/massa fresca|massa/, 'Massa Fresca'],
+    [/oleo|óleo/, 'Óleos'],
+    [/peixe|pescado/, 'Pescados'],
+    [/frango|aves|ave\b/, 'Proteína Aves'],
+    [/carne|boi|bovina|acém|alcatra|patinho/, 'Proteína Bovina'],
+    [/suina|suína|porco|linguica|linguiça/, 'Proteína Suína'],
+    [/cerveja/, 'Cerveja'],
+    [/destilado|vodka|whisky|gin|cachaca|cachaça/, 'Destilados'],
+    [/refrigerante|suco|agua mineral|água mineral|nao alcoolico|não alcoólico/, 'Não Alcoólicos'],
+    [/vinho/, 'Vinho'],
+    [/marketing|acao|ação/, 'Ações de Marketing'],
+    [/anuncio|anúncio|trafego|tráfego/, 'Anúncios'],
+    [/guia/, 'Guia'],
+    [/midia|mídia|instagram|facebook/, 'Mídias Sociais'],
+    [/maquina|máquina|equipamento/, 'Máquinas e Equipamentos'],
+    [/predial|obra|reparo/, 'Predial'],
+    [/preventiva|manutencao preventiva|manutenção preventiva/, 'Preventiva'],
+    [/cardapio|cardápio/, 'Cardápio'],
+    [/veiculo|veículo|ipva|multa|carro/, 'Despesas com Veículo (IPVA, multas, manutenção)'],
+    [/frete|entrega/, 'Frete'],
+    [/escritorio|escritório|informatica|informática|papelaria|computador/, 'Material de Escritório e Informática'],
+    [/utensilio|utensílio|panela|talher|equipamento cozinha/, 'Utensílios e Equipamentos'],
+    [/incendio|incêndio/, 'Taxa de Incêndio'],
+    [/boleto|conta avulsa/, 'Boleto / Conta avulsa'],
+    [/retirada|socio|sócio|nayara|nay/, 'Retirada'],
+  ];
+  for (const [re, categoria] of regras) {
+    if (re.test(n)) return acharContaPagamento(categoria);
+  }
+  return acharContaPagamento('Outros');
+}
+
+function normalizarContaPagamentoInput(input = {}) {
+  const categoriaRaw = sanitizeText(input.categoria || input.conta || input.tipo_conta || '', 120);
+  const grupoRaw = sanitizeText(input.grupo || input.grupo_conta || '', 90);
+  const achada = acharContaPagamento(categoriaRaw) || inferirContaPagamentoPorTexto([
+    categoriaRaw,
+    grupoRaw,
+    input.fornecedor,
+    input.descricao,
+    input.comprovante_texto,
+    input.texto,
+  ].join(' '));
+  return {
+    grupo: achada?.grupo || grupoRaw || 'Outras Despesas',
+    categoria: achada?.categoria || categoriaRaw || 'Outros',
+  };
+}
+
 function normalizarPagamentoInput(input = {}) {
   const data = validarDataISO(input.data);
   const forma = normalizarFormaPagamentoTexto(input.forma || input.tipo || input.meio || input.operadora || '');
+  const conta = normalizarContaPagamentoInput(input);
   const operadora = sanitizeText(input.operadora || '', 40);
   const bandeira = sanitizeText(input.bandeira || '', 40);
   let valorBruto = parseNonNegativeMoney(input.valor_bruto ?? input.valor ?? input.total) ?? 0;
@@ -1024,18 +1153,24 @@ function normalizarPagamentoInput(input = {}) {
   const parcelas = parseNonNegativeInteger(input.parcelas || 0);
   const nsu = sanitizeText(input.nsu || '', 60);
   const autorizacao = sanitizeText(input.autorizacao || input.aut || '', 60);
+  const fornecedor = sanitizeText(input.fornecedor || input.beneficiario || input.favorecido || '', 120);
   const descricao = sanitizeText(input.descricao || input.observacao || '', 180);
   const comprovanteTexto = sanitizeLongText(input.comprovante_texto || input.texto || '', 3000);
   const origem = sanitizeText(input.origem || '', 30);
 
   return {
     data,
+    grupo: conta.grupo,
+    categoria: conta.categoria,
     forma,
     operadora,
     bandeira,
     valor_bruto: Number(valorBruto.toFixed(2)),
     taxa: Number(taxa.toFixed(2)),
     valor_liquido: Number(valorLiquido.toFixed(2)),
+    fornecedor,
+    vencimento: dataISOOuNull(input.vencimento || input.data_vencimento),
+    competencia: sanitizeText(input.competencia || '', 20),
     nsu,
     autorizacao,
     parcelas,
@@ -1050,12 +1185,18 @@ function normalizarPagamentoDb(row) {
     id: row.id,
     data: String(row.data || '').slice(0, 10),
     data_br: dataBR(String(row.data || '').slice(0, 10)),
+    grupo: row.grupo || 'Outras Despesas',
+    categoria: row.categoria || 'Outros',
     forma: row.forma || '',
     operadora: row.operadora || '',
     bandeira: row.bandeira || '',
     valor_bruto: Number(row.valor_bruto || 0),
     taxa: Number(row.taxa || 0),
     valor_liquido: Number(row.valor_liquido || 0),
+    fornecedor: row.fornecedor || '',
+    vencimento: row.vencimento ? String(row.vencimento).slice(0, 10) : '',
+    vencimento_br: row.vencimento ? dataBR(String(row.vencimento).slice(0, 10)) : '',
+    competencia: row.competencia || '',
     nsu: row.nsu || '',
     autorizacao: row.autorizacao || '',
     parcelas: Number(row.parcelas || 0),
@@ -1066,6 +1207,16 @@ function normalizarPagamentoDb(row) {
     created_at: row.created_at || null,
     updated_at: row.updated_at || null,
   };
+}
+
+function ordemGrupoPagamento(grupo) {
+  const idx = CONTAS_PLANILHA_PAGAMENTOS.findIndex(g => g.grupo === grupo);
+  return idx >= 0 ? idx : 999;
+}
+
+function ordemContaPagamento(conta) {
+  const found = CONTAS_PLANILHA_FLAT.find(c => c.grupo === conta.grupo && c.categoria === conta.categoria);
+  return found ? found.ordem : 999;
 }
 
 function agruparPagamentos(rows, campo) {
@@ -1088,6 +1239,144 @@ function agruparPagamentos(rows, campo) {
     .sort((a, b) => b.valor_bruto - a.valor_bruto);
 }
 
+function agruparPagamentosPorConta(rows) {
+  const out = {};
+  for (const p of rows) {
+    const grupo = p.grupo || 'Outras Despesas';
+    const categoria = p.categoria || 'Outros';
+    const key = `${grupo}|||${categoria}`;
+    if (!out[key]) out[key] = { grupo, categoria, qtd: 0, valor_bruto: 0, taxa: 0, valor_liquido: 0 };
+    out[key].qtd++;
+    out[key].valor_bruto += Number(p.valor_bruto || 0);
+    out[key].taxa += Number(p.taxa || 0);
+    out[key].valor_liquido += Number(p.valor_liquido || 0);
+  }
+  return Object.values(out)
+    .map(r => ({
+      ...r,
+      valor_bruto: Number(r.valor_bruto.toFixed(2)),
+      taxa: Number(r.taxa.toFixed(2)),
+      valor_liquido: Number(r.valor_liquido.toFixed(2)),
+    }))
+    .sort((a, b) =>
+      (ordemGrupoPagamento(a.grupo) - ordemGrupoPagamento(b.grupo)) ||
+      (ordemContaPagamento(a) - ordemContaPagamento(b)) ||
+      a.categoria.localeCompare(b.categoria, 'pt-BR')
+    );
+}
+
+function csvMoneyBR(value) {
+  return Number(value || 0).toFixed(2).replace('.', ',');
+}
+
+function montarRowsExportPagamentos(d) {
+  const datas = datasEntreISO(`${d.mes}-01`, fimMesISO(d.mes));
+  const porConta = new Map();
+  for (const p of d.pagamentos || []) {
+    const grupo = p.grupo || 'Outras Despesas';
+    const categoria = p.categoria || 'Outros';
+    const key = `${grupo}|||${categoria}`;
+    if (!porConta.has(key)) {
+      porConta.set(key, {
+        grupo,
+        categoria,
+        valores: Object.fromEntries(datas.map(data => [data, 0])),
+        total: 0,
+      });
+    }
+    const row = porConta.get(key);
+    if (row.valores[p.data] !== undefined) row.valores[p.data] += Number(p.valor_bruto || 0);
+    row.total += Number(p.valor_bruto || 0);
+  }
+  const contas = Array.from(porConta.values())
+    .map(r => ({
+      ...r,
+      total: Number(r.total.toFixed(2)),
+      valores: Object.fromEntries(Object.entries(r.valores).map(([data, valor]) => [data, Number(valor.toFixed(2))])),
+    }))
+    .sort((a, b) =>
+      (ordemGrupoPagamento(a.grupo) - ordemGrupoPagamento(b.grupo)) ||
+      (ordemContaPagamento(a) - ordemContaPagamento(b)) ||
+      a.categoria.localeCompare(b.categoria, 'pt-BR')
+    );
+
+  const rows = [
+    ['RELATÓRIO DE CONTAS PAGAS', `Mês ${d.mes_label}`],
+    [],
+    ['RESUMO GERAL'],
+    ['Lançamentos', d.totais.qtd || 0],
+    ['Total pago', csvMoneyBR(d.totais.valor_bruto)],
+    ['Taxas/descontos', csvMoneyBR(d.totais.taxa)],
+    ['Valor líquido', csvMoneyBR(d.totais.valor_liquido)],
+    [],
+    ['RESUMO POR GRUPO'],
+    ['Grupo', 'Qtd', 'Total pago', 'Taxas/descontos', 'Valor líquido'],
+  ];
+
+  if (d.por_grupo?.length) {
+    for (const g of d.por_grupo) rows.push([g.nome, g.qtd, csvMoneyBR(g.valor_bruto), csvMoneyBR(g.taxa), csvMoneyBR(g.valor_liquido)]);
+  } else {
+    rows.push(['Sem lançamentos', '', '', '', '']);
+  }
+
+  rows.push(
+    [],
+    ['RESUMO POR CONTA'],
+    ['Grupo', 'Conta', 'Qtd', 'Total pago', 'Taxas/descontos', 'Valor líquido']
+  );
+  if (d.por_categoria?.length) {
+    for (const c of d.por_categoria) rows.push([c.grupo, c.categoria, c.qtd, csvMoneyBR(c.valor_bruto), csvMoneyBR(c.taxa), csvMoneyBR(c.valor_liquido)]);
+  } else {
+    rows.push(['Sem lançamentos', '', '', '', '', '']);
+  }
+
+  rows.push(
+    [],
+    ['FLUXO POR DIA E CONTA'],
+    ['Grupo', 'Conta', ...datas.map(data => data.slice(8, 10)), 'Total']
+  );
+  if (contas.length) {
+    const grupos = [...new Set(contas.map(c => c.grupo))];
+    for (const grupo of grupos) {
+      const linhas = contas.filter(c => c.grupo === grupo);
+      const subtotalDias = datas.map(data => linhas.reduce((s, c) => s + Number(c.valores[data] || 0), 0));
+      const subtotal = subtotalDias.reduce((s, v) => s + v, 0);
+      rows.push([grupo, 'SUBTOTAL', ...subtotalDias.map(csvMoneyBR), csvMoneyBR(subtotal)]);
+      for (const c of linhas) {
+        rows.push([c.grupo, c.categoria, ...datas.map(data => csvMoneyBR(c.valores[data])), csvMoneyBR(c.total)]);
+      }
+    }
+  } else {
+    rows.push(['Sem lançamentos', '', ...datas.map(() => ''), '']);
+  }
+
+  rows.push(
+    [],
+    ['LANÇAMENTOS DETALHADOS'],
+    ['Data', 'Grupo', 'Conta', 'Fornecedor/Pessoa', 'Descrição', 'Forma de pagamento', 'Operadora', 'Valor pago', 'Taxa/desconto', 'Valor líquido', 'Vencimento', 'Responsável', 'Origem', 'NSU', 'Autorização']
+  );
+  for (const p of d.pagamentos || []) {
+    rows.push([
+      p.data_br,
+      p.grupo,
+      p.categoria,
+      p.fornecedor,
+      p.descricao,
+      p.forma,
+      p.operadora,
+      csvMoneyBR(p.valor_bruto),
+      csvMoneyBR(p.taxa),
+      csvMoneyBR(p.valor_liquido),
+      p.vencimento_br,
+      p.responsavel,
+      p.origem,
+      p.nsu,
+      p.autorizacao,
+    ]);
+  }
+  return rows;
+}
+
 async function montarPagamentosMensal(mesParam) {
   const mes = validarMesISO(mesParam);
   const inicio = `${mes}-01`;
@@ -1105,9 +1394,12 @@ async function montarPagamentosMensal(mesParam) {
         mes_label: mes.split('-').reverse().join('/'),
         configuracao_pendente: true,
         totais: { qtd: 0, valor_bruto: 0, taxa: 0, valor_liquido: 0, ticket_medio: null },
+        por_grupo: [],
+        por_categoria: [],
         por_forma: [],
         por_operadora: [],
         pagamentos: [],
+        contas_modelo: CONTAS_PLANILHA_PAGAMENTOS,
       };
     }
     throw error;
@@ -1129,9 +1421,12 @@ async function montarPagamentosMensal(mesParam) {
     mes_label: mes.split('-').reverse().join('/'),
     configuracao_pendente: false,
     totais,
+    por_grupo: agruparPagamentos(pagamentos, 'grupo'),
+    por_categoria: agruparPagamentosPorConta(pagamentos),
     por_forma: agruparPagamentos(pagamentos, 'forma'),
     por_operadora: agruparPagamentos(pagamentos, 'operadora'),
     pagamentos,
+    contas_modelo: CONTAS_PLANILHA_PAGAMENTOS,
   };
 }
 
@@ -1171,6 +1466,9 @@ function extrairPagamentoTextoLocal(texto, dataPadrao) {
   const valorLiquido = extrairValorPorRotulo(s, ['valor liquido', 'valor líquido', 'liquido', 'líquido', 'a receber', 'repasse']) ?? Math.max(0, valorBruto - taxa);
 
   const forma = normalizarFormaPagamentoTexto(
+    /boleto/.test(sNorm) ? 'Boleto' :
+    /debito automatico|debito em conta/.test(sNorm) ? 'Débito automático' :
+    /transferencia|ted|doc/.test(sNorm) ? 'Transferência' :
     /stone/.test(sNorm) ? 'Stone' :
     /pag\s*bank|pagbank/.test(sNorm) ? 'PagBank' :
     /pix/.test(sNorm) ? 'Pix' :
@@ -1183,9 +1481,12 @@ function extrairPagamentoTextoLocal(texto, dataPadrao) {
   const bandeira = (s.match(/\b(VISA|MASTERCARD|MASTER|ELO|HIPERCARD|AMEX|AMERICAN EXPRESS)\b/i)?.[1] || '').replace(/MASTER$/i, 'Mastercard');
   const nsu = sanitizeText(s.match(/\bNSU[:\s-]*([A-Z0-9.-]+)/i)?.[1] || '', 60);
   const autorizacao = sanitizeText(s.match(/\b(?:AUT|AUTORIZA(?:CAO|ÇÃO)|COD\.?\s*AUT)[:\s-]*([A-Z0-9.-]+)/i)?.[1] || '', 60);
+  const conta = normalizarContaPagamentoInput({ comprovante_texto: s });
 
   return normalizarPagamentoInput({
     data,
+    grupo: conta.grupo,
+    categoria: conta.categoria,
     forma,
     operadora,
     bandeira,
@@ -1208,16 +1509,23 @@ async function lerComprovantePagamentoComIA({ imagens = [], mediaType, texto = '
     throw err;
   }
 
-  const prompt = `Você está lendo um comprovante de pagamento de restaurante brasileiro (máquina de cartão, Stone, PagBank, Pix, débito, crédito ou recibo).
+  const contasModelo = CONTAS_PLANILHA_PAGAMENTOS
+    .map(g => `${g.grupo}: ${g.contas.join(', ')}`)
+    .join('\n');
+  const prompt = `Você está lendo um comprovante de pagamento ou conta paga de restaurante brasileiro (boleto, conta de água/luz, imposto, salário, freelance, Pix, cartão, Stone, PagBank ou recibo).
 Extraia os campos financeiros e responda SOMENTE JSON válido, sem markdown:
 {
   "data":"YYYY-MM-DD",
-  "forma":"Stone|PagBank|Pix|Dinheiro|Crédito|Débito|Cartão|Outro",
+  "grupo":"grupo da planilha",
+  "categoria":"conta da planilha",
+  "forma":"Boleto|Pix|Transferência|Débito automático|Dinheiro|Crédito|Débito|Cartão|Stone|PagBank|Outro",
   "operadora":"Stone|PagBank|...",
   "bandeira":"Visa|Mastercard|Elo|Hipercard|...",
   "valor_bruto":0.00,
   "taxa":0.00,
   "valor_liquido":0.00,
+  "fornecedor":"",
+  "vencimento":"YYYY-MM-DD",
   "nsu":"",
   "autorizacao":"",
   "parcelas":0,
@@ -1225,11 +1533,14 @@ Extraia os campos financeiros e responda SOMENTE JSON válido, sem markdown:
 }
 
 Regras:
-- Valor bruto é o valor da venda/total pago pelo cliente.
-- Taxa é tarifa/desconto da maquininha quando aparecer; se não aparecer, use 0.
-- Valor líquido é o valor a receber/repassado; se não aparecer, use valor_bruto - taxa.
+- Valor bruto é o valor pago/total da conta.
+- Taxa é tarifa/desconto quando aparecer; se não aparecer, use 0.
+- Valor líquido é o valor efetivamente baixado; se não aparecer, use valor_bruto - taxa.
 - Se a data não aparecer, use ${validarDataISO(dataPadrao)}.
-- Se a operadora aparecer como Stone ou PagBank, coloque também em forma quando for o jeito que o restaurante controla.
+- Se vencimento não aparecer, deixe vazio.
+- Escolha grupo e categoria SOMENTE entre estas contas da planilha. Se não tiver certeza, use Outras Despesas > Boleto / Conta avulsa:
+${contasModelo}
+- Forma é como foi pago (Boleto, Pix, Transferência, Débito automático etc.). Não confunda forma com categoria.
 - NSU e autorização são códigos, preserve como texto.
 ${texto ? `\nTexto copiado do comprovante:\n${texto.slice(0, 5000)}` : ''}`;
 
@@ -1842,6 +2153,10 @@ app.get('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
   }
 });
 
+app.get('/api/pagamentos/categorias', auth, requirePerm('exportar'), async (req, res) => {
+  res.json({ grupos: CONTAS_PLANILHA_PAGAMENTOS });
+});
+
 app.post('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
   try {
     const p = normalizarPagamentoInput(req.body || {});
@@ -1855,7 +2170,7 @@ app.post('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
       if (isTabelaPagamentosMissing(error)) return res.status(500).json({ erro: 'Tabela pagamentos_comprovantes precisa ser criada. Rode o arquivo SUPABASE_PAGAMENTOS_COMPROVANTES.sql no Supabase.' });
       throw error;
     }
-    await audit('pagamento_salvar', { data: p.data, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
+    await audit('pagamento_salvar', { data: p.data, grupo: p.grupo, categoria: p.categoria, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
     res.json(await montarPagamentosMensal(p.data.slice(0, 7)));
   } catch(e) {
     console.error(e);
@@ -1875,7 +2190,7 @@ app.put('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) =
       updated_at: nowSP(),
     }).eq('id', id);
     if (error) throw error;
-    await audit('pagamento_editar', { id, data: p.data, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
+    await audit('pagamento_editar', { id, data: p.data, grupo: p.grupo, categoria: p.categoria, forma: p.forma, valor_bruto: p.valor_bruto }, req.user, getClientIp(req));
     res.json(await montarPagamentosMensal(p.data.slice(0, 7)));
   } catch(e) {
     console.error(e);
@@ -1922,6 +2237,7 @@ app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('exportar'), async
 app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
   const { tipo } = req.params;
   let rows, headers, filename;
+  let delimiter = ',';
   if (tipo === 'estoque') {
     const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Custo Unit.','Valor Total','Status'];
@@ -1971,26 +2287,14 @@ app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) =
     filename = `fechamento_mensal_${planilha.mes}.csv`;
   } else if (tipo === 'pagamentos') {
     const d = await montarPagamentosMensal(req.query?.mes);
-    headers = ['Data','Forma','Operadora','Bandeira','Valor Bruto','Taxa','Valor Líquido','NSU','Autorização','Parcelas','Descrição','Responsável','Origem'];
-    rows = d.pagamentos.map(p => [
-      p.data_br,
-      p.forma,
-      p.operadora,
-      p.bandeira,
-      p.valor_bruto.toFixed(2),
-      p.taxa.toFixed(2),
-      p.valor_liquido.toFixed(2),
-      p.nsu,
-      p.autorizacao,
-      p.parcelas || '',
-      p.descricao,
-      p.responsavel,
-      p.origem,
-    ]);
-    filename = `pagamentos_${d.mes}.csv`;
+    headers = null;
+    rows = montarRowsExportPagamentos(d);
+    filename = `contas_pagas_${d.mes}.csv`;
+    delimiter = ';';
   } else return res.status(400).json({ erro: 'Tipo inválido' });
   await audit('exportar', { tipo }, req.user, getClientIp(req));
-  const csv = [headers, ...rows].map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+  const allRows = headers ? [headers, ...rows] : rows;
+  const csv = allRows.map(r => r.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(delimiter)).join('\n');
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send('﻿' + csv);
