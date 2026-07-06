@@ -1062,7 +1062,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v48</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v49</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1562,22 +1562,23 @@ async function loadSession() {
   // Liberações com FALLBACK por papel (à prova de falha — admin sempre vê tudo,
   // mesmo se /api/me não trouxer as permissões).
   const ROLE_DEF = {
-    admin:    { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true },
-    gerente:  { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false },
-    operador: { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }
+    admin:    { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true },
+    gerente:  { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false },
+    operador: { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }
   };
   const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
   const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
   const P = {};
-  ['lancar','exportar','ia','auditoria','alertas','agenda','pendencias','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
+  ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
   window.permPendencias = P.pendencias;
   const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
   gate('nav-admin', P.admin);
   gate('nav-chat', P.ia);
   gate('nav-audit', P.auditoria);
   gate('nav-export', P.exportar);
-  gate('nav-planilha', P.exportar);
-  gate('nav-pagamentos', P.exportar);
+  gate('nav-realidade', P.dia);
+  gate('nav-planilha', P.planilha);
+  gate('nav-pagamentos', P.contas);
   gate('nav-alertas', P.alertas);
   gate('nav-agenda', P.agenda);
   // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
@@ -1586,7 +1587,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-planilha','nav-pagamentos','nav-alertas','nav-agenda'].forEach(id => {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-planilha','nav-pagamentos','nav-alertas','nav-agenda'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -3549,7 +3550,19 @@ async function loadUsers() {
     if (!users.length) { el.innerHTML = '<div style="color:var(--muted);font-size:13px">Nenhum usuário encontrado.</div>'; return; }
     const roleLabel = { admin: 'Admin', gerente: 'Gerente', operador: 'Operador' };
     const roleCls = { admin: 'role-admin', gerente: 'role-gerente', operador: 'role-operador' };
-    const PERM_UI = [{k:'lancar',l:'Lançar'},{k:'ia',l:'IA'},{k:'exportar',l:'Exportar'},{k:'auditoria',l:'Auditoria'},{k:'alertas',l:'Alertas'},{k:'agenda',l:'Agenda'},{k:'pendencias',l:'Pendências'},{k:'admin',l:'Admin'}];
+    const PERM_UI = [
+      {k:'lancar',l:'Lançar'},
+      {k:'dia',l:'Dia'},
+      {k:'planilha',l:'Planilha'},
+      {k:'contas',l:'Contas'},
+      {k:'exportar',l:'Exportar'},
+      {k:'ia',l:'IA'},
+      {k:'auditoria',l:'Auditoria'},
+      {k:'alertas',l:'Alertas'},
+      {k:'agenda',l:'Agenda'},
+      {k:'pendencias',l:'Pendências'},
+      {k:'admin',l:'Admin'}
+    ];
     el.innerHTML = users.map(u => {
       const pe = u.permissoes_efetivas || {};
       const chips = PERM_UI.map(p => {

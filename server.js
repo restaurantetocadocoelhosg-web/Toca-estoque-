@@ -103,13 +103,13 @@ async function logErroAgenda(contexto, err, user) {
 }
 
 // ==================== PERMISSÕES (liberações por usuário) ====================
-const PERM_KEYS = ['lancar','exportar','ia','auditoria','alertas','agenda','pendencias','admin'];
+const PERM_KEYS = ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin'];
 function permsPorRole(role) {
   // 'pendencias' (resolver itens em dúvida da nota do WhatsApp): admin-only por padrão;
   // admin libera por pessoa no painel de liberações.
-  if (role === 'admin')   return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true };
-  if (role === 'gerente') return { lancar:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false };
-  return { lancar:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
+  if (role === 'admin')   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true };
+  if (role === 'gerente') return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false };
+  return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
 function permsEfetivas(role, permissoes) {
   const base = permsPorRole(role);
@@ -257,14 +257,24 @@ function requireRole(...roles) {
   };
 }
 
+async function permsDoRequest(req) {
+  let permsCol = null;
+  if (req.user.role !== 'admin') {
+    try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
+  }
+  return permsEfetivas(req.user.role, permsCol);
+}
+
+async function usuarioTemPerm(req, key) {
+  if (req.user.role === 'admin') return true;
+  const perms = await permsDoRequest(req);
+  return !!perms[key];
+}
+
 // Enforcement de liberações no servidor (admin sempre passa).
 function requirePerm(key) {
   return async (req, res, next) => {
-    if (req.user.role === 'admin') return next();
-    let permsCol = null;
-    try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
-    const perms = permsEfetivas(req.user.role, permsCol);
-    if (perms[key]) return next();
+    if (await usuarioTemPerm(req, key)) return next();
     return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
   };
 }
@@ -365,7 +375,11 @@ app.get('/api/me', auth, async (req, res) => {
     permissions: {
       pode_resetar: req.user.role === 'admin',
       pode_editar_produto: ['admin', 'gerente'].includes(req.user.role),
-      pode_exportar: perms.exportar, pode_lancar: perms.lancar,
+      pode_exportar: perms.exportar,
+      pode_lancar: perms.lancar,
+      pode_dia: perms.dia,
+      pode_planilha: perms.planilha,
+      pode_contas: perms.contas,
     },
     permissoes: perms,
   });
@@ -2009,7 +2023,7 @@ function montarMensagemFechamentoDia(d) {
   return msg;
 }
 
-app.get('/api/realidade-dia', auth, async (req, res) => {
+app.get('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
   try {
     const resumo = await montarRealidadeDia(req.query?.data);
     res.json(resumo);
@@ -2019,7 +2033,7 @@ app.get('/api/realidade-dia', auth, async (req, res) => {
   }
 });
 
-app.post('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => {
+app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
   try {
     const dataDia = validarDataISO(req.body?.data);
     const pagamentos = normalizarLinhasFinanceiras(req.body?.pagamentos || [], { comQtd: true });
@@ -2068,7 +2082,7 @@ app.post('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => 
   }
 });
 
-app.delete('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => {
+app.delete('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
   try {
     const dataRaw = req.query?.data || req.body?.data;
     if (!isDataISO(dataRaw)) return res.status(400).json({ erro: 'Informe uma data válida.' });
@@ -2089,7 +2103,7 @@ app.delete('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) =
   }
 });
 
-app.post('/api/realidade-dia/mover', auth, requirePerm('lancar'), async (req, res) => {
+app.post('/api/realidade-dia/mover', auth, requirePerm('dia'), async (req, res) => {
   try {
     if (!isDataISO(req.body?.data_origem) || !isDataISO(req.body?.data_destino)) {
       return res.status(400).json({ erro: 'Informe data de origem e destino válidas.' });
@@ -2133,7 +2147,7 @@ app.post('/api/realidade-dia/mover', auth, requirePerm('lancar'), async (req, re
   }
 });
 
-app.get('/api/planilha-mensal', auth, requirePerm('exportar'), async (req, res) => {
+app.get('/api/planilha-mensal', auth, requirePerm('planilha'), async (req, res) => {
   try {
     const planilha = await montarPlanilhaMensal(req.query?.mes);
     res.json(planilha);
@@ -2143,7 +2157,7 @@ app.get('/api/planilha-mensal', auth, requirePerm('exportar'), async (req, res) 
   }
 });
 
-app.get('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
+app.get('/api/pagamentos', auth, requirePerm('contas'), async (req, res) => {
   try {
     const d = await montarPagamentosMensal(req.query?.mes);
     res.json(d);
@@ -2153,11 +2167,11 @@ app.get('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
   }
 });
 
-app.get('/api/pagamentos/categorias', auth, requirePerm('exportar'), async (req, res) => {
+app.get('/api/pagamentos/categorias', auth, requirePerm('contas'), async (req, res) => {
   res.json({ grupos: CONTAS_PLANILHA_PAGAMENTOS });
 });
 
-app.post('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
+app.post('/api/pagamentos', auth, requirePerm('contas'), async (req, res) => {
   try {
     const p = normalizarPagamentoInput(req.body || {});
     if (p.valor_bruto <= 0 && p.valor_liquido <= 0) return res.status(400).json({ erro: 'Informe o valor do pagamento.' });
@@ -2178,7 +2192,7 @@ app.post('/api/pagamentos', auth, requirePerm('exportar'), async (req, res) => {
   }
 });
 
-app.put('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) => {
+app.put('/api/pagamentos/:id', auth, requirePerm('contas'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Pagamento inválido.' });
@@ -2198,7 +2212,7 @@ app.put('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) =
   }
 });
 
-app.delete('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res) => {
+app.delete('/api/pagamentos/:id', auth, requirePerm('contas'), async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Pagamento inválido.' });
@@ -2213,7 +2227,7 @@ app.delete('/api/pagamentos/:id', auth, requirePerm('exportar'), async (req, res
   }
 });
 
-app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('exportar'), async (req, res) => {
+app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('contas'), async (req, res) => {
   try {
     const texto = sanitizeLongText(req.body?.texto || '', 5000);
     const imagens = (Array.isArray(req.body?.imagens) ? req.body.imagens : (req.body?.imagem ? [req.body.imagem] : []))
@@ -2234,8 +2248,12 @@ app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('exportar'), async
 });
 
 // ==================== EXPORTAR ====================
-app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
+app.get('/api/exportar/:tipo', auth, async (req, res) => {
   const { tipo } = req.params;
+  const permNecessaria = tipo === 'fechamentos' ? 'planilha' : (tipo === 'pagamentos' ? 'contas' : 'exportar');
+  if (!(await usuarioTemPerm(req, permNecessaria))) {
+    return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
+  }
   let rows, headers, filename;
   let delimiter = ',';
   if (tipo === 'estoque') {
@@ -2355,9 +2373,13 @@ function paginaRelatorio(titulo, subtitulo, corpo) {
 </div></body></html>`;
 }
 
-app.get('/api/relatorio/:tipo', auth, requirePerm('exportar'), async (req, res) => {
+app.get('/api/relatorio/:tipo', auth, async (req, res) => {
   try {
     const tipo = req.params.tipo;
+    const permNecessaria = tipo === 'fechamento' ? 'planilha' : 'exportar';
+    if (!(await usuarioTemPerm(req, permNecessaria))) {
+      return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
+    }
     let html;
 
     if (tipo === 'estoque' || tipo === 'compras') {
@@ -3079,6 +3101,12 @@ async function executarFerramenta(nome, input, user) {
       }
 
       case 'ver_realidade_dia': {
+        if (user?.role !== 'admin') {
+          let permsCol = null;
+          try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
+          const perms = permsEfetivas(user?.role, permsCol);
+          if (!perms.dia) return { erro: 'Acesso ao Dia/fechamento não liberado para este usuário.' };
+        }
         const dataDia = input.data ? validarDataISO(input.data) : dateSP();
         const d = await montarRealidadeDia(dataDia);
         return {
@@ -3795,7 +3823,7 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
     if (nova_senha.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
     updates.password_hash = hashPassword(nova_senha);
   }
-  // Liberações: aceita objeto permissoes { lancar, exportar, ia, auditoria, alertas, agenda, admin }
+  // Liberações: aceita objeto permissoes { lancar, dia, planilha, contas, exportar, ia, auditoria, alertas, agenda, pendencias, admin }
   if (req.body?.permissoes && typeof req.body.permissoes === 'object') {
     const limpo = {};
     for (const k of PERM_KEYS) if (typeof req.body.permissoes[k] === 'boolean') limpo[k] = req.body.permissoes[k];
@@ -4092,6 +4120,9 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
   }
 
   if (acao === 'fechamento' || acao === 'realidade') {
+    if (!(await usuarioTemPerm(req, 'dia'))) {
+      return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
+    }
     const realidade = await montarRealidadeDia(dateSP());
     return res.json({
       resposta: montarMensagemFechamentoDia(realidade),
