@@ -839,8 +839,80 @@ function isTabelaFechamentoMissing(error) {
   return error && (
     error.code === '42P01' ||
     error.code === 'PGRST205' ||
-    /fechamentos_diarios|schema cache|does not exist|relation/i.test(msg)
+    /fechamentos_diarios|schema cache|does not exist|relation|column/i.test(msg)
   );
+}
+
+function parseMoneyNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  let s = String(value).trim().replace(/[R$\s]/g, '');
+  if (!s) return null;
+  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (s.includes(',')) s = s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseNonNegativeMoney(value) {
+  const n = parseMoneyNumber(value);
+  if (n === null || n < 0) return null;
+  return Number(n.toFixed(2));
+}
+
+function parseNonNegativeInteger(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+function sanitizeLongText(value, max = 6000) {
+  return String(value ?? '')
+    .normalize('NFC')
+    .replace(/\r\n/g, '\n')
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .trim()
+    .slice(0, max);
+}
+
+function arrayFromMaybeJson(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch(e) {
+      return [];
+    }
+  }
+  return [];
+}
+
+function normalizarLinhasFinanceiras(value, opts = {}) {
+  const rows = arrayFromMaybeJson(value);
+  return rows.slice(0, 60).map(row => {
+    const descricao = sanitizeText(row?.descricao || row?.nome || row?.forma || '', 90);
+    const qtdRaw = row?.qtd ?? row?.quantidade ?? '';
+    const qtd = qtdRaw === '' || qtdRaw === null || qtdRaw === undefined ? null : parseNonNegativeInteger(qtdRaw);
+    const valor = parseNonNegativeMoney(row?.valor) ?? 0;
+    const obs = sanitizeText(row?.obs || row?.observacao || '', 160);
+    return {
+      descricao,
+      ...(opts.comQtd ? { qtd } : {}),
+      valor,
+      ...(obs ? { obs } : {}),
+    };
+  }).filter(row => row.valor > 0 || (opts.comQtd && row.qtd > 0));
+}
+
+function somaLinhasFinanceiras(rows) {
+  return Number((arrayFromMaybeJson(rows).reduce((s, row) => s + Number(row?.valor || 0), 0)).toFixed(2));
+}
+
+function linhaFinanceiraTexto(row, comQtd = false) {
+  const qtd = comQtd && row.qtd !== null && row.qtd !== undefined ? `${String(row.qtd).padStart(2, '0')} ` : '';
+  const obs = row.obs ? ` ${row.obs}` : '';
+  return `${qtd}${row.descricao} ${fmtBRL(row.valor)}${obs}`;
 }
 
 function resumirResponsaveis(porResp) {
@@ -927,7 +999,7 @@ async function resumoMovimentosDia(dataDia) {
 
 async function buscarFechamentoDia(dataDia) {
   const { data, error } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto')
     .eq('data', dataDia)
     .maybeSingle();
   if (error) {
@@ -951,29 +1023,52 @@ async function montarRealidadeDia(dataDiaParam) {
     fechamentoOntem = await buscarFechamentoDia(ontem).catch(() => ({ row: null, configuracao_pendente: false }));
   }
 
-  const vendas = Number(fechamento.row?.vendas || 0);
+  const row = fechamento.row || null;
+  const pagamentos = normalizarLinhasFinanceiras(row?.pagamentos || [], { comQtd: true });
+  const cortes = normalizarLinhasFinanceiras(row?.cortes || [], { comQtd: true });
+  const despesasLista = normalizarLinhasFinanceiras(row?.despesas || [], { comQtd: false });
+  const totalPagamentos = somaLinhasFinanceiras(pagamentos);
+  const totalCortes = somaLinhasFinanceiras(cortes);
+  const despesasCaixa = somaLinhasFinanceiras(despesasLista);
+  const vendas = Number(row?.vendas || totalPagamentos || 0);
+  const pratosVendidos = parseNonNegativeInteger(row?.pratos_vendidos || 0);
   const lucroBruto = Number((vendas - mov.consumo - mov.perdas).toFixed(2));
-  const fluxoCaixa = Number((vendas - mov.compras).toFixed(2));
+  const resultadoDia = Number((lucroBruto - despesasCaixa).toFixed(2));
+  const fluxoCaixa = Number((vendas - mov.compras - despesasCaixa).toFixed(2));
   const vendasOntem = Number(fechamentoOntem.row?.vendas || 0);
+  const despesasOntem = somaLinhasFinanceiras(fechamentoOntem.row?.despesas || []);
   const lucroOntem = movOntem ? Number((vendasOntem - movOntem.consumo - movOntem.perdas).toFixed(2)) : 0;
+  const resultadoOntem = Number((lucroOntem - despesasOntem).toFixed(2));
 
   return {
     data: dataDia,
     data_br: dataBR(dataDia),
     vendas,
     venda_lancada: !!fechamento.row,
-    observacao: fechamento.row?.observacao || '',
-    responsavel: fechamento.row?.responsavel || '',
-    atualizado_em: fechamento.row?.updated_at || fechamento.row?.created_at || null,
+    observacao: row?.observacao || '',
+    responsavel: row?.responsavel || '',
+    atualizado_em: row?.updated_at || row?.created_at || null,
+    pratos_vendidos: pratosVendidos,
+    ticket_medio: pratosVendidos > 0 ? Number((vendas / pratosVendidos).toFixed(2)) : null,
+    pagamentos,
+    total_pagamentos: totalPagamentos,
+    cortes,
+    total_cortes: totalCortes,
+    despesas_lista: despesasLista,
+    despesas: despesasCaixa,
+    relatorio_texto: row?.relatorio_texto || '',
     configuracao_pendente: fechamento.configuracao_pendente,
     compras_estoque: mov.compras,
     consumo_estoque: mov.consumo,
+    perdas_estoque: mov.perdas,
     perdas: mov.perdas,
     ajustes: mov.ajustes,
     lucro_bruto_estimado: lucroBruto,
+    resultado_dia_estimado: resultadoDia,
     fluxo_caixa: fluxoCaixa,
     consumo_sobre_vendas_pct: pct(mov.consumo, vendas),
     perdas_sobre_vendas_pct: pct(mov.perdas, vendas),
+    despesas_sobre_vendas_pct: pct(despesasCaixa, vendas),
     compras_sobre_vendas_pct: pct(mov.compras, vendas),
     movimentos: mov,
     comparativo: {
@@ -982,11 +1077,15 @@ async function montarRealidadeDia(dataDiaParam) {
         data_br: dataBR(ontem),
         vendas: vendasOntem,
         lucro_bruto_estimado: lucroOntem,
+        resultado_dia_estimado: resultadoOntem,
+        despesas: despesasOntem,
         perdas: movOntem ? movOntem.perdas : 0,
         consumo_estoque: movOntem ? movOntem.consumo : 0,
         dif_vendas: Number((vendas - vendasOntem).toFixed(2)),
         dif_lucro: Number((lucroBruto - lucroOntem).toFixed(2)),
+        dif_resultado: Number((resultadoDia - resultadoOntem).toFixed(2)),
         dif_perdas: Number((mov.perdas - (movOntem ? movOntem.perdas : 0)).toFixed(2)),
+        dif_despesas: Number((despesasCaixa - despesasOntem).toFixed(2)),
       }
     }
   };
@@ -996,23 +1095,42 @@ function montarMensagemFechamentoDia(d) {
   const vendasLancadas = !!d.venda_lancada;
   const semMovimento = d.movimentos.total === 0;
   if (!vendasLancadas && semMovimento) {
-    return `📋 *FECHAMENTO DO DIA — ${d.data_br}*\n\n⚠️ Nada registrado hoje.\n\nLance a venda do dia na aba Dia e registre consumo/perdas no estoque para calcular a realidade.`;
+    return `📋 *FECHAMENTO DO DIA — ${d.data_br}*\n\n⚠️ Nada registrado hoje.\n\nLance o movimento do caixa na aba Dia e registre consumo/perdas no estoque para calcular a realidade.`;
   }
 
   let msg = `📋 *FECHAMENTO DO DIA — ${d.data_br}*\n\n`;
-  msg += `💰 Vendas do dia: ${vendasLancadas ? fmtBRL(d.vendas) : 'não lançada'}\n`;
+  if (d.pratos_vendidos) msg += `🍽️ Pratos vendidos: ${d.pratos_vendidos}\n`;
+  msg += `💰 Vendas recebidas: ${vendasLancadas ? fmtBRL(d.vendas) : 'não lançada'}\n`;
+  if (vendasLancadas && d.ticket_medio) msg += `🎟️ Ticket médio: ${fmtBRL(d.ticket_medio)}\n`;
   msg += `📦 Compras do estoque: ${fmtBRL(d.compras_estoque)}\n`;
-  msg += `🍽️ Consumo do estoque: ${fmtBRL(d.consumo_estoque)}\n`;
-  msg += `🗑️ Perdas: ${fmtBRL(d.perdas)}\n\n`;
+  msg += `🍳 Consumo do estoque: ${fmtBRL(d.consumo_estoque)}\n`;
+  msg += `🗑️ Perdas do estoque: ${fmtBRL(d.perdas)}\n`;
+  if (d.despesas > 0) msg += `💸 Despesas do caixa: ${fmtBRL(d.despesas)}\n`;
 
-  msg += `📊 *Leitura:*\n`;
+  if (d.pagamentos?.length) {
+    msg += `\n💳 *Recebimentos:*\n`;
+    msg += d.pagamentos.map(r => linhaFinanceiraTexto(r, true)).join('\n');
+  }
+  if (d.cortes?.length) {
+    msg += `\n\n⚠️ *Cortes/sem cobrança:*\n`;
+    msg += d.cortes.map(r => linhaFinanceiraTexto(r, true)).join('\n');
+  }
+  if (d.despesas_lista?.length) {
+    msg += `\n\n💸 *Despesas:*\n`;
+    msg += d.despesas_lista.slice(0, 12).map(r => linhaFinanceiraTexto(r, false)).join('\n');
+    if (d.despesas_lista.length > 12) msg += `\n• +${d.despesas_lista.length - 12} despesa(s)`;
+  }
+
+  msg += `\n\n📊 *Leitura:*\n`;
   if (vendasLancadas) {
-    msg += `Lucro bruto estimado: ${fmtBRL(d.lucro_bruto_estimado)}\n`;
+    msg += `Lucro estoque antes das despesas: ${fmtBRL(d.lucro_bruto_estimado)}\n`;
+    msg += `Resultado estimado do dia: ${fmtBRL(d.resultado_dia_estimado)}\n`;
     msg += `Fluxo de caixa do dia: ${fmtBRL(d.fluxo_caixa)}\n`;
     msg += `Consumo: ${d.consumo_sobre_vendas_pct?.toFixed(2)}% das vendas\n`;
     msg += `Perdas: ${d.perdas_sobre_vendas_pct?.toFixed(2)}% das vendas`;
+    if (d.despesas > 0) msg += `\nDespesas: ${d.despesas_sobre_vendas_pct?.toFixed(2)}% das vendas`;
   } else {
-    msg += `Venda do dia ainda não lançada. Sem ela não dá para calcular lucro.\n`;
+    msg += `Movimento do caixa ainda não lançado. Sem ele não dá para calcular lucro.\n`;
     msg += `O estoque já mostra ${fmtBRL(d.consumo_estoque)} de consumo e ${fmtBRL(d.perdas)} de perdas.`;
   }
 
@@ -1020,7 +1138,7 @@ function montarMensagemFechamentoDia(d) {
   if (vendasLancadas && ontem && ontem.vendas > 0) {
     msg += `\n\n📈 *Comparativo com ontem:*\n`;
     msg += `Vendas: ${ontem.dif_vendas >= 0 ? '+' : ''}${fmtBRL(ontem.dif_vendas)}\n`;
-    msg += `Lucro estimado: ${ontem.dif_lucro >= 0 ? '+' : ''}${fmtBRL(ontem.dif_lucro)}\n`;
+    msg += `Resultado: ${ontem.dif_resultado >= 0 ? '+' : ''}${fmtBRL(ontem.dif_resultado)}\n`;
     msg += `Perdas: ${ontem.dif_perdas >= 0 ? '+' : ''}${fmtBRL(ontem.dif_perdas)}`;
   }
 
@@ -1034,7 +1152,7 @@ function montarMensagemFechamentoDia(d) {
     if (linhasResp) msg += `\n\n👤 *Quem lançou estoque:*\n${linhasResp}`;
   }
 
-  if (d.configuracao_pendente) msg += `\n\n⚠️ Configure a tabela fechamentos_diarios para salvar vendas do dia.`;
+  if (d.configuracao_pendente) msg += `\n\n⚠️ Configure a tabela fechamentos_diarios para salvar o movimento do dia.`;
   if (d.movimentos.anomalias > 0) msg += `\n\n⚠️ ${d.movimentos.anomalias} lançamento(s) com quantidade anômala — revise no app.`;
   if (d.perdas > 0) msg += `\n🗑️ Perdas são descarte/lixo: isso é perda real, diferente de compra.`;
   return msg;
@@ -1053,25 +1171,44 @@ app.get('/api/realidade-dia', auth, async (req, res) => {
 app.post('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => {
   try {
     const dataDia = validarDataISO(req.body?.data);
-    const vendas = parseNonNegativeNumber(req.body?.vendas);
+    const pagamentos = normalizarLinhasFinanceiras(req.body?.pagamentos || [], { comQtd: true });
+    const cortes = normalizarLinhasFinanceiras(req.body?.cortes || [], { comQtd: true });
+    const despesas = normalizarLinhasFinanceiras(req.body?.despesas || [], { comQtd: false });
+    const totalPagamentos = somaLinhasFinanceiras(pagamentos);
+    const vendasInformadas = parseNonNegativeMoney(req.body?.vendas);
+    const vendas = pagamentos.length ? totalPagamentos : vendasInformadas;
     const observacao = sanitizeText(req.body?.observacao || '', 300);
-    if (vendas === null) return res.status(400).json({ erro: 'Informe a venda do dia com valor válido.' });
+    const pratosVendidos = parseNonNegativeInteger(req.body?.pratos_vendidos || 0);
+    const relatorioTexto = sanitizeLongText(req.body?.relatorio_texto || '', 6000);
+    if (vendas === null) return res.status(400).json({ erro: 'Informe o movimento do caixa com valor válido.' });
 
     const { error } = await supabase.from('fechamentos_diarios').upsert({
       data: dataDia,
       vendas,
       observacao,
+      pratos_vendidos: pratosVendidos,
+      pagamentos,
+      cortes,
+      despesas,
+      relatorio_texto: relatorioTexto,
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
     }, { onConflict: 'data' });
     if (error) {
       if (isTabelaFechamentoMissing(error)) {
-        return res.status(500).json({ erro: 'Tabela fechamentos_diarios não existe. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
+        return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
       }
       throw error;
     }
 
-    await audit('realidade_dia_salvar', { data: dataDia, vendas }, req.user, getClientIp(req));
+    await audit('realidade_dia_salvar', {
+      data: dataDia,
+      vendas,
+      pratos_vendidos: pratosVendidos,
+      pagamentos: pagamentos.length,
+      cortes: cortes.length,
+      despesas: despesas.length,
+    }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
   } catch(e) {
@@ -1648,7 +1785,7 @@ const IA_TOOLS = [
   },
   {
     name: 'ver_realidade_dia',
-    description: 'Resumo do dia cruzando vendas, compras/entradas, consumo do estoque, perdas, lucro bruto estimado e fluxo de caixa.',
+    description: 'Resumo do dia cruzando movimento do caixa, pratos vendidos, formas de pagamento, despesas, compras/entradas, consumo do estoque, perdas, resultado estimado e fluxo de caixa.',
     input_schema: {
       type: 'object',
       properties: {
@@ -1862,13 +1999,21 @@ async function executarFerramenta(nome, input, user) {
           data_br: d.data_br,
           venda_lancada: d.venda_lancada,
           vendas: d.vendas,
+          pratos_vendidos: d.pratos_vendidos,
+          ticket_medio: d.ticket_medio,
+          pagamentos: d.pagamentos,
+          cortes: d.cortes,
+          despesas_caixa: d.despesas,
+          despesas_lista: d.despesas_lista,
           compras_estoque: d.compras_estoque,
           consumo_estoque: d.consumo_estoque,
           perdas: d.perdas,
           lucro_bruto_estimado: d.lucro_bruto_estimado,
+          resultado_dia_estimado: d.resultado_dia_estimado,
           fluxo_caixa: d.fluxo_caixa,
           consumo_sobre_vendas_pct: d.consumo_sobre_vendas_pct,
           perdas_sobre_vendas_pct: d.perdas_sobre_vendas_pct,
+          despesas_sobre_vendas_pct: d.despesas_sobre_vendas_pct,
           movimentos: {
             total: d.movimentos.total,
             entradas: d.movimentos.n_compras,
@@ -2053,7 +2198,7 @@ app.post('/api/chat', auth, requirePerm('ia'), chatLimiter, async (req, res) => 
     '- Perguntas curtas (ex.: "e o frango?") devem ser entendidas no contexto do histórico da conversa.\n\n' +
     'COMO AGIR:\n' +
     '1. Responda SEMPRE em português brasileiro, direto e curto. Nada de repetir a pergunta nem enrolar.\n' +
-    '2. Todo número (qtd, custo, valor, lançamentos de hoje) vem SEMPRE de uma chamada de ferramenta FEITA AGORA. NUNCA invente e NUNCA reaproveite números citados antes nesta conversa nem de relatórios anteriores — o estoque muda o tempo todo e aquilo já pode estar velho. Se perguntarem "o que mexeu hoje", chame ver_movimentacoes(hoje=true) na hora; se perguntarem saldo, chame buscar_produto na hora; se perguntarem lucro, vendas, perdas do dia, fechamento ou realidade do dia, chame ver_realidade_dia.\n' +
+    '2. Todo número (qtd, custo, valor, lançamentos de hoje) vem SEMPRE de uma chamada de ferramenta FEITA AGORA. NUNCA invente e NUNCA reaproveite números citados antes nesta conversa nem de relatórios anteriores — o estoque muda o tempo todo e aquilo já pode estar velho. Se perguntarem "o que mexeu hoje", chame ver_movimentacoes(hoje=true) na hora; se perguntarem saldo, chame buscar_produto na hora; se perguntarem lucro, vendas, pratos, despesas, perdas do dia, movimento do caixa, fechamento ou realidade do dia, chame ver_realidade_dia.\n' +
     '2b. CONFERIR UMA LISTA (comparar o que o usuário mandou com o estoque/movimentos): vá item por item, SEMPRE consultando a ferramenta para cada um. NÃO confie na memória nem em respostas anteriores. Se a lista for grande, confira em blocos e diga quantos faltam. Quando um nome não casar exatamente, busque e pergunte em vez de chutar.\n' +
     '2c. QUANDO O USUÁRIO MANDAR VÁRIOS ITENS/LINHAS DE UMA VEZ: trate cada linha como um item separado, mantenha a MESMA ORDEM que ele enviou, responda um item por linha e não junte itens diferentes nem pule nenhum. Se vier um texto longo, não resuma misturando — preserve a estrutura do que foi enviado.\n' +
     '3. Seja proativo: ao buscar, se notar algo grave (zerado urgente, giro parado, anomalia), avise e registre na agenda.\n' +
@@ -2866,10 +3011,17 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
       total: realidade.movimentos.total,
       vendas: realidade.vendas,
       venda_lancada: realidade.venda_lancada,
+      pratos_vendidos: realidade.pratos_vendidos,
+      ticket_medio: realidade.ticket_medio,
+      pagamentos: realidade.pagamentos,
+      cortes: realidade.cortes,
+      despesas_caixa: realidade.despesas,
+      despesas_lista: realidade.despesas_lista,
       compras_estoque: realidade.compras_estoque,
       consumo_estoque: realidade.consumo_estoque,
       perdas: realidade.perdas,
       lucro_bruto_estimado: realidade.lucro_bruto_estimado,
+      resultado_dia_estimado: realidade.resultado_dia_estimado,
       fluxo_caixa: realidade.fluxo_caixa,
       anomalias: realidade.movimentos.anomalias,
       configuracao_pendente: realidade.configuracao_pendente,

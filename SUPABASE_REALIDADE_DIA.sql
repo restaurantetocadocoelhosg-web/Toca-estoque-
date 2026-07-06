@@ -13,3 +13,10 @@ CREATE TABLE IF NOT EXISTS fechamentos_diarios (
 
 CREATE INDEX IF NOT EXISTS idx_fechamentos_diarios_data
   ON fechamentos_diarios (data DESC);
+
+ALTER TABLE fechamentos_diarios
+  ADD COLUMN IF NOT EXISTS pratos_vendidos INTEGER NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pagamentos JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS cortes JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS despesas JSONB NOT NULL DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS relatorio_texto TEXT DEFAULT '';

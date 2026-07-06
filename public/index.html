@@ -263,6 +263,19 @@ select.big-input { font-size: 14px; }
 .real-card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
 .real-card-title { font-size: 14px; font-weight: 800; color: var(--text); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
 .real-form { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.real-form textarea { min-height: 128px; resize: vertical; line-height: 1.45; }
+.real-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.real-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.real-total-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; font-size: 13px; font-weight: 800; color: var(--text); }
+.real-total-line span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
+.real-total-line b { color: var(--green); font-size: 16px; }
+.real-block { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.real-block-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 12px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+.real-money-list { display: flex; flex-direction: column; gap: 7px; }
+.real-money-row { display: grid; grid-template-columns: 1.2fr 72px 108px 34px; gap: 6px; align-items: center; }
+.real-money-row.no-qtd { grid-template-columns: 1fr 108px 34px; }
+.real-money-row .small-input { min-width: 0; padding: 9px 10px; }
+.real-row-del { width: 34px; height: 38px; padding: 0; display: flex; align-items: center; justify-content: center; }
 .real-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .real-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-width: 0; }
 .real-kpi.big { grid-column: 1 / -1; background: rgba(16,185,129,0.07); border-color: rgba(16,185,129,0.25); }
@@ -281,6 +294,10 @@ select.big-input { font-size: 14px; }
 .real-loss-name { font-size: 13px; font-weight: 800; color: var(--text); }
 .real-loss-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
 .real-loss-val { font-size: 14px; font-weight: 800; color: var(--red); white-space: nowrap; }
+@media (max-width: 380px) {
+  .real-money-row { grid-template-columns: 1fr 58px 92px 32px; gap: 5px; }
+  .real-money-row.no-qtd { grid-template-columns: 1fr 92px 32px; }
+}
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty-icon { font-size: 36px; margin-bottom: 10px; }
 .empty-text { font-size: 14px; }
@@ -735,11 +752,36 @@ select.big-input { font-size: 14px; }
       <div id="real-config" class="real-alert" style="display:none"></div>
 
       <div class="real-card">
-        <div class="real-card-title">💰 Vendas do dia</div>
+        <div class="real-card-title">🧾 Movimento do caixa</div>
         <div class="real-form">
-          <input class="small-input" id="real-vendas" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0,00">
+          <div class="real-mini-grid">
+            <input class="small-input" id="real-pratos" type="number" step="1" min="0" inputmode="numeric" placeholder="Pratos vendidos">
+            <div class="real-total-line"><span>Total</span><b id="real-total-pagamentos">R$ 0,00</b></div>
+          </div>
+          <textarea class="small-input" id="real-relatorio-texto" maxlength="6000" placeholder="Cole o movimento do dia aqui"></textarea>
+          <div class="real-form-actions">
+            <button class="btn-sm" onclick="lerRelatorioColado()">Ler texto</button>
+            <button class="btn-sm" onclick="modeloMovimentoDia()">Modelo</button>
+          </div>
+          <input id="real-vendas" type="hidden">
+
+          <div class="real-block">
+            <div class="real-block-head"><span>Recebimentos</span><button class="btn-sm" onclick="addRealRow('pagamentos')">+ linha</button></div>
+            <div class="real-money-list" id="real-pagamentos-list"></div>
+          </div>
+
+          <div class="real-block">
+            <div class="real-block-head"><span>Cortes / sem cobrança</span><button class="btn-sm" onclick="addRealRow('cortes')">+ linha</button></div>
+            <div class="real-money-list" id="real-cortes-list"></div>
+          </div>
+
+          <div class="real-block">
+            <div class="real-block-head"><span>Despesas</span><button class="btn-sm" onclick="addRealRow('despesas')">+ linha</button></div>
+            <div class="real-money-list" id="real-despesas-list"></div>
+          </div>
+
           <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
-          <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar venda</button>
+          <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar movimento</button>
         </div>
       </div>
 
@@ -818,7 +860,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v41</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v42</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -2174,6 +2216,150 @@ async function loadHist() {
   } catch(e) { handleApiError(e,false); }
 }
 
+function moneyFromText(value) {
+  if (value === null || value === undefined) return 0;
+  let s = String(value).trim().replace(/[R$\s]/g, '');
+  if (!s) return 0;
+  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else if (s.includes(',')) s = s.replace(',', '.');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function moneyInputValue(n) {
+  return Number(n || 0).toFixed(2);
+}
+
+function defaultRealRows(kind) {
+  if (kind === 'pagamentos') {
+    return [
+      { qtd: '', descricao: 'STONE', valor: '' },
+      { qtd: '', descricao: 'PAGBANK', valor: '' },
+      { qtd: '', descricao: 'DINHEIRO', valor: '' },
+    ];
+  }
+  if (kind === 'cortes') {
+    return [
+      { qtd: '', descricao: 'ERRO/TARA/CANC', valor: '' },
+      { qtd: '', descricao: 'PATRÕES', valor: '' },
+      { qtd: '', descricao: 'FUNCIONARIO', valor: '' },
+    ];
+  }
+  return [{ descricao: '', valor: '' }];
+}
+
+function realRowHtml(kind, row = {}) {
+  const comQtd = kind !== 'despesas';
+  const cls = comQtd ? 'real-money-row' : 'real-money-row no-qtd';
+  const qtd = comQtd ? `<input class="small-input real-qtd" type="number" min="0" step="1" inputmode="numeric" placeholder="Qtd" value="${escapeHtml(row.qtd ?? '')}" oninput="atualizarRealTotais()">` : '';
+  return `<div class="${cls}" data-kind="${kind}">
+    <input class="small-input real-desc" type="text" maxlength="90" placeholder="${kind === 'despesas' ? 'Despesa' : 'Nome'}" value="${escapeHtml(row.descricao || '')}" oninput="atualizarRealTotais()">
+    ${qtd}
+    <input class="small-input real-valor" type="text" inputmode="decimal" placeholder="R$" value="${row.valor !== undefined && row.valor !== null && row.valor !== '' ? moneyInputValue(row.valor) : ''}" oninput="atualizarRealTotais()">
+    <button class="btn-sm danger real-row-del" onclick="this.closest('.real-money-row').remove();atualizarRealTotais()">✕</button>
+  </div>`;
+}
+
+function renderRealMoneyRows(kind, rows) {
+  const el = document.getElementById(`real-${kind}-list`);
+  if (!el) return;
+  const lista = Array.isArray(rows) && rows.length ? rows : defaultRealRows(kind);
+  el.innerHTML = lista.map(row => realRowHtml(kind, row)).join('');
+}
+
+function addRealRow(kind, row = null) {
+  const el = document.getElementById(`real-${kind}-list`);
+  if (!el) return;
+  el.insertAdjacentHTML('beforeend', realRowHtml(kind, row || {}));
+  atualizarRealTotais();
+}
+
+function coletarRealRows(kind) {
+  const el = document.getElementById(`real-${kind}-list`);
+  if (!el) return [];
+  return [...el.querySelectorAll('.real-money-row')].map(row => {
+    const descricao = row.querySelector('.real-desc')?.value.trim() || '';
+    const valor = moneyFromText(row.querySelector('.real-valor')?.value || '');
+    const qtdEl = row.querySelector('.real-qtd');
+    const qtdVal = qtdEl ? Number(qtdEl.value || 0) : null;
+    const base = { descricao, valor };
+    if (qtdEl) base.qtd = Number.isFinite(qtdVal) && qtdVal > 0 ? Math.floor(qtdVal) : null;
+    return base;
+  }).filter(row => row.valor > 0 || row.qtd > 0);
+}
+
+function totalRealRows(kind) {
+  return coletarRealRows(kind).reduce((s, row) => s + Number(row.valor || 0), 0);
+}
+
+function atualizarRealTotais() {
+  const totalPag = totalRealRows('pagamentos');
+  const totalCortes = totalRealRows('cortes');
+  const totalDespesas = totalRealRows('despesas');
+  const vendasEl = document.getElementById('real-vendas');
+  if (vendasEl) vendasEl.value = moneyInputValue(totalPag);
+  const pagEl = document.getElementById('real-total-pagamentos');
+  if (pagEl) pagEl.textContent = fmtBRLMoney(totalPag);
+  const insight = document.getElementById('real-insight');
+  if (insight && realidadeCache?.venda_lancada) {
+    const resultado = totalPag - Number(realidadeCache.consumo_estoque || 0) - Number(realidadeCache.perdas || 0) - totalDespesas;
+    insight.textContent = `Recebido ${fmtBRLMoney(totalPag)}, cortes ${fmtBRLMoney(totalCortes)} e despesas ${fmtBRLMoney(totalDespesas)}. Resultado estimado: ${fmtBRLMoney(resultado)}.`;
+  }
+}
+
+function modeloMovimentoDia() {
+  renderRealMoneyRows('pagamentos', defaultRealRows('pagamentos'));
+  renderRealMoneyRows('cortes', defaultRealRows('cortes'));
+  renderRealMoneyRows('despesas', [{ descricao: 'PASSAGEM', valor: '' }, { descricao: 'PÃO', valor: '' }]);
+  atualizarRealTotais();
+}
+
+function extrairValorLinha(linha) {
+  const matches = String(linha || '').match(/(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$?\s*)?\d+[,.]\d{2}/g);
+  if (!matches || !matches.length) return null;
+  const raw = matches[matches.length - 1];
+  return { raw, valor: moneyFromText(raw) };
+}
+
+function lerRelatorioColado() {
+  const textoEl = document.getElementById('real-relatorio-texto');
+  const texto = textoEl?.value || '';
+  if (!texto.trim()) { toast('Cole o movimento primeiro', 'err'); return; }
+  const linhas = texto.split(/\n+/).map(l => l.trim()).filter(Boolean);
+  const pagamentos = [], cortes = [], despesas = [];
+  let emDespesas = false;
+  let passouTotal = false;
+  let pratos = 0;
+
+  for (const linha of linhas) {
+    if (/^despesa\b/i.test(linha.normalize('NFD').replace(/[\u0300-\u036f]/g, ''))) { emDespesas = true; continue; }
+    const pratosMatch = linha.match(/(\d+)\s+pratos?\s+vendidos?/i);
+    if (pratosMatch) { pratos = Number(pratosMatch[1]) || pratos; continue; }
+    if (/^total\b/i.test(linha)) { passouTotal = true; continue; }
+    const achado = extrairValorLinha(linha);
+    if (!achado) continue;
+
+    if (emDespesas) {
+      const descricao = linha.replace(achado.raw, '').replace(/\bR\$/i, '').replace(/\s+/g, ' ').trim();
+      despesas.push({ descricao, valor: achado.valor });
+      continue;
+    }
+
+    const m = linha.match(/^(\d+)\s+(.+)$/);
+    const qtd = m ? Number(m[1]) : null;
+    let descricao = (m ? m[2] : linha).replace(achado.raw, '').replace(/\bR\$/i, '').replace(/\s+/g, ' ').trim();
+    const destino = passouTotal || /erro|tara|canc|patr|funcion/i.test(descricao.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()) ? cortes : pagamentos;
+    destino.push({ qtd, descricao, valor: achado.valor });
+  }
+
+  if (pratos) document.getElementById('real-pratos').value = pratos;
+  if (pagamentos.length) renderRealMoneyRows('pagamentos', pagamentos);
+  if (cortes.length) renderRealMoneyRows('cortes', cortes);
+  if (despesas.length) renderRealMoneyRows('despesas', despesas);
+  atualizarRealTotais();
+  toast('Relatório preenchido', 'ok');
+}
+
 function realidadeHoje() {
   const el = document.getElementById('real-data');
   if (el) el.value = hojeSPClient();
@@ -2200,6 +2386,8 @@ async function loadRealidade() {
 
 function renderRealidade(d) {
   const vendaInput = document.getElementById('real-vendas');
+  const pratosInput = document.getElementById('real-pratos');
+  const relatorioInput = document.getElementById('real-relatorio-texto');
   const obsInput = document.getElementById('real-obs');
   const configEl = document.getElementById('real-config');
   const resumoEl = document.getElementById('real-resumo');
@@ -2207,26 +2395,39 @@ function renderRealidade(d) {
   const perdasEl = document.getElementById('real-perdas-list');
 
   vendaInput.value = Number(d.vendas || 0).toFixed(2);
+  pratosInput.value = d.pratos_vendidos || '';
+  relatorioInput.value = d.relatorio_texto || '';
   obsInput.value = d.observacao || '';
+  const pagamentosRows = d.pagamentos?.length ? d.pagamentos : (d.venda_lancada && Number(d.vendas || 0) > 0 ? [{ descricao: 'TOTAL DO DIA', valor: d.vendas }] : []);
+  renderRealMoneyRows('pagamentos', pagamentosRows);
+  renderRealMoneyRows('cortes', d.cortes || []);
+  renderRealMoneyRows('despesas', d.despesas_lista || []);
+  atualizarRealTotais();
 
   if (d.configuracao_pendente) {
     configEl.style.display = 'block';
-    configEl.textContent = 'Configure a tabela fechamentos_diarios no Supabase para salvar a venda do dia.';
+    configEl.textContent = 'Configure a tabela fechamentos_diarios no Supabase para salvar o movimento do dia.';
   } else {
     configEl.style.display = 'none';
   }
 
+  const resultadoClass = Number(d.resultado_dia_estimado || 0) < 0 ? 'red' : 'green';
   const lucroClass = Number(d.lucro_bruto_estimado || 0) < 0 ? 'red' : 'green';
   resumoEl.innerHTML = `
     <div class="real-kpi big">
-      <div class="real-label">Lucro bruto estimado</div>
-      <div class="real-val ${lucroClass}">${fmtBRLMoney(d.lucro_bruto_estimado)}</div>
-      <div class="real-sub">vendas - consumo - perdas</div>
+      <div class="real-label">Resultado do dia</div>
+      <div class="real-val ${resultadoClass}">${fmtBRLMoney(d.resultado_dia_estimado)}</div>
+      <div class="real-sub">vendas - consumo - perdas - despesas</div>
     </div>
     <div class="real-kpi">
-      <div class="real-label">Vendas</div>
+      <div class="real-label">Recebido</div>
       <div class="real-val green">${fmtBRLMoney(d.vendas)}</div>
-      <div class="real-sub">caixa/POS/delivery</div>
+      <div class="real-sub">${d.pratos_vendidos ? `${d.pratos_vendidos} pratos · ticket ${fmtBRLMoney(d.ticket_medio)}` : 'caixa/POS/dinheiro'}</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Lucro estoque</div>
+      <div class="real-val ${lucroClass}">${fmtBRLMoney(d.lucro_bruto_estimado)}</div>
+      <div class="real-sub">antes das despesas</div>
     </div>
     <div class="real-kpi warn">
       <div class="real-label">Compras</div>
@@ -2243,10 +2444,20 @@ function renderRealidade(d) {
       <div class="real-val red">${fmtBRLMoney(d.perdas)}</div>
       <div class="real-sub">${fmtPct(d.perdas_sobre_vendas_pct)} das vendas</div>
     </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Despesas</div>
+      <div class="real-val red">${fmtBRLMoney(d.despesas)}</div>
+      <div class="real-sub">${fmtPct(d.despesas_sobre_vendas_pct)} das vendas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Cortes</div>
+      <div class="real-val">${fmtBRLMoney(d.total_cortes)}</div>
+      <div class="real-sub">erro, tara, patrões, funcionário</div>
+    </div>
     <div class="real-kpi">
       <div class="real-label">Fluxo caixa</div>
       <div class="real-val ${Number(d.fluxo_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(d.fluxo_caixa)}</div>
-      <div class="real-sub">vendas - compras</div>
+      <div class="real-sub">vendas - compras - despesas</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Lançamentos</div>
@@ -2255,13 +2466,13 @@ function renderRealidade(d) {
     </div>`;
 
   const ontem = d.comparativo?.ontem;
-  let insight = 'Lance a venda do dia para calcular lucro e percentuais.';
+  let insight = 'Lance o movimento do caixa para calcular lucro e percentuais.';
   if (d.venda_lancada) {
-    insight = `Consumo em ${fmtPct(d.consumo_sobre_vendas_pct)} das vendas e perdas em ${fmtPct(d.perdas_sobre_vendas_pct)}.`;
+    insight = `Recebido ${fmtBRLMoney(d.vendas)}. Consumo ${fmtPct(d.consumo_sobre_vendas_pct)}, perdas ${fmtPct(d.perdas_sobre_vendas_pct)} e despesas ${fmtPct(d.despesas_sobre_vendas_pct)} das vendas.`;
     if (ontem && Number(ontem.vendas || 0) > 0) {
-      const difLucro = Number(ontem.dif_lucro || 0);
+      const difResultado = Number(ontem.dif_resultado || 0);
       const difPerdas = Number(ontem.dif_perdas || 0);
-      insight += ` Contra ontem: lucro ${difLucro >= 0 ? '+' : ''}${fmtBRLMoney(difLucro)}, perdas ${difPerdas >= 0 ? '+' : ''}${fmtBRLMoney(difPerdas)}.`;
+      insight += ` Contra ontem: resultado ${difResultado >= 0 ? '+' : ''}${fmtBRLMoney(difResultado)}, perdas ${difPerdas >= 0 ? '+' : ''}${fmtBRLMoney(difPerdas)}.`;
     }
   }
   if (d.movimentos?.anomalias) insight += ` ${d.movimentos.anomalias} lançamento(s) anômalo(s) para revisar.`;
@@ -2284,19 +2495,32 @@ function renderRealidade(d) {
 
 async function salvarRealidade() {
   const data = document.getElementById('real-data').value || hojeSPClient();
-  const vendasRaw = String(document.getElementById('real-vendas').value || '0').replace(',', '.');
-  const vendas = Number(vendasRaw);
+  const pagamentos = coletarRealRows('pagamentos');
+  const cortes = coletarRealRows('cortes');
+  const despesas = coletarRealRows('despesas');
+  const vendas = pagamentos.reduce((s, row) => s + Number(row.valor || 0), 0);
+  const pratos = Number(document.getElementById('real-pratos').value || 0);
   const observacao = document.getElementById('real-obs').value.trim();
-  if (!Number.isFinite(vendas) || vendas < 0) { toast('Informe a venda do dia', 'err'); return; }
+  const relatorioTexto = document.getElementById('real-relatorio-texto').value.trim();
+  if (!Number.isFinite(vendas) || vendas < 0) { toast('Informe o movimento do dia', 'err'); return; }
   const btn = document.getElementById('real-btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
   try {
-    const d = await apiPost('/api/realidade-dia', { data, vendas, observacao });
+    const d = await apiPost('/api/realidade-dia', {
+      data,
+      vendas,
+      observacao,
+      pratos_vendidos: Number.isFinite(pratos) && pratos > 0 ? Math.floor(pratos) : 0,
+      pagamentos,
+      cortes,
+      despesas,
+      relatorio_texto: relatorioTexto,
+    });
     realidadeCache = d;
     renderRealidade(d);
-    toast('Venda do dia salva', 'ok');
+    toast('Movimento do dia salvo', 'ok');
   } catch(e) { handleApiError(e, true); }
-  finally { btn.disabled = false; btn.textContent = 'Salvar venda'; }
+  finally { btn.disabled = false; btn.textContent = 'Salvar movimento'; }
 }
 
 function irLancarPerda() {
