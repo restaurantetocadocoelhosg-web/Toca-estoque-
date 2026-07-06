@@ -80,10 +80,10 @@ nav { order: 999; background: var(--s1); border-top: 1px solid var(--border); di
 .nav-btn { flex: 1; min-width: 0; overflow: hidden; background: none; border: none; color: var(--muted); font-family: var(--font); font-size: 10px; font-weight: 600; padding: 10px 4px 8px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; text-transform: uppercase; letter-spacing: 0.3px; transition: color 0.15s; white-space: nowrap; }
 .nav-btn .icon { font-size: 20px; }
 .nav-btn.active { color: var(--accent); }
-/* iPhone / telas estreitas: os 9 botoes sempre cabem (sem cortar o Admin) */
+/* iPhone / telas estreitas: os botoes sempre cabem (sem cortar o Admin) */
 @media (max-width: 430px) {
-  .nav-btn { font-size: 8px; padding: 9px 2px 7px; letter-spacing: 0; gap: 2px; }
-  .nav-btn .icon { font-size: 18px; }
+  .nav-btn { font-size: 7.5px; padding: 9px 1px 7px; letter-spacing: 0; gap: 2px; }
+  .nav-btn .icon { font-size: 17px; }
 }
 @media (max-width: 350px) {
   .nav-btn { font-size: 0; padding: 11px 2px 9px; }
@@ -257,6 +257,30 @@ select.big-input { font-size: 14px; }
 .btn-primary { background: var(--accent); color: #fff; box-shadow: 0 2px 8px rgba(232,93,38,0.25); }
 .btn-success { background: var(--green); color: #fff; box-shadow: 0 2px 8px rgba(16,185,129,0.25); }
 .btn-danger { background: rgba(239,68,68,0.08); color: var(--red); border: 1.5px solid rgba(239,68,68,0.3) !important; }
+.real-section { padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+.real-head { display: flex; gap: 8px; align-items: center; }
+.real-head .small-input { flex: 1; background: var(--s1); }
+.real-card { background: var(--s1); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; box-shadow: var(--shadow); }
+.real-card-title { font-size: 14px; font-weight: 800; color: var(--text); margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.real-form { display: grid; grid-template-columns: 1fr; gap: 8px; }
+.real-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.real-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-width: 0; }
+.real-kpi.big { grid-column: 1 / -1; background: rgba(16,185,129,0.07); border-color: rgba(16,185,129,0.25); }
+.real-kpi.warn { background: rgba(245,158,11,0.08); border-color: rgba(245,158,11,0.25); }
+.real-kpi.loss { background: rgba(239,68,68,0.07); border-color: rgba(239,68,68,0.25); }
+.real-label { font-size: 10px; font-weight: 800; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 4px; }
+.real-val { font-size: 20px; font-weight: 800; line-height: 1.05; color: var(--text); overflow-wrap: anywhere; }
+.real-val.green { color: var(--green); }
+.real-val.red { color: var(--red); }
+.real-val.accent { color: var(--accent); }
+.real-sub { font-size: 11px; color: var(--muted); margin-top: 4px; line-height: 1.35; }
+.real-alert { border-radius: 12px; padding: 11px 13px; font-size: 12px; font-weight: 700; line-height: 1.4; background: rgba(245,158,11,0.1); color: #9a6400; border: 1px solid rgba(245,158,11,0.35); }
+.real-insight { background: var(--s2); border-radius: 12px; padding: 12px 13px; font-size: 13px; line-height: 1.5; color: var(--text); }
+.real-loss-list { display: flex; flex-direction: column; gap: 8px; }
+.real-loss-item { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.real-loss-name { font-size: 13px; font-weight: 800; color: var(--text); }
+.real-loss-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.real-loss-val { font-size: 14px; font-weight: 800; color: var(--red); white-space: nowrap; }
 .empty { text-align: center; padding: 48px 24px; color: var(--muted); }
 .empty-icon { font-size: 36px; margin-bottom: 10px; }
 .empty-text { font-size: 14px; }
@@ -700,6 +724,38 @@ select.big-input { font-size: 14px; }
     <div class="hist-list" id="hist-list"><div class="loading">Carregando...</div></div>
   </div>
 
+  <!-- REALIDADE DO DIA -->
+  <div id="p-realidade" class="page">
+    <div class="real-section">
+      <div class="real-head">
+        <input type="date" class="small-input" id="real-data" onchange="loadRealidade()">
+        <button class="btn-sm" onclick="realidadeHoje()">Hoje</button>
+      </div>
+
+      <div id="real-config" class="real-alert" style="display:none"></div>
+
+      <div class="real-card">
+        <div class="real-card-title">💰 Vendas do dia</div>
+        <div class="real-form">
+          <input class="small-input" id="real-vendas" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0,00">
+          <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
+          <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar venda</button>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">📊 Realidade do dia <button class="btn-sm" onclick="loadRealidade()">↻</button></div>
+        <div class="real-grid" id="real-resumo"><div class="loading">Carregando...</div></div>
+        <div class="real-insight" id="real-insight" style="margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">🗑️ Perdas do dia <button class="btn-sm danger" onclick="irLancarPerda()">Lançar perda</button></div>
+        <div class="real-loss-list" id="real-perdas-list"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- EXPORTAR -->
   <div id="p-export" class="page">
     <div class="export-list">
@@ -762,7 +818,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v40</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v41</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -964,6 +1020,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn active" onclick="goPage('lancar', this)"><span class="icon">📝</span>Lançar</button>
   <button class="nav-btn" onclick="goPage('estoque', this)"><span class="icon">📦</span>Estoque</button>
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
+  <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
@@ -1111,6 +1168,7 @@ let tipoAtual = 'Entrada';
 let prodAtual = null;
 let estStatus = '';
 let cupomItens = []; // estado dos itens do cupom
+let realidadeCache = null;
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutos
 let _idleTimer = null;
@@ -1313,6 +1371,7 @@ function goPage(id, btn) {
   btn.classList.add('active');
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
+  if (id === 'realidade') loadRealidade();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
   if (id === 'alertas') loadAlertas();
@@ -1758,6 +1817,7 @@ async function lancar(forcar = false) {
     await loadDash();
     if (document.getElementById('p-estoque').classList.contains('active')) await loadEstoque();
     if (document.getElementById('p-hist').classList.contains('active')) await loadHist();
+    if (document.getElementById('p-realidade').classList.contains('active')) await loadRealidade();
   } catch(e) {
     // Erro do servidor — mostrar modal para erros críticos
     const msg = e.message || 'Erro inesperado';
@@ -2114,6 +2174,139 @@ async function loadHist() {
   } catch(e) { handleApiError(e,false); }
 }
 
+function realidadeHoje() {
+  const el = document.getElementById('real-data');
+  if (el) el.value = hojeSPClient();
+  loadRealidade();
+}
+
+async function loadRealidade() {
+  const dataEl = document.getElementById('real-data');
+  if (!dataEl) return;
+  if (!dataEl.value) dataEl.value = hojeSPClient();
+  const resumoEl = document.getElementById('real-resumo');
+  const perdasEl = document.getElementById('real-perdas-list');
+  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
+  perdasEl.innerHTML = '';
+  try {
+    const d = await api('/api/realidade-dia?data=' + encodeURIComponent(dataEl.value));
+    realidadeCache = d;
+    renderRealidade(d);
+  } catch(e) {
+    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar.</div></div>';
+    handleApiError(e, true);
+  }
+}
+
+function renderRealidade(d) {
+  const vendaInput = document.getElementById('real-vendas');
+  const obsInput = document.getElementById('real-obs');
+  const configEl = document.getElementById('real-config');
+  const resumoEl = document.getElementById('real-resumo');
+  const insightEl = document.getElementById('real-insight');
+  const perdasEl = document.getElementById('real-perdas-list');
+
+  vendaInput.value = Number(d.vendas || 0).toFixed(2);
+  obsInput.value = d.observacao || '';
+
+  if (d.configuracao_pendente) {
+    configEl.style.display = 'block';
+    configEl.textContent = 'Configure a tabela fechamentos_diarios no Supabase para salvar a venda do dia.';
+  } else {
+    configEl.style.display = 'none';
+  }
+
+  const lucroClass = Number(d.lucro_bruto_estimado || 0) < 0 ? 'red' : 'green';
+  resumoEl.innerHTML = `
+    <div class="real-kpi big">
+      <div class="real-label">Lucro bruto estimado</div>
+      <div class="real-val ${lucroClass}">${fmtBRLMoney(d.lucro_bruto_estimado)}</div>
+      <div class="real-sub">vendas - consumo - perdas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Vendas</div>
+      <div class="real-val green">${fmtBRLMoney(d.vendas)}</div>
+      <div class="real-sub">caixa/POS/delivery</div>
+    </div>
+    <div class="real-kpi warn">
+      <div class="real-label">Compras</div>
+      <div class="real-val accent">${fmtBRLMoney(d.compras_estoque)}</div>
+      <div class="real-sub">investimento em estoque</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Consumo</div>
+      <div class="real-val">${fmtBRLMoney(d.consumo_estoque)}</div>
+      <div class="real-sub">${fmtPct(d.consumo_sobre_vendas_pct)} das vendas</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Perdas</div>
+      <div class="real-val red">${fmtBRLMoney(d.perdas)}</div>
+      <div class="real-sub">${fmtPct(d.perdas_sobre_vendas_pct)} das vendas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Fluxo caixa</div>
+      <div class="real-val ${Number(d.fluxo_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(d.fluxo_caixa)}</div>
+      <div class="real-sub">vendas - compras</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Lançamentos</div>
+      <div class="real-val">${d.movimentos?.total || 0}</div>
+      <div class="real-sub">${d.movimentos?.n_consumo || 0} saídas · ${d.movimentos?.n_perdas || 0} perdas</div>
+    </div>`;
+
+  const ontem = d.comparativo?.ontem;
+  let insight = 'Lance a venda do dia para calcular lucro e percentuais.';
+  if (d.venda_lancada) {
+    insight = `Consumo em ${fmtPct(d.consumo_sobre_vendas_pct)} das vendas e perdas em ${fmtPct(d.perdas_sobre_vendas_pct)}.`;
+    if (ontem && Number(ontem.vendas || 0) > 0) {
+      const difLucro = Number(ontem.dif_lucro || 0);
+      const difPerdas = Number(ontem.dif_perdas || 0);
+      insight += ` Contra ontem: lucro ${difLucro >= 0 ? '+' : ''}${fmtBRLMoney(difLucro)}, perdas ${difPerdas >= 0 ? '+' : ''}${fmtBRLMoney(difPerdas)}.`;
+    }
+  }
+  if (d.movimentos?.anomalias) insight += ` ${d.movimentos.anomalias} lançamento(s) anômalo(s) para revisar.`;
+  insightEl.textContent = insight;
+
+  const perdas = d.movimentos?.perdas_itens || [];
+  if (!perdas.length) {
+    perdasEl.innerHTML = '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhuma perda lançada neste dia.</div></div>';
+  } else {
+    perdasEl.innerHTML = perdas.map(p => `
+      <div class="real-loss-item">
+        <div style="min-width:0">
+          <div class="real-loss-name">${escapeHtml(p.produto_nome)}</div>
+          <div class="real-loss-meta">${fmt(p.qtd)} ${escapeHtml(p.unidade || '')}${p.motivos?.length ? ' · ' + escapeHtml(p.motivos.join(', ')) : ''}</div>
+        </div>
+        <div class="real-loss-val">${fmtBRLMoney(p.valor)}</div>
+      </div>`).join('');
+  }
+}
+
+async function salvarRealidade() {
+  const data = document.getElementById('real-data').value || hojeSPClient();
+  const vendasRaw = String(document.getElementById('real-vendas').value || '0').replace(',', '.');
+  const vendas = Number(vendasRaw);
+  const observacao = document.getElementById('real-obs').value.trim();
+  if (!Number.isFinite(vendas) || vendas < 0) { toast('Informe a venda do dia', 'err'); return; }
+  const btn = document.getElementById('real-btn-salvar');
+  btn.disabled = true; btn.textContent = 'Salvando...';
+  try {
+    const d = await apiPost('/api/realidade-dia', { data, vendas, observacao });
+    realidadeCache = d;
+    renderRealidade(d);
+    toast('Venda do dia salva', 'ok');
+  } catch(e) { handleApiError(e, true); }
+  finally { btn.disabled = false; btn.textContent = 'Salvar venda'; }
+}
+
+function irLancarPerda() {
+  goPage('lancar', document.querySelectorAll('.nav-btn')[0]);
+  setTimeout(() => {
+    const btn = document.querySelector('.tipo-card[data-tipo="Perda"]');
+    if (btn) selTipo(btn);
+  }, 30);
+}
+
 function histDel1(id) {
   document.getElementById(`hist-confirm-${id}`).style.display = 'block';
   document.getElementById(`del1-${id}`).style.display = 'none';
@@ -2130,6 +2323,7 @@ async function histDelConfirm(id) {
     document.getElementById(`hist-${id}`)?.remove();
     toast('✓ Lançamento cancelado e estoque estornado', 'ok');
     await loadDash();
+    if (document.getElementById('p-realidade').classList.contains('active')) await loadRealidade();
   } catch(e) { toast(e.message, 'err'); }
 }
 
@@ -2206,6 +2400,19 @@ function fmtMoneyCompact(n) {
   const num=Number(n||0);
   if (num>=1000) return `${(num/1000).toFixed(1).replace('.0','')}k`;
   return num.toFixed(0);
+}
+
+function fmtBRLMoney(n) {
+  return Number(n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+}
+
+function fmtPct(v) {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—';
+  return Number(v).toFixed(2).replace('.', ',') + '%';
+}
+
+function hojeSPClient() {
+  return new Intl.DateTimeFormat('sv-SE', { timeZone: 'America/Sao_Paulo' }).format(new Date());
 }
 
 function toast(msg, type='ok') {

@@ -814,6 +814,272 @@ app.get('/api/dashboard', auth, async (req, res) => {
   res.json({ zerados, criticos, atencao, valorTotal, lancHoje: lancHoje || 0, ultimos: ultimos || [] });
 });
 
+// ==================== REALIDADE DO DIA ====================
+function validarDataISO(data) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(data || '')) ? String(data) : dateSP();
+}
+
+function addDiasISO(data, dias) {
+  const [y, m, d] = String(data).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
+}
+
+function dataBR(data) {
+  return String(data).split('-').reverse().join('/');
+}
+
+function pct(valor, total) {
+  const v = Number(valor || 0), t = Number(total || 0);
+  if (!t) return null;
+  return Number(((v / t) * 100).toFixed(2));
+}
+
+function isTabelaFechamentoMissing(error) {
+  const msg = String(error?.message || error?.details || '');
+  return error && (
+    error.code === '42P01' ||
+    error.code === 'PGRST205' ||
+    /fechamentos_diarios|schema cache|does not exist|relation/i.test(msg)
+  );
+}
+
+function resumirResponsaveis(porResp) {
+  return Object.entries(porResp || {})
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([nome, d]) => {
+      const partes = [];
+      if (d.entradas) partes.push(`${d.entradas} ent`);
+      if (d.saidas) partes.push(`${d.saidas} saí`);
+      if (d.perdas) partes.push(`${d.perdas} perda`);
+      if (d.ajustes) partes.push(`${d.ajustes} ajuste`);
+      return `• ${nome}: ${d.total}${partes.length ? ` (${partes.join(', ')})` : ''}`;
+    }).join('\n');
+}
+
+async function resumoMovimentosDia(dataDia) {
+  const { data, error } = await supabase.from('movimentacoes')
+    .select('tipo, qtd, valor, responsavel, produto_nome, unidade, motivo, obs')
+    .gte('created_at', dataDia + 'T00:00:00-03:00')
+    .lte('created_at', dataDia + 'T23:59:59-03:00');
+  if (error) throw error;
+
+  const resumo = {
+    total: 0,
+    compras: 0, consumo: 0, perdas: 0, ajustes: 0,
+    n_compras: 0, n_consumo: 0, n_perdas: 0, n_ajustes: 0,
+    anomalias: 0,
+    por_responsavel: {},
+    perdas_itens: [],
+  };
+  const perdasPorItem = {};
+
+  for (const m of (data || [])) {
+    const tipo = m.tipo || '';
+    const valor = Number(m.valor || 0);
+    const qtd = Number(m.qtd || 0);
+    const resp = m.responsavel || 'Não identificado';
+    if (!resumo.por_responsavel[resp]) {
+      resumo.por_responsavel[resp] = { total: 0, entradas: 0, saidas: 0, perdas: 0, ajustes: 0 };
+    }
+    const pr = resumo.por_responsavel[resp];
+    pr.total++;
+    resumo.total++;
+    if (m.obs && /anomalia/i.test(m.obs)) resumo.anomalias++;
+
+    if (tipo === 'Entrada') {
+      resumo.compras += valor; resumo.n_compras++; pr.entradas++;
+    } else if (tipo === 'Saída') {
+      resumo.consumo += valor; resumo.n_consumo++; pr.saidas++;
+    } else if (tipo === 'Perda') {
+      resumo.perdas += valor; resumo.n_perdas++; pr.perdas++;
+      const key = `${m.produto_nome || '?'}|${m.unidade || ''}`;
+      if (!perdasPorItem[key]) perdasPorItem[key] = {
+        produto_nome: m.produto_nome || '?',
+        unidade: m.unidade || '',
+        qtd: 0,
+        valor: 0,
+        motivos: new Set(),
+      };
+      perdasPorItem[key].qtd += qtd;
+      perdasPorItem[key].valor += valor;
+      if (m.motivo) perdasPorItem[key].motivos.add(m.motivo);
+    } else if (tipo === 'Ajuste') {
+      resumo.ajustes += valor; resumo.n_ajustes++; pr.ajustes++;
+    }
+  }
+
+  resumo.compras = Number(resumo.compras.toFixed(2));
+  resumo.consumo = Number(resumo.consumo.toFixed(2));
+  resumo.perdas = Number(resumo.perdas.toFixed(2));
+  resumo.ajustes = Number(resumo.ajustes.toFixed(2));
+  resumo.perdas_itens = Object.values(perdasPorItem)
+    .map(p => ({
+      produto_nome: p.produto_nome,
+      unidade: p.unidade,
+      qtd: Number(p.qtd.toFixed(3)),
+      valor: Number(p.valor.toFixed(2)),
+      motivos: Array.from(p.motivos).slice(0, 3),
+    }))
+    .sort((a, b) => b.valor - a.valor)
+    .slice(0, 10);
+  return resumo;
+}
+
+async function buscarFechamentoDia(dataDia) {
+  const { data, error } = await supabase.from('fechamentos_diarios')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at')
+    .eq('data', dataDia)
+    .maybeSingle();
+  if (error) {
+    if (isTabelaFechamentoMissing(error)) return { row: null, configuracao_pendente: true };
+    throw error;
+  }
+  return { row: data || null, configuracao_pendente: false };
+}
+
+async function montarRealidadeDia(dataDiaParam) {
+  const dataDia = validarDataISO(dataDiaParam);
+  const ontem = addDiasISO(dataDia, -1);
+  const [mov, fechamento, movOntem] = await Promise.all([
+    resumoMovimentosDia(dataDia),
+    buscarFechamentoDia(dataDia),
+    resumoMovimentosDia(ontem).catch(() => null),
+  ]);
+
+  let fechamentoOntem = { row: null, configuracao_pendente: fechamento.configuracao_pendente };
+  if (!fechamento.configuracao_pendente) {
+    fechamentoOntem = await buscarFechamentoDia(ontem).catch(() => ({ row: null, configuracao_pendente: false }));
+  }
+
+  const vendas = Number(fechamento.row?.vendas || 0);
+  const lucroBruto = Number((vendas - mov.consumo - mov.perdas).toFixed(2));
+  const fluxoCaixa = Number((vendas - mov.compras).toFixed(2));
+  const vendasOntem = Number(fechamentoOntem.row?.vendas || 0);
+  const lucroOntem = movOntem ? Number((vendasOntem - movOntem.consumo - movOntem.perdas).toFixed(2)) : 0;
+
+  return {
+    data: dataDia,
+    data_br: dataBR(dataDia),
+    vendas,
+    venda_lancada: !!fechamento.row,
+    observacao: fechamento.row?.observacao || '',
+    responsavel: fechamento.row?.responsavel || '',
+    atualizado_em: fechamento.row?.updated_at || fechamento.row?.created_at || null,
+    configuracao_pendente: fechamento.configuracao_pendente,
+    compras_estoque: mov.compras,
+    consumo_estoque: mov.consumo,
+    perdas: mov.perdas,
+    ajustes: mov.ajustes,
+    lucro_bruto_estimado: lucroBruto,
+    fluxo_caixa: fluxoCaixa,
+    consumo_sobre_vendas_pct: pct(mov.consumo, vendas),
+    perdas_sobre_vendas_pct: pct(mov.perdas, vendas),
+    compras_sobre_vendas_pct: pct(mov.compras, vendas),
+    movimentos: mov,
+    comparativo: {
+      ontem: {
+        data: ontem,
+        data_br: dataBR(ontem),
+        vendas: vendasOntem,
+        lucro_bruto_estimado: lucroOntem,
+        perdas: movOntem ? movOntem.perdas : 0,
+        consumo_estoque: movOntem ? movOntem.consumo : 0,
+        dif_vendas: Number((vendas - vendasOntem).toFixed(2)),
+        dif_lucro: Number((lucroBruto - lucroOntem).toFixed(2)),
+        dif_perdas: Number((mov.perdas - (movOntem ? movOntem.perdas : 0)).toFixed(2)),
+      }
+    }
+  };
+}
+
+function montarMensagemFechamentoDia(d) {
+  const vendasLancadas = !!d.venda_lancada;
+  const semMovimento = d.movimentos.total === 0;
+  if (!vendasLancadas && semMovimento) {
+    return `📋 *FECHAMENTO DO DIA — ${d.data_br}*\n\n⚠️ Nada registrado hoje.\n\nLance a venda do dia na aba Dia e registre consumo/perdas no estoque para calcular a realidade.`;
+  }
+
+  let msg = `📋 *FECHAMENTO DO DIA — ${d.data_br}*\n\n`;
+  msg += `💰 Vendas do dia: ${vendasLancadas ? fmtBRL(d.vendas) : 'não lançada'}\n`;
+  msg += `📦 Compras do estoque: ${fmtBRL(d.compras_estoque)}\n`;
+  msg += `🍽️ Consumo do estoque: ${fmtBRL(d.consumo_estoque)}\n`;
+  msg += `🗑️ Perdas: ${fmtBRL(d.perdas)}\n\n`;
+
+  msg += `📊 *Leitura:*\n`;
+  if (vendasLancadas) {
+    msg += `Lucro bruto estimado: ${fmtBRL(d.lucro_bruto_estimado)}\n`;
+    msg += `Fluxo de caixa do dia: ${fmtBRL(d.fluxo_caixa)}\n`;
+    msg += `Consumo: ${d.consumo_sobre_vendas_pct?.toFixed(2)}% das vendas\n`;
+    msg += `Perdas: ${d.perdas_sobre_vendas_pct?.toFixed(2)}% das vendas`;
+  } else {
+    msg += `Venda do dia ainda não lançada. Sem ela não dá para calcular lucro.\n`;
+    msg += `O estoque já mostra ${fmtBRL(d.consumo_estoque)} de consumo e ${fmtBRL(d.perdas)} de perdas.`;
+  }
+
+  const ontem = d.comparativo?.ontem;
+  if (vendasLancadas && ontem && ontem.vendas > 0) {
+    msg += `\n\n📈 *Comparativo com ontem:*\n`;
+    msg += `Vendas: ${ontem.dif_vendas >= 0 ? '+' : ''}${fmtBRL(ontem.dif_vendas)}\n`;
+    msg += `Lucro estimado: ${ontem.dif_lucro >= 0 ? '+' : ''}${fmtBRL(ontem.dif_lucro)}\n`;
+    msg += `Perdas: ${ontem.dif_perdas >= 0 ? '+' : ''}${fmtBRL(ontem.dif_perdas)}`;
+  }
+
+  if (d.movimentos.total > 0) {
+    msg += `\n\n📋 Estoque: ${d.movimentos.total} movimentações`;
+    msg += ` (${d.movimentos.n_compras} ent, ${d.movimentos.n_consumo} saí`;
+    if (d.movimentos.n_perdas) msg += `, ${d.movimentos.n_perdas} perdas`;
+    if (d.movimentos.n_ajustes) msg += `, ${d.movimentos.n_ajustes} ajustes`;
+    msg += `)`;
+    const linhasResp = resumirResponsaveis(d.movimentos.por_responsavel);
+    if (linhasResp) msg += `\n\n👤 *Quem lançou estoque:*\n${linhasResp}`;
+  }
+
+  if (d.configuracao_pendente) msg += `\n\n⚠️ Configure a tabela fechamentos_diarios para salvar vendas do dia.`;
+  if (d.movimentos.anomalias > 0) msg += `\n\n⚠️ ${d.movimentos.anomalias} lançamento(s) com quantidade anômala — revise no app.`;
+  if (d.perdas > 0) msg += `\n🗑️ Perdas são descarte/lixo: isso é perda real, diferente de compra.`;
+  return msg;
+}
+
+app.get('/api/realidade-dia', auth, async (req, res) => {
+  try {
+    const resumo = await montarRealidadeDia(req.query?.data);
+    res.json(resumo);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar realidade do dia.' });
+  }
+});
+
+app.post('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => {
+  try {
+    const dataDia = validarDataISO(req.body?.data);
+    const vendas = parseNonNegativeNumber(req.body?.vendas);
+    const observacao = sanitizeText(req.body?.observacao || '', 300);
+    if (vendas === null) return res.status(400).json({ erro: 'Informe a venda do dia com valor válido.' });
+
+    const { error } = await supabase.from('fechamentos_diarios').upsert({
+      data: dataDia,
+      vendas,
+      observacao,
+      responsavel: req.user.nome || req.user.username,
+      updated_at: nowSP(),
+    }, { onConflict: 'data' });
+    if (error) {
+      if (isTabelaFechamentoMissing(error)) {
+        return res.status(500).json({ erro: 'Tabela fechamentos_diarios não existe. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
+      }
+      throw error;
+    }
+
+    await audit('realidade_dia_salvar', { data: dataDia, vendas }, req.user, getClientIp(req));
+    const resumo = await montarRealidadeDia(dataDia);
+    res.json(resumo);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar venda do dia.' });
+  }
+});
+
 // ==================== EXPORTAR ====================
 app.get('/api/exportar/:tipo', auth, requirePerm('exportar'), async (req, res) => {
   const { tipo } = req.params;
@@ -1381,6 +1647,16 @@ const IA_TOOLS = [
     input_schema: { type: 'object', properties: {} }
   },
   {
+    name: 'ver_realidade_dia',
+    description: 'Resumo do dia cruzando vendas, compras/entradas, consumo do estoque, perdas, lucro bruto estimado e fluxo de caixa.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        data: { type: 'string', description: 'Data em YYYY-MM-DD. Se omitir, usa hoje.' }
+      }
+    }
+  },
+  {
     name: 'alertas_giro_parado',
     description: 'Produtos de alto giro (perecíveis, carnes) sem movimentação além do esperado.',
     input_schema: { type: 'object', properties: {} }
@@ -1578,6 +1854,35 @@ async function executarFerramenta(nome, input, user) {
         return { total_produtos: prods.length, zerados, criticos, atencao, ok: prods.length - zerados - criticos - atencao, valor_total: valor, lancamentos_hoje: lancHoje || 0, ultimos_lancamentos: ultimos || [] };
       }
 
+      case 'ver_realidade_dia': {
+        const dataDia = input.data ? validarDataISO(input.data) : dateSP();
+        const d = await montarRealidadeDia(dataDia);
+        return {
+          data: d.data,
+          data_br: d.data_br,
+          venda_lancada: d.venda_lancada,
+          vendas: d.vendas,
+          compras_estoque: d.compras_estoque,
+          consumo_estoque: d.consumo_estoque,
+          perdas: d.perdas,
+          lucro_bruto_estimado: d.lucro_bruto_estimado,
+          fluxo_caixa: d.fluxo_caixa,
+          consumo_sobre_vendas_pct: d.consumo_sobre_vendas_pct,
+          perdas_sobre_vendas_pct: d.perdas_sobre_vendas_pct,
+          movimentos: {
+            total: d.movimentos.total,
+            entradas: d.movimentos.n_compras,
+            saidas: d.movimentos.n_consumo,
+            perdas: d.movimentos.n_perdas,
+            ajustes: d.movimentos.n_ajustes,
+            anomalias: d.movimentos.anomalias,
+            perdas_itens: d.movimentos.perdas_itens,
+          },
+          comparativo_ontem: d.comparativo.ontem,
+          configuracao_pendente: d.configuracao_pendente,
+        };
+      }
+
       case 'alertas_giro_parado': {
         const CATS = ['Hortifruti', 'Aves', 'Massa Fresca', 'Carnes Bovinas', 'Carnes Suínas', 'Pescados', 'Laticínios', 'Outras Proteínas', 'Bebidas'];
         const THR = { 'Hortifruti': 7, 'Aves': 7, 'Massa Fresca': 7, 'Carnes Bovinas': 10, 'Carnes Suínas': 10, 'Pescados': 10, 'Laticínios': 10, 'Outras Proteínas': 10, 'Bebidas': 15 };
@@ -1748,7 +2053,7 @@ app.post('/api/chat', auth, requirePerm('ia'), chatLimiter, async (req, res) => 
     '- Perguntas curtas (ex.: "e o frango?") devem ser entendidas no contexto do histórico da conversa.\n\n' +
     'COMO AGIR:\n' +
     '1. Responda SEMPRE em português brasileiro, direto e curto. Nada de repetir a pergunta nem enrolar.\n' +
-    '2. Todo número (qtd, custo, valor, lançamentos de hoje) vem SEMPRE de uma chamada de ferramenta FEITA AGORA. NUNCA invente e NUNCA reaproveite números citados antes nesta conversa nem de relatórios anteriores — o estoque muda o tempo todo e aquilo já pode estar velho. Se perguntarem "o que mexeu hoje", chame ver_movimentacoes(hoje=true) na hora; se perguntarem saldo, chame buscar_produto na hora.\n' +
+    '2. Todo número (qtd, custo, valor, lançamentos de hoje) vem SEMPRE de uma chamada de ferramenta FEITA AGORA. NUNCA invente e NUNCA reaproveite números citados antes nesta conversa nem de relatórios anteriores — o estoque muda o tempo todo e aquilo já pode estar velho. Se perguntarem "o que mexeu hoje", chame ver_movimentacoes(hoje=true) na hora; se perguntarem saldo, chame buscar_produto na hora; se perguntarem lucro, vendas, perdas do dia, fechamento ou realidade do dia, chame ver_realidade_dia.\n' +
     '2b. CONFERIR UMA LISTA (comparar o que o usuário mandou com o estoque/movimentos): vá item por item, SEMPRE consultando a ferramenta para cada um. NÃO confie na memória nem em respostas anteriores. Se a lista for grande, confira em blocos e diga quantos faltam. Quando um nome não casar exatamente, busque e pergunte em vez de chutar.\n' +
     '2c. QUANDO O USUÁRIO MANDAR VÁRIOS ITENS/LINHAS DE UMA VEZ: trate cada linha como um item separado, mantenha a MESMA ORDEM que ele enviou, responda um item por linha e não junte itens diferentes nem pule nenhum. Se vier um texto longo, não resuma misturando — preserve a estrutura do que foi enviado.\n' +
     '3. Seja proativo: ao buscar, se notar algo grave (zerado urgente, giro parado, anomalia), avise e registre na agenda.\n' +
@@ -2554,56 +2859,21 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     return res.json({ resposta: msg });
   }
 
-  if (acao === 'fechamento') {
-    const hojeSP = dateSP();
-    const dataBR = hojeSP.split('-').reverse().join('/');
-    const { data: movs } = await supabase.from('movimentacoes')
-      .select('tipo, qtd, valor, responsavel, produto_nome, obs')
-      .gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
-    const lista = movs || [];
-    if (!lista.length) {
-      return res.json({ resposta: `📋 *FECHAMENTO DE ESTOQUE — ${dataBR}*\n\n⚠️ NENHUMA movimentação registrada hoje!\n\nA equipe não lançou entradas/saídas no sistema. Cobre os colaboradores do dia.`, vazio: true, total: 0 });
-    }
-    const porResp = {};
-    let totEnt = 0, totSai = 0, totPerda = 0, totAjuste = 0, valor = 0, anomalias = 0;
-    let valorEnt = 0, valorSai = 0, valorPerda = 0, valorAjuste = 0;
-    for (const m of lista) {
-      const r = m.responsavel || 'Não identificado';
-      if (!porResp[r]) porResp[r] = { ent: 0, sai: 0, perda: 0, ajuste: 0 };
-      const v = Number(m.valor) || 0;
-      if (m.tipo === 'Entrada') { porResp[r].ent++; totEnt++; valorEnt += v; }
-      else if (m.tipo === 'Saída') { porResp[r].sai++; totSai++; valorSai += v; }
-      else if (m.tipo === 'Perda') { porResp[r].perda++; totPerda++; valorPerda += v; }
-      else if (m.tipo === 'Ajuste') { porResp[r].ajuste++; totAjuste++; valorAjuste += v; }
-      valor += v;
-      if (m.obs && /anomalia/i.test(m.obs)) anomalias++;
-    }
-    const saldo = valorEnt - valorSai - valorPerda;
-    const linhasResp = Object.entries(porResp)
-      .sort((a, b) => (b[1].ent+b[1].sai+b[1].perda+b[1].ajuste) - (a[1].ent+a[1].sai+a[1].perda+a[1].ajuste))
-      .map(([r, d]) => {
-        const partes = [];
-        if (d.ent) partes.push(`${d.ent} ent`);
-        if (d.sai) partes.push(`${d.sai} saí`);
-        if (d.perda) partes.push(`${d.perda} perda`);
-        if (d.ajuste) partes.push(`${d.ajuste} ajuste`);
-        return `• ${r}: ${d.ent+d.sai+d.perda+d.ajuste} (${partes.join(', ')})`;
-      }).join('\n');
-    let msg = `📋 *FECHAMENTO DE ESTOQUE — ${dataBR}*\n\n`;
-    msg += `📊 Total: ${lista.length} movimentações\n`;
-    msg += `📥 Entradas: ${totEnt} | 📤 Saídas: ${totSai}`;
-    if (totPerda) msg += ` | 🗑️ Perdas: ${totPerda}`;
-    if (totAjuste) msg += ` | ⚙️ Ajustes: ${totAjuste}`;
-    msg += `\n\n💰 *Valores do dia:*\n`;
-    msg += `📥 Entradas: R$ ${valorEnt.toFixed(2)}\n`;
-    msg += `📤 Saídas:   R$ ${valorSai.toFixed(2)}\n`;
-    if (valorPerda) msg += `🗑️ Perdas:   R$ ${valorPerda.toFixed(2)}\n`;
-    if (valorAjuste) msg += `⚙️ Ajustes:  R$ ${valorAjuste.toFixed(2)}\n`;
-    msg += `📊 Saldo:    R$ ${saldo.toFixed(2)}\n\n`;
-    msg += `👤 *Quem lançou hoje:*\n${linhasResp}`;
-    if (anomalias > 0) msg += `\n\n⚠️ ${anomalias} lançamento(s) com quantidade anômala — revise no app.`;
-    if (totPerda > 0) msg += `\n🗑️ ${totPerda} perda(s) registrada(s) hoje — confira os motivos.`;
-    return res.json({ resposta: msg, total: lista.length, entradas: totEnt, saidas: totSai, perdas: totPerda, ajustes: totAjuste, valor: Number(valor.toFixed(2)), valor_entradas: Number(valorEnt.toFixed(2)), valor_saidas: Number(valorSai.toFixed(2)), valor_perdas: Number(valorPerda.toFixed(2)), valor_ajustes: Number(valorAjuste.toFixed(2)), saldo: Number(saldo.toFixed(2)), por_responsavel: porResp, anomalias });
+  if (acao === 'fechamento' || acao === 'realidade') {
+    const realidade = await montarRealidadeDia(dateSP());
+    return res.json({
+      resposta: montarMensagemFechamentoDia(realidade),
+      total: realidade.movimentos.total,
+      vendas: realidade.vendas,
+      venda_lancada: realidade.venda_lancada,
+      compras_estoque: realidade.compras_estoque,
+      consumo_estoque: realidade.consumo_estoque,
+      perdas: realidade.perdas,
+      lucro_bruto_estimado: realidade.lucro_bruto_estimado,
+      fluxo_caixa: realidade.fluxo_caixa,
+      anomalias: realidade.movimentos.anomalias,
+      configuracao_pendente: realidade.configuracao_pendente,
+    });
   }
 
   if (acao === 'conferencia') {
@@ -2757,7 +3027,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     return res.json({ resposta: msg, mes: mesRef, sumico_real: Number(sumicoAtual.toFixed(2)), mes_anterior: { mes: mesAnt, sumico_real: Number(sumicoAnt.toFixed(2)), inventarios: anterior.inventarios }, inventarios: atual.inventarios });
   }
 
-  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | conferencia | conferencia_mensal` });
+  res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | realidade | conferencia | conferencia_mensal` });
 });
 
 app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
