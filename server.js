@@ -819,6 +819,10 @@ function validarDataISO(data) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(data || '')) ? String(data) : dateSP();
 }
 
+function isDataISO(data) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(data || ''));
+}
+
 function addDiasISO(data, dias) {
   const [y, m, d] = String(data).split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
@@ -1034,7 +1038,7 @@ async function montarRealidadeDia(dataDiaParam) {
   const pratosVendidos = parseNonNegativeInteger(row?.pratos_vendidos || 0);
   const lucroBruto = Number((vendas - mov.consumo - mov.perdas).toFixed(2));
   const resultadoDia = Number((lucroBruto - despesasCaixa).toFixed(2));
-  const fluxoCaixa = Number((vendas - mov.compras - despesasCaixa).toFixed(2));
+  const fluxoCaixa = Number((vendas - despesasCaixa).toFixed(2));
   const vendasOntem = Number(fechamentoOntem.row?.vendas || 0);
   const despesasOntem = somaLinhasFinanceiras(fechamentoOntem.row?.despesas || []);
   const lucroOntem = movOntem ? Number((vendasOntem - movOntem.consumo - movOntem.perdas).toFixed(2)) : 0;
@@ -1125,10 +1129,11 @@ function montarMensagemFechamentoDia(d) {
   if (vendasLancadas) {
     msg += `Lucro estoque antes das despesas: ${fmtBRL(d.lucro_bruto_estimado)}\n`;
     msg += `Resultado estimado do dia: ${fmtBRL(d.resultado_dia_estimado)}\n`;
-    msg += `Fluxo de caixa do dia: ${fmtBRL(d.fluxo_caixa)}\n`;
+    msg += `Caixa do dia sem compras: ${fmtBRL(d.fluxo_caixa)}\n`;
     msg += `Consumo: ${d.consumo_sobre_vendas_pct?.toFixed(2)}% das vendas\n`;
     msg += `Perdas: ${d.perdas_sobre_vendas_pct?.toFixed(2)}% das vendas`;
     if (d.despesas > 0) msg += `\nDespesas: ${d.despesas_sobre_vendas_pct?.toFixed(2)}% das vendas`;
+    if (d.compras_estoque > 0) msg += `\nCompras ficam separadas: são investimento/estoque, não despesa do resultado do dia.`;
   } else {
     msg += `Movimento do caixa ainda não lançado. Sem ele não dá para calcular lucro.\n`;
     msg += `O estoque já mostra ${fmtBRL(d.consumo_estoque)} de consumo e ${fmtBRL(d.perdas)} de perdas.`;
@@ -1213,7 +1218,72 @@ app.post('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => 
     res.json(resumo);
   } catch(e) {
     console.error(e);
-    res.status(500).json({ erro: 'Erro ao salvar venda do dia.' });
+    res.status(500).json({ erro: 'Erro ao salvar movimento do dia.' });
+  }
+});
+
+app.delete('/api/realidade-dia', auth, requirePerm('lancar'), async (req, res) => {
+  try {
+    const dataRaw = req.query?.data || req.body?.data;
+    if (!isDataISO(dataRaw)) return res.status(400).json({ erro: 'Informe uma data válida.' });
+    const dataDia = String(dataRaw);
+    const { error } = await supabase.from('fechamentos_diarios').delete().eq('data', dataDia);
+    if (error) {
+      if (isTabelaFechamentoMissing(error)) {
+        return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada.' });
+      }
+      throw error;
+    }
+    await audit('realidade_dia_limpar', { data: dataDia }, req.user, getClientIp(req));
+    const resumo = await montarRealidadeDia(dataDia);
+    res.json(resumo);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao limpar movimento do dia.' });
+  }
+});
+
+app.post('/api/realidade-dia/mover', auth, requirePerm('lancar'), async (req, res) => {
+  try {
+    if (!isDataISO(req.body?.data_origem) || !isDataISO(req.body?.data_destino)) {
+      return res.status(400).json({ erro: 'Informe data de origem e destino válidas.' });
+    }
+    const origem = String(req.body.data_origem);
+    const destino = String(req.body.data_destino);
+    if (origem === destino) return res.status(400).json({ erro: 'A data de destino precisa ser diferente.' });
+
+    const { data: rowOrigem, error: errOrigem } = await supabase.from('fechamentos_diarios')
+      .select('data')
+      .eq('data', origem)
+      .maybeSingle();
+    if (errOrigem) {
+      if (isTabelaFechamentoMissing(errOrigem)) return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada.' });
+      throw errOrigem;
+    }
+    if (!rowOrigem) return res.status(404).json({ erro: 'Não existe movimento salvo nesta data de origem.' });
+
+    const { data: rowDestino, error: errDestino } = await supabase.from('fechamentos_diarios')
+      .select('data')
+      .eq('data', destino)
+      .maybeSingle();
+    if (errDestino) throw errDestino;
+    if (rowDestino) return res.status(409).json({ erro: 'Já existe movimento salvo na data de destino. Abra essa data para editar ou limpar primeiro.' });
+
+    const { error } = await supabase.from('fechamentos_diarios')
+      .update({
+        data: destino,
+        responsavel: req.user.nome || req.user.username,
+        updated_at: nowSP(),
+      })
+      .eq('data', origem);
+    if (error) throw error;
+
+    await audit('realidade_dia_mover', { origem, destino }, req.user, getClientIp(req));
+    const resumo = await montarRealidadeDia(destino);
+    res.json(resumo);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao mover movimento do dia.' });
   }
 });
 
@@ -1785,7 +1855,7 @@ const IA_TOOLS = [
   },
   {
     name: 'ver_realidade_dia',
-    description: 'Resumo do dia cruzando movimento do caixa, pratos vendidos, formas de pagamento, despesas, compras/entradas, consumo do estoque, perdas, resultado estimado e fluxo de caixa.',
+    description: 'Resumo do dia cruzando movimento do caixa, pratos vendidos, formas de pagamento, despesas, consumo/perdas do estoque e resultado estimado. Compras entram separadas como investimento/controle de estoque.',
     input_schema: {
       type: 'object',
       properties: {

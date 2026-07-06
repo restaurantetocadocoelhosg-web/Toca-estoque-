@@ -265,6 +265,7 @@ select.big-input { font-size: 14px; }
 .real-form { display: grid; grid-template-columns: 1fr; gap: 8px; }
 .real-form textarea { min-height: 128px; resize: vertical; line-height: 1.45; }
 .real-form-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.real-danger-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .real-mini-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .real-total-line { display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 11px 12px; font-size: 13px; font-weight: 800; color: var(--text); }
 .real-total-line span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px; }
@@ -782,6 +783,10 @@ select.big-input { font-size: 14px; }
 
           <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
           <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar movimento</button>
+          <div class="real-danger-actions">
+            <button class="btn-sm" onclick="moverRealidadeDia()">Mover data</button>
+            <button class="btn-sm danger" onclick="limparRealidadeDia()">Limpar movimento</button>
+          </div>
         </div>
       </div>
 
@@ -860,7 +865,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v42</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v43</b></span></div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -2432,7 +2437,7 @@ function renderRealidade(d) {
     <div class="real-kpi warn">
       <div class="real-label">Compras</div>
       <div class="real-val accent">${fmtBRLMoney(d.compras_estoque)}</div>
-      <div class="real-sub">investimento em estoque</div>
+      <div class="real-sub">investimento separado do resultado</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Consumo</div>
@@ -2455,9 +2460,9 @@ function renderRealidade(d) {
       <div class="real-sub">erro, tara, patrões, funcionário</div>
     </div>
     <div class="real-kpi">
-      <div class="real-label">Fluxo caixa</div>
+      <div class="real-label">Caixa dia</div>
       <div class="real-val ${Number(d.fluxo_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(d.fluxo_caixa)}</div>
-      <div class="real-sub">vendas - compras - despesas</div>
+      <div class="real-sub">vendas - despesas, sem compras</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Lançamentos</div>
@@ -2468,7 +2473,7 @@ function renderRealidade(d) {
   const ontem = d.comparativo?.ontem;
   let insight = 'Lance o movimento do caixa para calcular lucro e percentuais.';
   if (d.venda_lancada) {
-    insight = `Recebido ${fmtBRLMoney(d.vendas)}. Consumo ${fmtPct(d.consumo_sobre_vendas_pct)}, perdas ${fmtPct(d.perdas_sobre_vendas_pct)} e despesas ${fmtPct(d.despesas_sobre_vendas_pct)} das vendas.`;
+    insight = `Recebido ${fmtBRLMoney(d.vendas)}. Consumo ${fmtPct(d.consumo_sobre_vendas_pct)}, perdas ${fmtPct(d.perdas_sobre_vendas_pct)} e despesas ${fmtPct(d.despesas_sobre_vendas_pct)} das vendas. Compras ficam separadas do resultado.`;
     if (ontem && Number(ontem.vendas || 0) > 0) {
       const difResultado = Number(ontem.dif_resultado || 0);
       const difPerdas = Number(ontem.dif_perdas || 0);
@@ -2521,6 +2526,52 @@ async function salvarRealidade() {
     toast('Movimento do dia salvo', 'ok');
   } catch(e) { handleApiError(e, true); }
   finally { btn.disabled = false; btn.textContent = 'Salvar movimento'; }
+}
+
+function dataBRClient(iso) {
+  return String(iso || '').split('-').reverse().join('/');
+}
+
+function normalizarDataDigitada(value) {
+  const s = String(value || '').trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const br = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (br) return `${br[3]}-${br[2].padStart(2, '0')}-${br[1].padStart(2, '0')}`;
+  return '';
+}
+
+async function moverRealidadeDia() {
+  const dataEl = document.getElementById('real-data');
+  const origem = dataEl.value || hojeSPClient();
+  if (!realidadeCache?.venda_lancada) { toast('Não tem movimento salvo nesta data', 'err'); return; }
+  const digitada = prompt('Mover para qual data? Ex: 05/07/2026', dataBRClient(origem));
+  if (digitada === null) return;
+  const destino = normalizarDataDigitada(digitada);
+  if (!destino) { toast('Data inválida', 'err'); return; }
+  if (destino === origem) { toast('Escolha uma data diferente', 'err'); return; }
+  if (!confirm(`Mover o movimento de ${dataBRClient(origem)} para ${dataBRClient(destino)}?`)) return;
+  try {
+    const d = await apiPost('/api/realidade-dia/mover', { data_origem: origem, data_destino: destino });
+    dataEl.value = d.data;
+    realidadeCache = d;
+    renderRealidade(d);
+    toast('Movimento movido', 'ok');
+  } catch(e) { handleApiError(e, true); }
+}
+
+async function limparRealidadeDia() {
+  const dataEl = document.getElementById('real-data');
+  const data = dataEl.value || hojeSPClient();
+  if (!realidadeCache?.venda_lancada) { toast('Não tem movimento salvo nesta data', 'err'); return; }
+  if (!confirm(`Limpar apenas o movimento do caixa de ${dataBRClient(data)}? Os lançamentos do estoque ficam intactos.`)) return;
+  try {
+    const res = await fetch(API + '/api/realidade-dia?data=' + encodeURIComponent(data), { method: 'DELETE', headers: authHeaders() });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.erro || 'Erro ao limpar');
+    realidadeCache = d;
+    renderRealidade(d);
+    toast('Movimento limpo', 'ok');
+  } catch(e) { handleApiError(e, true); }
 }
 
 function irLancarPerda() {
