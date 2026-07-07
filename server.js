@@ -1955,6 +1955,181 @@ async function montarPlanilhaMensal(mesParam) {
   };
 }
 
+async function montarRelatorioPeriodo(inicioParam, fimParam) {
+  let inicio = validarDataISO(inicioParam || dateAgoDias(6));
+  let fim = validarDataISO(fimParam || dateSP());
+  if (inicio > fim) [inicio, fim] = [fim, inicio];
+  const datas = datasEntreISO(inicio, fim);
+  const diasMap = Object.fromEntries(datas.map(data => [data, {
+    data,
+    data_br: dataBR(data),
+    vendas: 0,
+    pratos_vendidos: 0,
+    despesas: 0,
+    cortes: 0,
+    compras_estoque: 0,
+    consumo_estoque: 0,
+    perdas: 0,
+    ajustes: 0,
+    contas_pagas: 0,
+    movimentos_total: 0,
+    venda_lancada: false,
+  }]));
+
+  const [movRes, fechRes, pagRes] = await Promise.all([
+    supabase.from('movimentacoes')
+      .select('tipo, valor, created_at')
+      .gte('created_at', inicio + 'T00:00:00-03:00')
+      .lte('created_at', fim + 'T23:59:59-03:00'),
+    supabase.from('fechamentos_diarios')
+      .select('data, vendas, pratos_vendidos, pagamentos, cortes, despesas')
+      .gte('data', inicio)
+      .lte('data', fim)
+      .order('data', { ascending: true }),
+    supabase.from('pagamentos_comprovantes')
+      .select('*')
+      .gte('data', inicio)
+      .lte('data', fim)
+      .order('data', { ascending: false })
+      .order('id', { ascending: false }),
+  ]);
+
+  if (movRes.error) throw movRes.error;
+  const configuracaoPendente = {
+    fechamentos: false,
+    pagamentos: false,
+  };
+  let fechamentos = [];
+  if (fechRes.error) {
+    if (isTabelaFechamentoMissing(fechRes.error)) configuracaoPendente.fechamentos = true;
+    else throw fechRes.error;
+  } else {
+    fechamentos = fechRes.data || [];
+  }
+
+  let pagamentosContas = [];
+  if (pagRes.error) {
+    if (isTabelaPagamentosMissing(pagRes.error)) configuracaoPendente.pagamentos = true;
+    else throw pagRes.error;
+  } else {
+    pagamentosContas = (pagRes.data || []).map(normalizarPagamentoDb);
+  }
+
+  const formasMes = resumoFormasPagamento([]);
+  const totais = {
+    dias_periodo: datas.length,
+    dias_com_caixa: 0,
+    vendas: 0,
+    total_pagamentos: 0,
+    pratos_vendidos: 0,
+    ticket_medio: null,
+    cortes: 0,
+    despesas_caixa: 0,
+    compras_estoque: 0,
+    consumo_estoque: 0,
+    perdas: 0,
+    ajustes: 0,
+    resultado_operacional: 0,
+    fluxo_caixa: 0,
+    contas_pagas: 0,
+    contas_liquido: 0,
+    contas_taxas: 0,
+    lancamentos_contas: pagamentosContas.length,
+  };
+
+  for (const row of fechamentos) {
+    const data = String(row.data).slice(0, 10);
+    const dia = diasMap[data];
+    if (!dia) continue;
+    const pagamentos = normalizarLinhasFinanceiras(row.pagamentos || [], { comQtd: true });
+    const formas = resumoFormasPagamento(pagamentos);
+    somarResumoFormas(formasMes, formas);
+    const totalPagamentos = somaLinhasFinanceiras(pagamentos);
+    const vendas = Number(row.vendas || totalPagamentos || 0);
+    const cortes = somaLinhasFinanceiras(row.cortes || []);
+    const despesas = somaLinhasFinanceiras(row.despesas || []);
+    const pratos = parseNonNegativeInteger(row.pratos_vendidos || 0);
+    Object.assign(dia, {
+      vendas,
+      total_pagamentos: totalPagamentos,
+      pratos_vendidos: pratos,
+      cortes,
+      despesas,
+      venda_lancada: true,
+    });
+    totais.dias_com_caixa++;
+    totais.vendas += vendas;
+    totais.total_pagamentos += totalPagamentos;
+    totais.pratos_vendidos += pratos;
+    totais.cortes += cortes;
+    totais.despesas_caixa += despesas;
+  }
+
+  for (const mov of (movRes.data || [])) {
+    const data = dataISOFromTimestampSP(mov.created_at);
+    const dia = diasMap[data];
+    if (!dia) continue;
+    const valor = Number(mov.valor || 0);
+    dia.movimentos_total++;
+    if (mov.tipo === 'Entrada') dia.compras_estoque += valor;
+    else if (mov.tipo === 'Saída') dia.consumo_estoque += valor;
+    else if (mov.tipo === 'Perda') dia.perdas += valor;
+    else if (mov.tipo === 'Ajuste') dia.ajustes += valor;
+  }
+
+  for (const p of pagamentosContas) {
+    const dia = diasMap[p.data];
+    const bruto = Number(p.valor_bruto || 0);
+    const liquido = Number(p.valor_liquido || 0);
+    const taxa = Number(p.taxa || 0);
+    if (dia) dia.contas_pagas += bruto;
+    totais.contas_pagas += bruto;
+    totais.contas_liquido += liquido;
+    totais.contas_taxas += taxa;
+  }
+
+  for (const dia of Object.values(diasMap)) {
+    for (const key of ['compras_estoque','consumo_estoque','perdas','ajustes','contas_pagas']) {
+      dia[key] = Number(dia[key].toFixed(2));
+    }
+    dia.resultado_operacional = Number((dia.vendas - dia.consumo_estoque - dia.perdas - dia.despesas).toFixed(2));
+    dia.fluxo_caixa = Number((dia.vendas - dia.despesas).toFixed(2));
+    totais.compras_estoque += dia.compras_estoque;
+    totais.consumo_estoque += dia.consumo_estoque;
+    totais.perdas += dia.perdas;
+    totais.ajustes += dia.ajustes;
+    totais.resultado_operacional += dia.resultado_operacional;
+    totais.fluxo_caixa += dia.fluxo_caixa;
+  }
+
+  for (const key of ['vendas','total_pagamentos','cortes','despesas_caixa','compras_estoque','consumo_estoque','perdas','ajustes','resultado_operacional','fluxo_caixa','contas_pagas','contas_liquido','contas_taxas']) {
+    totais[key] = Number(totais[key].toFixed(2));
+  }
+  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas / totais.pratos_vendidos).toFixed(2)) : null;
+
+  const formasPagamento = Object.values(formasMes)
+    .map(row => ({ ...row, valor: Number(Number(row.valor || 0).toFixed(2)) }))
+    .filter(row => row.valor > 0 || row.qtd > 0)
+    .sort((a, b) => b.valor - a.valor);
+
+  return {
+    inicio,
+    fim,
+    inicio_br: dataBR(inicio),
+    fim_br: dataBR(fim),
+    configuracao_pendente: configuracaoPendente,
+    totais,
+    formas_pagamento: formasPagamento,
+    contas: {
+      por_grupo: agruparPagamentos(pagamentosContas, 'grupo'),
+      por_categoria: agruparPagamentosPorConta(pagamentosContas),
+      por_forma: agruparPagamentos(pagamentosContas, 'forma'),
+      pagamentos: pagamentosContas.slice(0, 80),
+    },
+    dias: Object.values(diasMap),
+  };
+}
+
 function montarMensagemFechamentoDia(d) {
   const vendasLancadas = !!d.venda_lancada;
   const semMovimento = d.movimentos.total === 0;
@@ -2154,6 +2329,16 @@ app.get('/api/planilha-mensal', auth, requirePerm('planilha'), async (req, res) 
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar planilha mensal.' });
+  }
+});
+
+app.get('/api/relatorios/periodo', auth, requirePerm('planilha'), async (req, res) => {
+  try {
+    const relatorio = await montarRelatorioPeriodo(req.query?.data_inicio, req.query?.data_fim);
+    res.json(relatorio);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar relatório do período.' });
   }
 });
 

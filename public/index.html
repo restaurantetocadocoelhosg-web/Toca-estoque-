@@ -887,6 +887,50 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- RELATÓRIOS -->
+  <div id="p-relatorios" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">📊 Relatórios</div>
+        <div class="sheet-head">
+          <input type="date" class="small-input" id="rel-data-inicio" onchange="loadRelatorios()">
+          <input type="date" class="small-input" id="rel-data-fim" onchange="loadRelatorios()">
+          <button class="btn-sm" onclick="loadRelatorios()">↻</button>
+        </div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button class="btn-sm" onclick="relatorioPreset('hoje')">Hoje</button>
+          <button class="btn-sm" onclick="relatorioPreset('7')">7 dias</button>
+          <button class="btn-sm" onclick="relatorioPreset('30')">30 dias</button>
+          <button class="btn-sm" onclick="relatorioPreset('mes')">Mês atual</button>
+          <button class="btn-sm" onclick="relatorioPreset('mes-anterior')">Mês anterior</button>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Resumo do período</div>
+        <div class="real-grid" id="rel-resumo"><div class="loading">Carregando...</div></div>
+        <div class="real-insight" id="rel-insight" style="margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Recebimentos</div>
+        <div id="rel-formas" class="sheet-pay-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Contas pagas</div>
+        <div id="rel-contas" class="sheet-pay-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Dias do período</div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="rel-dias"></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- CONTAS PAGAS / COMPROVANTES -->
   <div id="p-pagamentos" class="page">
     <div class="sheet-section">
@@ -904,8 +948,9 @@ select.big-input { font-size: 14px; }
         <div id="pag-config" class="real-alert" style="display:none;margin-top:10px"></div>
       </div>
 
-      <div class="real-card">
-        <div class="real-card-title">Lançar conta paga</div>
+      <div class="real-card" id="pag-form-card">
+        <div class="real-card-title" id="pag-form-title">Lançar conta paga</div>
+        <div id="pag-edit-alert" class="real-alert" style="display:none;margin-bottom:10px"></div>
         <div class="pay-form-grid">
           <div class="pay-field">
             <div class="field-label-sm">Data do pagamento</div>
@@ -1266,13 +1311,12 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
+  <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
   <button class="nav-btn" id="nav-inventario" onclick="goPage('inventario', this)"><span class="icon">🧮</span>Inventário</button>
-  <button class="nav-btn" id="nav-alertas" onclick="goPage('alertas', this)" style="position:relative"><span class="icon">⚠️</span>Alertas<span id="alertas-badge" style="display:none;position:absolute;top:3px;right:2px;background:#ef4444;color:#fff;border-radius:50%;width:15px;height:15px;font-size:8px;font-weight:700;align-items:center;justify-content:center;line-height:1"></span></button>
-  <button class="nav-btn" id="nav-agenda" onclick="goPage('agenda', this)"><span class="icon">📓</span>Agenda</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -1416,6 +1460,7 @@ let estStatus = '';
 let cupomItens = []; // estado dos itens do cupom
 let realidadeCache = null;
 let planilhaCache = null;
+let relatoriosCache = null;
 let pagamentosCache = null;
 let pagamentoEditId = null;
 let mostrarOkConferenciaCaixa = false;
@@ -1578,16 +1623,15 @@ async function loadSession() {
   gate('nav-export', P.exportar);
   gate('nav-realidade', P.dia);
   gate('nav-planilha', P.planilha);
+  gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
-  gate('nav-alertas', P.alertas);
-  gate('nav-agenda', P.agenda);
   // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
   // NÃO atrelar ao 'ia' — senão desligar a varredura automática esconde o leitor junto.
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-planilha','nav-pagamentos','nav-alertas','nav-agenda'].forEach(id => {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -1641,37 +1685,28 @@ function goPage(id, btn) {
   if (id === 'hist') loadHist();
   if (id === 'realidade') loadRealidade();
   if (id === 'planilha') loadPlanilhaMensal();
+  if (id === 'relatorios') loadRelatorios();
   if (id === 'pagamentos') loadPagamentos();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
-  if (id === 'alertas') loadAlertas();
-  if (id === 'agenda') loadAgenda();
   if (id === 'inventario') loadInventario();
   if (id === 'chat') iniciarChatBoot();
 }
 
 async function loadDash() {
   try {
-    const [d, al] = await Promise.all([
-      api('/api/dashboard'),
-      api('/api/alertas/estoque-parado').catch(() => null)
-    ]);
-    const paradosCrit = al ? al.resumo.criticos + al.resumo.sem_historico : 0;
-    const paradosTotal = al ? al.resumo.total : 0;
+    const d = await api('/api/dashboard');
     document.getElementById('dash-cards').innerHTML = `
       <div class="card"><div class="card-label">📅 Hoje</div><div class="card-val accent">${d.lancHoje}</div><div class="card-hint">lançamentos</div></div>
       <div class="card card-click" onclick="irEstoque('zerado')"><div class="card-label">🔴 Zerados</div><div class="card-val red">${d.zerados}</div><div class="card-hint">toque para ver →</div></div>
       <div class="card card-click" onclick="irEstoque('critico')"><div class="card-label">🟡 Críticos</div><div class="card-val yellow">${d.criticos}</div><div class="card-hint">toque para ver →</div></div>
-      <div class="card card-click" onclick="goPage('alertas', document.getElementById('nav-alertas'))"><div class="card-label">⚠️ Parados</div><div class="card-val" style="color:#f97316">${paradosTotal}</div><div class="card-hint">${paradosCrit > 0 ? paradosCrit + ' urgentes' : 'alto giro'}</div></div>
+      <div class="card card-click" onclick="goPage('relatorios', document.getElementById('nav-relatorios'))"><div class="card-label">📊 Relatórios</div><div class="card-val" style="color:#3b82f6">Abrir</div><div class="card-hint">períodos e comparativos</div></div>
     `;
-    const badge = document.getElementById('alertas-badge');
-    if (badge) { badge.textContent = paradosCrit > 0 ? paradosCrit : ''; badge.style.display = paradosCrit > 0 ? 'inline-flex' : 'none'; }
     const banner = document.getElementById('alert-banner');
     const total = d.zerados + d.criticos;
-    if (total > 0 || paradosCrit > 0) {
+    if (total > 0) {
       let msg = '';
       if (total > 0) msg += `⚠️ ${total} item${total>1?'ns precisam':' precisa'} de atenção — ${d.zerados} zerado${d.zerados!==1?'s':''}, ${d.criticos} crítico${d.criticos!==1?'s':''}.`;
-      if (paradosCrit > 0) msg += (msg?' ':'') + `${paradosCrit} item${paradosCrit>1?'ns de alto giro parados':' de alto giro parado'}.`;
       banner.textContent = msg + ' Toque para ver.';
       banner.classList.add('show');
     } else { banner.classList.remove('show'); }
@@ -3120,6 +3155,159 @@ async function relatorioPlanilhaMensal() {
   }
 }
 
+function addDiasClient(iso, dias) {
+  const [y, m, d] = String(iso).split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
+}
+
+function fimMesClient(mes) {
+  const [y, m] = String(mes).split('-').map(Number);
+  return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
+}
+
+function relatorioPreset(tipo) {
+  const hoje = hojeSPClient();
+  const ini = document.getElementById('rel-data-inicio');
+  const fim = document.getElementById('rel-data-fim');
+  if (!ini || !fim) return;
+  if (tipo === 'hoje') {
+    ini.value = hoje;
+    fim.value = hoje;
+  } else if (tipo === '7') {
+    ini.value = addDiasClient(hoje, -6);
+    fim.value = hoje;
+  } else if (tipo === '30') {
+    ini.value = addDiasClient(hoje, -29);
+    fim.value = hoje;
+  } else if (tipo === 'mes') {
+    const mes = mesAtualClient();
+    ini.value = `${mes}-01`;
+    fim.value = fimMesClient(mes);
+  } else if (tipo === 'mes-anterior') {
+    const [y, m] = mesAtualClient().split('-').map(Number);
+    const mesAnt = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
+    ini.value = `${mesAnt}-01`;
+    fim.value = fimMesClient(mesAnt);
+  }
+  loadRelatorios();
+}
+
+async function loadRelatorios() {
+  const ini = document.getElementById('rel-data-inicio');
+  const fim = document.getElementById('rel-data-fim');
+  if (!ini || !fim) return;
+  if (!ini.value || !fim.value) {
+    const hoje = hojeSPClient();
+    ini.value = addDiasClient(hoje, -6);
+    fim.value = hoje;
+  }
+  const resumoEl = document.getElementById('rel-resumo');
+  const formasEl = document.getElementById('rel-formas');
+  const contasEl = document.getElementById('rel-contas');
+  const diasEl = document.getElementById('rel-dias');
+  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
+  formasEl.innerHTML = '';
+  contasEl.innerHTML = '';
+  diasEl.innerHTML = '';
+  try {
+    const qs = new URLSearchParams({ data_inicio: ini.value, data_fim: fim.value });
+    const d = await api('/api/relatorios/periodo?' + qs.toString());
+    relatoriosCache = d;
+    renderRelatorios(d);
+  } catch(e) {
+    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar relatório.</div></div>';
+    handleApiError(e, true);
+  }
+}
+
+function renderRelatorios(d) {
+  const t = d.totais || {};
+  const resumoEl = document.getElementById('rel-resumo');
+  const insightEl = document.getElementById('rel-insight');
+  const formasEl = document.getElementById('rel-formas');
+  const contasEl = document.getElementById('rel-contas');
+  const diasEl = document.getElementById('rel-dias');
+
+  resumoEl.innerHTML = `
+    <div class="real-kpi big">
+      <div class="real-label">Vendas</div>
+      <div class="real-val green">${fmtBRLMoney(t.vendas)}</div>
+      <div class="real-sub">${t.pratos_vendidos || 0} pratos · ticket ${fmtBRLMoney(t.ticket_medio)}</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Resultado operacional</div>
+      <div class="real-val ${Number(t.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_operacional)}</div>
+      <div class="real-sub">vendas - consumo - perdas - despesas caixa</div>
+    </div>
+    <div class="real-kpi warn">
+      <div class="real-label">Compras estoque</div>
+      <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
+      <div class="real-sub">investimento separado</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Consumo estoque</div>
+      <div class="real-val">${fmtBRLMoney(t.consumo_estoque)}</div>
+      <div class="real-sub">${fmtPct(t.vendas ? (t.consumo_estoque / t.vendas) * 100 : null)} das vendas</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Perdas</div>
+      <div class="real-val red">${fmtBRLMoney(t.perdas)}</div>
+      <div class="real-sub">${fmtPct(t.vendas ? (t.perdas / t.vendas) * 100 : null)} das vendas</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Despesas caixa</div>
+      <div class="real-val red">${fmtBRLMoney(t.despesas_caixa)}</div>
+      <div class="real-sub">despesas digitadas no movimento</div>
+    </div>
+    <div class="real-kpi loss">
+      <div class="real-label">Contas pagas</div>
+      <div class="real-val red">${fmtBRLMoney(t.contas_pagas)}</div>
+      <div class="real-sub">${t.lancamentos_contas || 0} lançamento(s)</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Dias fechados</div>
+      <div class="real-val">${t.dias_com_caixa || 0}/${t.dias_periodo || 0}</div>
+      <div class="real-sub">${escapeHtml(d.inicio_br || '')} até ${escapeHtml(d.fim_br || '')}</div>
+    </div>`;
+
+  insightEl.textContent = 'Compras de estoque aparecem separadas do resultado. Contas pagas também ficam separadas das despesas lançadas no caixa do dia.';
+
+  formasEl.innerHTML = d.formas_pagamento?.length
+    ? d.formas_pagamento.map(f => `
+      <div class="sheet-pay-row">
+        <div><b>${escapeHtml(f.forma)}</b><div class="sheet-muted">${f.qtd ? f.qtd + ' lançamento(s)' : 'sem quantidade'}</div></div>
+        <b>${fmtBRLMoney(f.valor)}</b>
+      </div>`).join('')
+    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum recebimento no período.</div></div>';
+
+  const contas = d.contas?.por_categoria || [];
+  contasEl.innerHTML = contas.length
+    ? contas.slice(0, 20).map(c => `
+      <div class="sheet-pay-row">
+        <div><b>${escapeHtml(c.categoria)}</b><div class="sheet-muted">${escapeHtml(c.grupo)} · ${c.qtd} lançamento(s)</div></div>
+        <b>${fmtBRLMoney(c.valor_bruto)}</b>
+      </div>`).join('')
+    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhuma conta paga no período.</div></div>';
+
+  diasEl.innerHTML = `
+    <thead><tr>
+      <th>Data</th><th class="num">Vendas</th><th class="num">Pratos</th><th class="num">Contas</th>
+      <th class="num">Compras</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Desp. caixa</th><th class="num">Resultado</th>
+    </tr></thead>
+    <tbody>${(d.dias || []).map(row => `
+      <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
+        <td><b>${escapeHtml(row.data_br)}</b></td>
+        <td class="num">${fmtSheetMoney(row.vendas)}</td>
+        <td class="num">${row.pratos_vendidos || '—'}</td>
+        <td class="num">${fmtSheetMoney(row.contas_pagas)}</td>
+        <td class="num">${fmtSheetMoney(row.compras_estoque)}</td>
+        <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
+        <td class="num">${fmtSheetMoney(row.perdas)}</td>
+        <td class="num">${fmtSheetMoney(row.despesas)}</td>
+        <td class="num"><b class="${Number(row.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_operacional)}</b></td>
+      </tr>`).join('')}</tbody>`;
+}
+
 function grupoDaContaPagamento(categoria) {
   const alvo = norm(categoria);
   for (const grupo of CONTAS_PAGAMENTO) {
@@ -3203,8 +3391,27 @@ function preencherPagamentoForm(p = {}) {
   document.getElementById('pag-autorizacao').value = p.autorizacao || '';
   document.getElementById('pag-descricao').value = p.descricao || '';
   document.getElementById('pag-texto').value = p.comprovante_texto || '';
+  const title = document.getElementById('pag-form-title');
+  if (title) title.textContent = pagamentoEditId ? 'Editar conta paga' : 'Lançar conta paga';
+  const alertEl = document.getElementById('pag-edit-alert');
+  if (alertEl) {
+    if (pagamentoEditId) {
+      alertEl.style.display = 'block';
+      alertEl.textContent = `Editando lançamento de ${p.data_br || p.data || ''} · ${p.categoria || 'conta'} · ${fmtBRLMoney(p.valor_bruto)}`;
+    } else {
+      alertEl.style.display = 'none';
+      alertEl.textContent = '';
+    }
+  }
   const btn = document.getElementById('pag-btn-salvar');
   if (btn) btn.textContent = pagamentoEditId ? 'Salvar alteração' : 'Salvar conta paga';
+}
+
+function scrollPagamentoForm() {
+  const main = document.querySelector('main');
+  const card = document.getElementById('pag-form-card');
+  if (!main || !card) return;
+  main.scrollTo({ top: Math.max(0, card.offsetTop - 12), behavior: 'smooth' });
 }
 
 function limparPagamentoForm() {
@@ -3322,7 +3529,8 @@ function editarPagamento(id) {
   const p = pagamentosCache?.pagamentos?.find(x => Number(x.id) === Number(id));
   if (!p) return;
   preencherPagamentoForm(p);
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  scrollPagamentoForm();
+  toast('Editando conta paga. Faça as alterações e toque em Salvar alteração.', 'ok');
 }
 
 async function excluirPagamento(id) {
@@ -3558,8 +3766,6 @@ async function loadUsers() {
       {k:'exportar',l:'Exportar'},
       {k:'ia',l:'IA'},
       {k:'auditoria',l:'Auditoria'},
-      {k:'alertas',l:'Alertas'},
-      {k:'agenda',l:'Agenda'},
       {k:'pendencias',l:'Pendências'},
       {k:'admin',l:'Admin'}
     ];
