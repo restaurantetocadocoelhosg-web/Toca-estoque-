@@ -3054,22 +3054,22 @@ function renderPlanilhaMensal(d) {
     <div class="real-kpi warn">
       <div class="real-label">Compras</div>
       <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
-      <div class="real-sub">investimento separado</div>
+      <div class="real-sub">${fmtPct(t.compras_sobre_vendas_pct)} das vendas · investimento separado</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Consumo</div>
       <div class="real-val">${fmtBRLMoney(t.consumo_estoque)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.consumo_estoque / t.vendas) * 100 : null)} das vendas</div>
+      <div class="real-sub">${fmtPct(t.consumo_sobre_vendas_pct)} das vendas</div>
     </div>
     <div class="real-kpi loss">
       <div class="real-label">Perdas</div>
       <div class="real-val red">${fmtBRLMoney(t.perdas)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.perdas / t.vendas) * 100 : null)} das vendas</div>
+      <div class="real-sub">${fmtPct(t.perdas_sobre_vendas_pct)} das vendas</div>
     </div>
     <div class="real-kpi loss">
       <div class="real-label">Despesas</div>
       <div class="real-val red">${fmtBRLMoney(t.despesas)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.despesas / t.vendas) * 100 : null)} das vendas</div>
+      <div class="real-sub">${fmtPct(t.despesas_sobre_vendas_pct)} das vendas</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Dias fechados</div>
