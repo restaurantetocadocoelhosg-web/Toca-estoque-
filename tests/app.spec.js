@@ -126,21 +126,16 @@ test("7. operador NÃO consegue burlar o alerta de quantidade suspeita (sem bot�
   await expect(linha.locator(".prod-row-qtd")).toHaveText(/^50([.,]0+)?$/, { timeout: 10_000 });
 });
 
-test("8. gerente consegue lançar a mesma quantidade sem bloqueio (fica só anotado)", async ({ page }) => {
+test("8. gerente consegue lançar sem bloqueio (não usa o produto de anomalia — não precisa da baseline)", async ({ page }) => {
+  // Propositalmente usa o produto NORMAL (não o de anomalia): gerente nunca é bloqueado por
+  // quantidade suspeita, então não precisa de baseline nenhuma — e ficar de fora de id=328
+  // evita que os próprios lançamentos de teste inflem a média de 30 dias que o teste 7 usa
+  // (isso já aconteceu: rodar esta suíte várias vezes no mesmo dia empurrou a média pra cima
+  // até o alerta do teste 7 parar de disparar).
   await login(page);
-  await page.locator(".tipo-card", { hasText: "Saída" }).click();
-  await selecionarProdutoAnomalia(page);
-  await page.locator("#f-qtd").fill("1");
-  await page.locator("#btn-lancar").click();
-  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
-  await expect(page.locator("#toast.show.err")).toHaveCount(0);
-  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_ANOMALIA, { timeout: 10_000 });
-  // Desfaz: entrada da mesma quantidade.
-  await page.locator(".tipo-card", { hasText: "Entrada" }).click();
-  await selecionarProdutoAnomalia(page);
-  await page.locator("#f-qtd").fill("1");
-  await page.locator("#btn-lancar").click();
-  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
+  await lancar(page, "Saída", 1);
+  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
+  await lancar(page, "Entrada", 1);
 });
 
 test("6. estoque do produto de teste sempre fecha em 100 (net-zero das rodadas acima)", async ({ page }) => {
@@ -162,8 +157,20 @@ test("9. o número de 'Zerados' do Dashboard bate com a lista real da aba Estoqu
   expect(numeroCard).toBeGreaterThan(0);
 
   await page.locator(".card", { hasText: "Zerados" }).click();
-  await expect(page.locator("#prod-list .prod-row").first()).toBeVisible({ timeout: 10_000 });
-  const linhas = await page.locator("#prod-list .prod-row").count();
+  // toHaveCount espera o filtro terminar de recarregar (evita contar a lista "Todos" ainda
+  // não filtrada, que aparece por um instante antes do fetch filtrado chegar).
+  await expect(page.locator("#prod-list .prod-row")).toHaveCount(numeroCard, { timeout: 10_000 });
+});
 
-  expect(linhas).toBe(numeroCard);
+test("10. busca manual do Lançar encontra produto pelo apelido cadastrado (não só pelo nome)", async ({ page }) => {
+  // Bug real encontrado e corrigido: /api/produtos/buscar (autocomplete da tela de Lançar)
+  // não consultava a tabela de sinônimos — só achava por pedaço do nome. Medido: 221 dos 305
+  // apelidos cadastrados (72%) não são substring do nome real, ou seja, a maioria simplesmente
+  // não aparecia aqui, mesmo já funcionando certinho via WhatsApp/chat da IA. Suspeita forte de
+  // ser a causa real por trás de "procurei o produto, não achei, e não lancei" — apelido de
+  // teste "robotestecodigosecreto" está cadastrado apontando pro produto fictício, sem ter
+  // nenhuma letra em comum com o nome dele, então só passa se a busca ENTENDER apelido de verdade.
+  await login(page);
+  await page.locator("#f-busca").fill("robotestecodigosecreto");
+  await expect(page.locator(".ac-item", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
 });

@@ -426,9 +426,29 @@ app.get('/api/produtos', auth, async (req, res) => {
 app.get('/api/produtos/buscar', auth, async (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
-  const { data } = await supabase.from('produtos').select('id, nome, codigo, categoria, unidade, qtd, minimo, custo')
-    .or(`nome_search.ilike.%${normalizeSearch(q)}%,codigo.ilike.%${q.toUpperCase()}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(15);
-  res.json(data || []);
+  const qn = normalizeSearch(q);
+  const SEL_BUSCA = 'id, nome, codigo, categoria, unidade, qtd, minimo, custo';
+
+  // Apelido/sinônimo cadastrado (ex.: "pf frango" -> "File de Frango") — SEM isso, a busca
+  // manual da tela de Lançar só achava por pedaço do nome, enquanto a IA/WhatsApp já
+  // resolviam apelido (buscarProdutos()). Medido: 221 dos 305 apelidos cadastrados (72%)
+  // não são substring do nome real do produto — ou seja, a maioria dos apelidos que a
+  // equipe "ensinou" ao sistema simplesmente não funcionava aqui. Suspeita forte de ser a
+  // causa real de "procurei e não achei, então não lancei".
+  const { data: sino } = await supabase.from('sinonimos').select('produto_nome').eq('termo', qn).limit(1);
+  let viaApelido = [];
+  if (sino && sino.length) {
+    const { data } = await supabase.from('produtos').select(SEL_BUSCA).eq('nome', sino[0].produto_nome).or('ativo.eq.1,ativo.is.null').limit(1);
+    viaApelido = data || [];
+  }
+
+  const { data: resto } = await supabase.from('produtos').select(SEL_BUSCA)
+    .or(`nome_search.ilike.%${qn}%,codigo.ilike.%${q.toUpperCase()}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(15);
+
+  // Apelido primeiro (é o mais específico), sem duplicar; completa até 15.
+  const vistos = new Set(viaApelido.map(p => p.id));
+  const combinado = [...viaApelido, ...(resto || []).filter(p => !vistos.has(p.id))].slice(0, 15);
+  res.json(combinado);
 });
 
 // Lista categorias: tabela `categorias` (criadas no Admin) + as derivadas dos produtos ativos.
