@@ -1654,16 +1654,16 @@ async function logout() {
 }
 
 async function trocarSenha() {
-  const current_password = prompt('Digite sua senha atual:');
+  const current_password = await askPrompt('Digite sua senha atual', '', { mascarar: true });
   if (!current_password) return;
-  const new_password = prompt('Digite a nova senha (mínimo 6 caracteres):');
+  const new_password = await askPrompt('Digite a nova senha', '', { msg: 'Mínimo 6 caracteres', mascarar: true });
   if (!new_password) return;
   try { await apiPost('/api/change-password', {current_password, new_password}); toast('Senha alterada com sucesso', 'ok'); }
   catch(e) { toast(e.message || 'Erro ao trocar senha', 'err'); }
 }
 
 async function editarNome() {
-  const novoNome = prompt('Seu nome de exibição:', currentUser?.nome || '');
+  const novoNome = await askPrompt('Seu nome de exibição', currentUser?.nome || '');
   if (!novoNome || !novoNome.trim()) return;
   try {
     await apiPost('/api/me', { nome: novoNome.trim() }, 'PUT');
@@ -1781,15 +1781,15 @@ async function loadAlertas() {
 }
 
 async function reconciliarFantasma(id) {
-  if (!confirm('Reconciliar este item?\n\nVai acertar o histórico (NÃO muda o estoque) e tirar da lista. Use só quando você sabe que o item foi zerado por reset/importação, não por consumo.')) return;
+  if (!await askConfirm('Vai acertar o histórico (NÃO muda o estoque) e tirar da lista. Use só quando você sabe que o item foi zerado por reset/importação, não por consumo.', { titulo: 'Reconciliar este item?', perigo: false })) return;
   try { await apiPost('/api/alertas/fantasmas/reconciliar', { produto_id: id }); loadAlertas(); }
-  catch(e) { alert('Erro: ' + (e.message || e)); }
+  catch(e) { avisar('Erro: ' + (e.message || e), { titulo: 'Falhou', perigo: true }); }
 }
 
 async function reconciliarTodosFantasmas() {
-  if (!confirm('Reconciliar TODOS os itens marcados como "dado furado"?\n\nAcerta o histórico, não muda o estoque.')) return;
-  try { const r = await apiPost('/api/alertas/fantasmas/reconciliar', {}); alert((r.reconciliados || 0) + ' item(ns) reconciliado(s).'); loadAlertas(); }
-  catch(e) { alert('Erro: ' + (e.message || e)); }
+  if (!await askConfirm('Acerta o histórico, não muda o estoque.', { titulo: 'Reconciliar TODOS os itens marcados como "dado furado"?', perigo: false })) return;
+  try { const r = await apiPost('/api/alertas/fantasmas/reconciliar', {}); avisar((r.reconciliados || 0) + ' item(ns) reconciliado(s).', { titulo: 'Pronto' }); loadAlertas(); }
+  catch(e) { avisar('Erro: ' + (e.message || e), { titulo: 'Falhou', perigo: true }); }
 }
 
 function irEstoque(status) {
@@ -2026,7 +2026,7 @@ async function lancarLote() {
     toast(aviso, 'err');
     if (semProduto.length) {
       const nomes = semProduto.map(i => '• ' + i.nome_cupom).join('\n');
-      setTimeout(() => alert(`⚠️ ${semProduto.length} item(ns) da nota NÃO foram salvos (sem produto vinculado no cadastro):\n\n${nomes}\n\nCadastre/vincule esses produtos e lance novamente, ou lance manualmente.`), 300);
+      setTimeout(() => avisar(`${nomes}\n\nCadastre/vincule esses produtos e lance novamente, ou lance manualmente.`, { titulo: `${semProduto.length} item(ns) da nota NÃO foram salvos (sem produto vinculado)`, perigo: true }), 300);
     }
   } else {
     toast(`✓ ${ok} entrada${ok!==1?'s':''} lançada${ok!==1?'s':''} com sucesso!`, 'ok');
@@ -2109,7 +2109,7 @@ async function lancar(forcar = false) {
     });
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
-      if (confirm('⚠️ ' + resultado.msg + '\n\nConfirmar mesmo assim?')) lancar(true);
+      if (await askConfirm(resultado.msg, { titulo: 'Confirmar mesmo assim?' })) lancar(true);
       return;
     }
     // Atualiza prodAtual com qtd nova para próximo lançamento
@@ -2671,10 +2671,10 @@ function atualizarConferenciaCaixa(opts = {}) {
   return conf;
 }
 
-function checarConferenciaCaixaAntesDeSalvar() {
+async function checarConferenciaCaixaAntesDeSalvar() {
   const conf = atualizarConferenciaCaixa({ mostrarOk: true });
   if (!conf || !conf.problemas.length) return true;
-  return confirm('A conferência do caixa não bate:\n\n' + conf.problemas.join('\n\n') + '\n\nDeseja salvar mesmo assim?');
+  return await askConfirm(conf.problemas.join('\n\n'), { titulo: 'A conferência do caixa não bate — salvar mesmo assim?' });
 }
 
 function extrairDataRelatorio(texto) {
@@ -2694,26 +2694,26 @@ function extrairDataRelatorio(texto) {
   return '';
 }
 
-function checarDataRelatorio(texto, opts = {}) {
+async function checarDataRelatorio(texto, opts = {}) {
   const dataTexto = extrairDataRelatorio(texto);
   const dataEl = document.getElementById('real-data');
   const dataTela = dataEl?.value || hojeSPClient();
   if (!dataTexto || dataTexto === dataTela) return true;
 
   if (opts.aoLer) {
-    const usarTexto = confirm(`O texto parece ser do dia ${dataBRClient(dataTexto)}, mas a tela está em ${dataBRClient(dataTela)}.\n\nUsar a data do texto?`);
+    const usarTexto = await askConfirm('Usar a data do texto?', { titulo: `O texto parece ser do dia ${dataBRClient(dataTexto)}, mas a tela está em ${dataBRClient(dataTela)}`, perigo: false });
     if (usarTexto && dataEl) dataEl.value = dataTexto;
     return true;
   }
 
-  return confirm(`Atenção: o relatório colado parece ser do dia ${dataBRClient(dataTexto)}, mas você está salvando em ${dataBRClient(dataTela)}.\n\nDeseja continuar assim mesmo?`);
+  return await askConfirm('Deseja continuar assim mesmo?', { titulo: `Atenção: o relatório colado parece ser do dia ${dataBRClient(dataTexto)}, mas você está salvando em ${dataBRClient(dataTela)}` });
 }
 
-function lerRelatorioColado() {
+async function lerRelatorioColado() {
   const textoEl = document.getElementById('real-relatorio-texto');
   const texto = textoEl?.value || '';
   if (!texto.trim()) { toast('Cole o movimento primeiro', 'err'); return; }
-  checarDataRelatorio(texto, { aoLer: true });
+  await checarDataRelatorio(texto, { aoLer: true });
   const linhas = texto.split(/\n+/).map(l => l.trim()).filter(Boolean);
   const pagamentos = [], cortes = [], despesas = [];
   let emDespesas = false;
@@ -2898,8 +2898,8 @@ async function salvarRealidade() {
   const observacao = document.getElementById('real-obs').value.trim();
   const relatorioTexto = document.getElementById('real-relatorio-texto').value.trim();
   if (!Number.isFinite(vendas) || vendas < 0) { toast('Informe o movimento do dia', 'err'); return; }
-  if (relatorioTexto && !checarDataRelatorio(relatorioTexto)) return;
-  if (!checarConferenciaCaixaAntesDeSalvar()) return;
+  if (relatorioTexto && !await checarDataRelatorio(relatorioTexto)) return;
+  if (!await checarConferenciaCaixaAntesDeSalvar()) return;
   const btn = document.getElementById('real-btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
   try {
@@ -2936,12 +2936,12 @@ async function moverRealidadeDia() {
   const dataEl = document.getElementById('real-data');
   const origem = dataEl.value || hojeSPClient();
   if (!realidadeCache?.venda_lancada) { toast('Não tem movimento salvo nesta data', 'err'); return; }
-  const digitada = prompt('Mover para qual data? Ex: 05/07/2026', dataBRClient(origem));
+  const digitada = await askPrompt('Mover para qual data?', dataBRClient(origem), { msg: 'Ex: 05/07/2026' });
   if (digitada === null) return;
   const destino = normalizarDataDigitada(digitada);
   if (!destino) { toast('Data inválida', 'err'); return; }
   if (destino === origem) { toast('Escolha uma data diferente', 'err'); return; }
-  if (!confirm(`Mover o movimento de ${dataBRClient(origem)} para ${dataBRClient(destino)}?`)) return;
+  if (!await askConfirm('', { titulo: `Mover o movimento de ${dataBRClient(origem)} para ${dataBRClient(destino)}?` })) return;
   try {
     const d = await apiPost('/api/realidade-dia/mover', { data_origem: origem, data_destino: destino });
     dataEl.value = d.data;
@@ -2955,7 +2955,7 @@ async function limparRealidadeDia() {
   const dataEl = document.getElementById('real-data');
   const data = dataEl.value || hojeSPClient();
   if (!realidadeCache?.venda_lancada) { toast('Não tem movimento salvo nesta data', 'err'); return; }
-  if (!confirm(`Limpar apenas o movimento do caixa de ${dataBRClient(data)}? Os lançamentos do estoque ficam intactos.`)) return;
+  if (!await askConfirm('Os lançamentos do estoque ficam intactos.', { titulo: `Limpar apenas o movimento do caixa de ${dataBRClient(data)}?`, perigo: false })) return;
   try {
     const res = await fetch(API + '/api/realidade-dia?data=' + encodeURIComponent(data), { method: 'DELETE', headers: authHeaders() });
     const d = await res.json();
@@ -3534,7 +3534,7 @@ function editarPagamento(id) {
 }
 
 async function excluirPagamento(id) {
-  if (!confirm('Excluir esta conta paga da planilha?')) return;
+  if (!await askConfirm('', { titulo: 'Excluir esta conta paga da planilha?' })) return;
   try {
     const res = await fetch(API + `/api/pagamentos/${id}`, { method: 'DELETE', headers: authHeaders() });
     const d = await res.json();
@@ -3652,9 +3652,9 @@ async function relatorio(tipo) {
 
 async function resetar() {
   if (!permissions.pode_resetar) { toast('Somente administrador pode resetar', 'err'); return; }
-  const senhaAdmin = prompt('Digite sua senha de administrador para confirmar:');
+  const senhaAdmin = await askPrompt('Digite sua senha de administrador para confirmar', '', { mascarar: true });
   if (!senhaAdmin) return;
-  const confirmacao = prompt('Digite RESTAURAR para confirmar o reset do estoque:');
+  const confirmacao = await askPrompt('Digite RESTAURAR para confirmar o reset do estoque', '');
   if (!confirmacao) return;
   try {
     await apiPost('/api/resetar', { confirmacao, senha_admin: senhaAdmin });
@@ -3725,6 +3725,86 @@ function erroModal(titulo, msg) {
       <button onclick="document.getElementById('erro-modal-overlay').remove()" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:var(--font)">Entendi</button>
     </div>`;
   document.body.appendChild(overlay);
+}
+
+// Confirmação DENTRO do app (Promise<boolean>). Substitui window.confirm(), que não abre em PWA
+// instalado no celular (a tela fica travada esperando um diálogo que nunca aparece) — o mesmo
+// padrão de bug já corrigido no app Prosperidade. Suporta \n na mensagem (quebra de linha real).
+function askConfirm(msg, { titulo = 'Confirmar', textoOk = 'Confirmar', textoCancelar = 'Cancelar', perigo = true } = {}) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('confirm-modal-overlay');
+    if (old) old.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'confirm-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+    const cor = perigo ? 'var(--red)' : 'var(--accent)';
+    overlay.innerHTML = `
+      <div style="background:var(--s1);border-radius:18px;padding:26px 22px;max-width:380px;width:100%;border:2px solid ${cor};text-align:center">
+        <div style="font-size:40px;margin-bottom:10px">${perigo ? '⚠️' : '❓'}</div>
+        <div style="font-size:18px;font-weight:800;color:${cor};margin-bottom:12px">${escapeHtml(titulo)}</div>
+        <div style="font-size:14px;color:var(--text);margin-bottom:22px;line-height:1.5;white-space:pre-wrap;text-align:left">${escapeHtml(msg)}</div>
+        <div style="display:flex;gap:10px">
+          <button id="confirm-modal-no" style="flex:1;padding:13px;background:var(--s2);color:var(--text);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font)">${escapeHtml(textoCancelar)}</button>
+          <button id="confirm-modal-yes" style="flex:1;padding:13px;background:${cor};color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:var(--font)">${escapeHtml(textoOk)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const fechar = (resultado) => { overlay.remove(); resolve(resultado); };
+    document.getElementById('confirm-modal-no').onclick = () => fechar(false);
+    document.getElementById('confirm-modal-yes').onclick = () => fechar(true);
+  });
+}
+
+// Aviso DENTRO do app (mesma razão do askConfirm: window.alert() não abre em PWA instalado).
+// Pra mensagens curtas de sucesso/erro, prefira toast(); use avisar() quando o texto é longo
+// (lista de itens, parágrafo) e precisa ficar na tela até a pessoa ler e fechar.
+function avisar(msg, { titulo = 'Aviso', perigo = false } = {}) {
+  const old = document.getElementById('aviso-modal-overlay');
+  if (old) old.remove();
+  const overlay = document.createElement('div');
+  overlay.id = 'aviso-modal-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+  const cor = perigo ? 'var(--red)' : 'var(--accent)';
+  overlay.innerHTML = `
+    <div style="background:var(--s1);border-radius:18px;padding:26px 22px;max-width:380px;width:100%;border:2px solid ${cor};text-align:center">
+      <div style="font-size:40px;margin-bottom:10px">${perigo ? '⚠️' : 'ℹ️'}</div>
+      <div style="font-size:18px;font-weight:800;color:${cor};margin-bottom:12px">${escapeHtml(titulo)}</div>
+      <div style="font-size:14px;color:var(--text);margin-bottom:22px;line-height:1.5;white-space:pre-wrap;text-align:left;max-height:50vh;overflow-y:auto">${escapeHtml(msg)}</div>
+      <button onclick="document.getElementById('aviso-modal-overlay').remove()" style="width:100%;padding:13px;background:${cor};color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:var(--font)">Entendi</button>
+    </div>`;
+  document.body.appendChild(overlay);
+}
+
+// Pede um texto DENTRO do app (Promise<string|null>). Substitui window.prompt(), que também não
+// abre em PWA instalado (mesma causa raiz de confirm()/alert()). Retorna null se cancelar, igual
+// ao prompt() nativo. mascarar:true usa campo de senha (o prompt() nativo nunca mascarava — aqui
+// dá pra fazer melhor).
+function askPrompt(titulo, valorInicial = '', { msg = '', mascarar = false, textoOk = 'Confirmar', textoCancelar = 'Cancelar' } = {}) {
+  return new Promise((resolve) => {
+    const old = document.getElementById('prompt-modal-overlay');
+    if (old) old.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'prompt-modal-overlay';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px';
+    overlay.innerHTML = `
+      <div style="background:var(--s1);border-radius:18px;padding:26px 22px;max-width:380px;width:100%;border:2px solid var(--accent);text-align:center">
+        <div style="font-size:18px;font-weight:800;color:var(--text);margin-bottom:${msg?6:14}px">${escapeHtml(titulo)}</div>
+        ${msg ? `<div style="font-size:13px;color:var(--muted);margin-bottom:14px;line-height:1.5;white-space:pre-wrap;text-align:left">${escapeHtml(msg)}</div>` : ''}
+        <input id="prompt-modal-input" type="${mascarar ? 'password' : 'text'}" autocomplete="off" style="width:100%;padding:13px;border-radius:10px;border:1.5px solid var(--border);font-size:15px;margin-bottom:16px;font-family:var(--font);background:var(--s2);color:var(--text);box-sizing:border-box" />
+        <div style="display:flex;gap:10px">
+          <button id="prompt-modal-no" style="flex:1;padding:13px;background:var(--s2);color:var(--text);border:1.5px solid var(--border);border-radius:12px;font-size:14px;font-weight:700;cursor:pointer;font-family:var(--font)">${escapeHtml(textoCancelar)}</button>
+          <button id="prompt-modal-yes" style="flex:1;padding:13px;background:var(--accent);color:#fff;border:none;border-radius:12px;font-size:14px;font-weight:800;cursor:pointer;font-family:var(--font)">${escapeHtml(textoOk)}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(overlay);
+    const input = document.getElementById('prompt-modal-input');
+    input.value = valorInicial;
+    setTimeout(() => { input.focus(); input.select(); }, 30);
+    const fechar = (resultado) => { overlay.remove(); resolve(resultado); };
+    document.getElementById('prompt-modal-no').onclick = () => fechar(null);
+    document.getElementById('prompt-modal-yes').onclick = () => fechar(input.value);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') fechar(input.value); if (e.key === 'Escape') fechar(null); });
+  });
 }
 
 function handleApiError(e, noisy=true) {
@@ -3827,22 +3907,22 @@ async function criarUsuario() {
 }
 
 async function toggleUser(id, active) {
-  if (!confirm(active ? 'Desativar este usuário?' : 'Ativar este usuário?')) return;
+  if (!await askConfirm('', { titulo: active ? 'Desativar este usuário?' : 'Ativar este usuário?', perigo: active })) return;
   try { await apiPost(`/api/users/${id}`, { active: !active }, 'PUT'); await loadUsers(); toast('Usuário atualizado', 'ok'); }
   catch(e) { toast(e.message, 'err'); }
 }
 
 async function resetSenha(id, username) {
-  const nova = prompt(`Nova senha para @${username} (mín. 6 caracteres):`);
+  const nova = await askPrompt(`Nova senha para @${username}`, '', { msg: 'Mínimo 6 caracteres', mascarar: true });
   if (!nova) return;
   try { await apiPost(`/api/users/${id}`, { nova_senha: nova }, 'PUT'); toast('Senha alterada!', 'ok'); }
   catch(e) { toast(e.message, 'err'); }
 }
 
 async function renomearUser(id, nomeAtual, usernameAtual) {
-  const nome = prompt('Nome de exibição (o que aparece na tela):', nomeAtual);
+  const nome = await askPrompt('Nome de exibição', nomeAtual, { msg: 'O que aparece na tela' });
   if (nome === null) return;
-  const username = prompt('Login (usado para entrar). Deixe igual se não quiser mudar:', usernameAtual);
+  const username = await askPrompt('Login (usado para entrar)', usernameAtual, { msg: 'Deixe igual se não quiser mudar' });
   if (username === null) return;
   const body = {};
   if (nome.trim() && nome.trim() !== nomeAtual) body.nome = nome.trim();
@@ -3937,7 +4017,7 @@ async function criarCategoria() {
 }
 
 async function renomearCategoria(de) {
-  const para = prompt(`Renomear a categoria "${de}" para:`, de);
+  const para = await askPrompt(`Renomear a categoria "${de}" para`, de);
   if (!para || para.trim() === de) return;
   try {
     const r = await apiPost('/api/categorias/renomear', { de, para: para.trim() }, 'PUT');
@@ -3947,7 +4027,7 @@ async function renomearCategoria(de) {
 }
 
 async function excluirCategoria(nome) {
-  if (!confirm(`Excluir a categoria "${nome}"? Só funciona se nenhum produto a usar.`)) return;
+  if (!await askConfirm('Só funciona se nenhum produto a usar.', { titulo: `Excluir a categoria "${nome}"?` })) return;
   try {
     const res = await fetch(API + `/api/categorias/${encodeURIComponent(nome)}`, { method: 'DELETE', headers: authHeaders() });
     const d = await res.json();
@@ -4025,7 +4105,7 @@ async function removerDoGrupo(produto_id) {
 }
 
 async function excluirGrupo(nome) {
-  if (!confirm(`Desfazer o grupo "${nome}"? Os produtos continuam — só perdem o vínculo.`)) return;
+  if (!await askConfirm('Os produtos continuam — só perdem o vínculo.', { titulo: `Desfazer o grupo "${nome}"?`, perigo: false })) return;
   try {
     const res = await fetch(API + `/api/grupos/${encodeURIComponent(nome)}`, { method: 'DELETE', headers: authHeaders() });
     if (!res.ok) throw new Error('Erro');
@@ -4451,7 +4531,7 @@ async function salvarProduto() {
 async function arquivarProduto() {
   if (!prodEditAtual) return;
   const acao = prodEditAtual.ativo === 0 ? 'reativar' : 'arquivar';
-  if (!confirm(`Tem certeza que deseja ${acao} "${prodEditAtual.nome}"?`)) return;
+  if (!await askConfirm('', { titulo: `Tem certeza que deseja ${acao} "${prodEditAtual.nome}"?`, perigo: acao === 'arquivar' })) return;
   try {
     const res = await apiPost(`/api/produtos/${prodEditAtual.id}/arquivar`, {}, 'PUT');
     prodEditAtual.ativo = res.ativo;
@@ -4820,7 +4900,7 @@ function filtrarInvItens(term) {
 
 async function abrirInventario() {
   const cat = document.getElementById('inv-cat') ? document.getElementById('inv-cat').value : '';
-  if (!confirm('Abrir inventário' + (cat ? ' de ' + cat : ' geral') + '?')) return;
+  if (!await askConfirm('', { titulo: 'Abrir inventário' + (cat ? ' de ' + cat : ' geral') + '?', perigo: false })) return;
   try { await apiPost('/api/inventario/abrir', { categoria: cat }); toast('✓ Inventário aberto','ok'); loadInventario(); }
   catch(e) { toast(e.message || 'Erro', 'err'); }
 }
@@ -4848,7 +4928,7 @@ async function salvarContagem() {
 
 async function fecharInventario() {
   if (!invAberto) return;
-  if (!confirm('Fechar o inventário?\n\nA contagem vira o estoque oficial (com ajustes rastreáveis). O que NÃO foi contado NÃO é zerado — fica pendente de verificação. Não dá pra desfazer.')) return;
+  if (!await askConfirm('A contagem vira o estoque oficial (com ajustes rastreáveis). O que NÃO foi contado NÃO é zerado — fica pendente de verificação. Não dá pra desfazer.', { titulo: 'Fechar o inventário?' })) return;
   try {
     await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens: coletarContagem() });
     const r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
@@ -4857,7 +4937,7 @@ async function fecharInventario() {
     if (r.suspeitos_lista && r.suspeitos_lista.length) {
       msg += '\n\nPeça verificação destes:\n' + r.suspeitos_lista.slice(0,10).map(s => '• ' + s.nome + ' (' + s.qtd_sistema + ' ' + s.unidade + (s.dias_parado!=null?', '+s.dias_parado+'d':'') + ')').join('\n');
     }
-    alert(msg);
+    avisar(msg, { titulo: 'Inventário fechado' });
     invAberto = null; invItens = [];
     loadInventario();
   } catch(e) { toast(e.message || 'Erro ao fechar', 'err'); }
