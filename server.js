@@ -818,7 +818,10 @@ async function ensureSnapshotDiario() {
 // ==================== DASHBOARD ====================
 app.get('/api/dashboard', auth, async (req, res) => {
   ensureSnapshotDiario().catch(() => {});
-  const { data: produtos } = await supabase.from('produtos').select('qtd, minimo, custo');
+  // Mesmo filtro de ativo que /api/produtos e a aba Estoque usam — sem isso, produto
+  // arquivado/descontinuado (ativo=0) entrava na contagem e inflava "Zerados"/"Críticos"
+  // no dashboard, sem bater com o que a pessoa via ao entrar na lista de verdade.
+  const { data: produtos } = await supabase.from('produtos').select('qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
   const all = produtos || [];
   const zerados = all.filter(p => Number(p.qtd) === 0).length;
   const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
@@ -2445,7 +2448,9 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
   let rows, headers, filename;
   let delimiter = ',';
   if (tipo === 'estoque') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').order('categoria').order('nome');
+    // Mesmo filtro do relatório HTML/Estoque/Dashboard — sem isso, produto arquivado
+    // (descontinuado) entrava no CSV misturado com o estoque de verdade.
+    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Custo Unit.','Valor Total','Status'];
     rows = (data || []).map(r => {
       let st = Number(r.qtd) === 0 ? 'ZERADO' : Number(r.qtd) <= Number(r.minimo) * 0.5 ? 'CRITICO' : Number(r.qtd) < Number(r.minimo) ? 'ATENCAO' : 'OK';
@@ -2458,7 +2463,9 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     rows = (data || []).map(r => [r.created_at, r.produto_nome, r.categoria, r.tipo, r.qtd, r.unidade, r.custo, r.valor, r.motivo, r.responsavel, r.obs]);
     filename = 'movimentacoes_toca_coelho.csv';
   } else if (tipo === 'compras') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo').order('categoria').order('nome');
+    // Idem: produto arquivado não pode entrar na lista de compras (senão manda comprar
+    // algo que o restaurante nem usa mais).
+    const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Sugerido Comprar'];
     rows = (data || []).filter(r => Number(r.qtd) <= Number(r.minimo) * 0.5)
       .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
@@ -3276,7 +3283,7 @@ async function executarFerramenta(nome, input, user) {
       }
 
       case 'ver_dashboard': {
-        const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
+        const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
         const prods = all || [];
         const zerados = prods.filter(p => Number(p.qtd) === 0).length;
         const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
@@ -4215,7 +4222,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
   }
 
   if (acao === 'resumo') {
-    const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo');
+    const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
     const prods = all || [];
     const hojeSP = dateSP();
     const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
@@ -4492,7 +4499,7 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.query?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
-  const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade');
+  const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null');
   const prods = all || [];
   const zerados = prods.filter(p => Number(p.qtd) === 0);
   const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);

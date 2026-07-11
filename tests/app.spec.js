@@ -151,3 +151,19 @@ test("6. estoque do produto de teste sempre fecha em 100 (net-zero das rodadas a
   await expect(linha).toBeVisible({ timeout: 10_000 });
   await expect(linha.locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/, { timeout: 10_000 });
 });
+
+test("9. o número de 'Zerados' do Dashboard bate com a lista real da aba Estoque (sem contar arquivados)", async ({ page }) => {
+  // Bug real encontrado e corrigido nesta sessão: /api/dashboard contava produto ARQUIVADO
+  // (ativo=0) junto com os ativos, inflando o card "Zerados" — o número do topo não batia
+  // com o que aparecia ao tocar e entrar na lista de verdade.
+  await login(page);
+  const cardZerados = page.locator(".card", { hasText: "Zerados" }).locator(".card-val");
+  const numeroCard = Number((await cardZerados.textContent()).trim());
+  expect(numeroCard).toBeGreaterThan(0);
+
+  await page.locator(".card", { hasText: "Zerados" }).click();
+  await expect(page.locator("#prod-list .prod-row").first()).toBeVisible({ timeout: 10_000 });
+  const linhas = await page.locator("#prod-list .prod-row").count();
+
+  expect(linhas).toBe(numeroCard);
+});
