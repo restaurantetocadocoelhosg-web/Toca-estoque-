@@ -1,0 +1,55 @@
+CODEMAP — Toca Estoque
+Gerado em: 2026-07-11
+Tipo: PRIMEIRA GERAÇÃO (não havia docs/CODEMAPS/ anterior — sem diff a mostrar)
+
+=== ARQUIVOS ESCANEADOS ===
+server.js           4.615 linhas  (69 rotas /api/*)
+public/index.html   5.037 linhas  (12 abas, tudo inline: HTML+CSS+JS)
+tests/app.spec.js      ~370 linhas (21 testes E2E)
+package.json / railway.toml / manifest.json
+
+=== ALERTA DE TAMANHO (regra: 200-400 linhas típico, 800 máx) ===
+server.js:          4.615 linhas = 5,8x o limite recomendado
+public/index.html:  5.037 linhas = 6,3x o limite recomendado
+Nenhum dos dois tem separação em módulos — tudo num arquivo só.
+
+=== COMPOSIÇÃO DE server.js (aproximada, por bloco funcional) ===
+Auth + middlewares               ~350 linhas
+Produtos + movimentações (núcleo) ~460 linhas
+Realidade do dia / Planilha mensal ~350 linhas
+Pagamentos                        ~90 linhas
+Exportação/Relatórios             ~330 linhas
+Nota fiscal / Pendências          ~220 linhas
+Chat IA (ferramentas)             ~1.120 linhas  ← maior bloco isolado
+Alertas (parado/fantasmas)        ~170 linhas
+Inventário                        ~200 linhas
+Admin (users/sinônimos/auditoria) ~240 linhas
+Webhooks (whatsapp/relatório)     ~340 linhas
+Helpers de data/formatação/etc.   (espalhados no topo do arquivo)
+
+=== COMPOSIÇÃO de public/index.html (aproximada) ===
+CSS inline                        ~650 linhas
+HTML das 12 abas + modais         ~1.200 linhas
+JS: lançamento/estoque/histórico  ~900 linhas
+JS: realidade/planilha/relatórios ~700 linhas
+JS: chat/IA + auditoria           ~500 linhas
+JS: inventário                    ~400 linhas
+JS: admin (users/sinônimos/grupos)~500 linhas
+JS: helpers (fmt/api/escapeHtml)  ~200 linhas
+
+=== SEM DÉBITO TÉCNICO ÓBVIO DE DUPLICAÇÃO ===
+Não há sinal de código copiado/colado em massa — a repetição que existe é o padrão de rota
+Express (auth+validação+trava-otimista+resposta), que é razoável de repetir por rota.
+
+=== CANDIDATOS NATURAIS DE SEPARAÇÃO (se decidir modularizar depois) ===
+server.js  → routes/produtos.js, routes/movimentacoes.js, routes/chat.js (maior bloco),
+             routes/inventario.js, routes/admin.js, routes/webhooks.js, lib/helpers.js
+index.html → manter 1 arquivo (é intencional pra esse tipo de PWA sem build step), mas dá pra
+             extrair CSS pra um <style> externo e o JS de cada aba pra arquivos <script src>
+             separados, sem precisar de bundler.
+
+=== PRÓXIMOS PASSOS SUGERIDOS (não executados — só análise) ===
+1. /refactor-clean — checar se há função/rota morta antes de qualquer split
+2. Se decidir modularizar: começar pelo Chat IA (maior bloco, mais isolado, menor risco de
+   quebrar o núcleo de produtos/movimentações que está estável e testado)
+3. Manter os 21 testes E2E rodando antes/depois de qualquer mudança estrutural
