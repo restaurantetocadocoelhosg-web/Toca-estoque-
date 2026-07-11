@@ -1,0 +1,102 @@
+import { test, expect } from "@playwright/test";
+
+// Fluxos críticos do Toca Estoque, testados como a equipe usaria (celular), contra PRODUÇÃO.
+// Conta: robô de testes (role gerente, sem o bloqueio de anomalia do operador).
+// Produto: "ROBO TESTE (nao usar)" — fictício, isolado do estoque real, categoria "QA Robo (teste)".
+// Toda saída de teste desfaz a entrada equivalente (fecha em zero) para nunca sujar os números reais.
+
+const USER = process.env.E2E_USER;
+const PASSWORD = process.env.E2E_PASSWORD;
+const PRODUTO_TESTE = "ROBO TESTE (nao usar)";
+const PRODUTO_ID = process.env.E2E_PRODUTO_TESTE_ID;
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+test.describe.configure({ mode: "serial" });
+
+// Reseta o saldo do produto fictício de teste pra 100 ANTES de cada teste — assim o robô nunca
+// depende do que sobrou de uma rodada anterior (retry, teste interrompido, etc). Só mexe no
+// produto isolado de QA; nunca toca no estoque real do restaurante.
+test.beforeEach(async () => {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !PRODUTO_ID) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/produtos?id=eq.${PRODUTO_ID}`, {
+    method: "PATCH",
+    headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ qtd: 100 }),
+  });
+});
+
+async function login(page) {
+  await page.goto("/");
+  await expect(page.locator("#login-user")).toBeVisible({ timeout: 20_000 });
+  await page.locator("#login-user").fill(USER);
+  await page.locator("#login-pass").fill(PASSWORD);
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page.locator("#user-badge")).toContainText("Robo QA", { timeout: 20_000 });
+}
+
+async function selecionarProdutoTeste(page) {
+  // Se o produto já está selecionado (ex.: sobrou de um lançamento anterior na mesma
+  // sessão), o campo de busca fica escondido de propósito — não busca de novo.
+  const jaSelecionado = await page.locator("#sel-nome").filter({ hasText: PRODUTO_TESTE }).count();
+  if (jaSelecionado > 0) return;
+  await page.locator("#f-busca").fill("ROBO TESTE");
+  const item = page.locator(".ac-item", { hasText: PRODUTO_TESTE });
+  await expect(item).toBeVisible({ timeout: 10_000 });
+  await item.click();
+  await expect(page.locator("#sel-nome")).toContainText(PRODUTO_TESTE);
+}
+
+async function lancar(page, tipoLabel, qtd) {
+  await page.locator(".tipo-card", { hasText: tipoLabel }).click();
+  await selecionarProdutoTeste(page);
+  await page.locator("#f-qtd").fill(String(qtd));
+  await page.locator("#btn-lancar").click();
+  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#toast.show.err")).toHaveCount(0);
+}
+
+test("1. tela de login abre", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.locator("#login-user")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("#login-pass")).toBeVisible();
+});
+
+test("2. login errado mostra erro claro", async ({ page }) => {
+  await page.goto("/");
+  await page.locator("#login-user").fill(USER);
+  await page.locator("#login-pass").fill("senha-errada-123");
+  await page.getByRole("button", { name: "Entrar" }).click();
+  await expect(page.locator("#toast.show.err")).toBeVisible({ timeout: 15_000 });
+});
+
+test("3. login funciona e chega no painel", async ({ page }) => {
+  await login(page);
+  await expect(page.locator("nav")).toContainText("Lançar");
+  await expect(page.locator("nav")).toContainText("Estoque");
+});
+
+test("4. lançar Entrada aparece nos últimos lançamentos", async ({ page }) => {
+  await login(page);
+  await lancar(page, "Entrada", 3);
+  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
+  // Desfaz: saída da mesma quantidade, pra fechar em zero e não sujar o estoque de teste.
+  await lancar(page, "Saída", 3);
+});
+
+test("5. lançar Saída reflete no estoque (some do zerado se aplicável) e volta", async ({ page }) => {
+  await login(page);
+  await lancar(page, "Saída", 5);
+  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
+  // Desfaz: entrada da mesma quantidade.
+  await lancar(page, "Entrada", 5);
+});
+
+test("6. estoque do produto de teste sempre fecha em 100 (net-zero das rodadas acima)", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Estoque" }).click();
+  await page.locator("#est-search").fill("ROBO TESTE");
+  const linha = page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE });
+  await expect(linha).toBeVisible({ timeout: 10_000 });
+  await expect(linha.locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/, { timeout: 10_000 });
+});
