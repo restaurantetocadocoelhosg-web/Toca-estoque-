@@ -368,3 +368,77 @@ test("21. busca da aba Estoque (e do Admin) TAMBÉM encontra por apelido", async
   await page.locator("#est-search").fill("robotestecodigosecreto");
   await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
 });
+
+// ═══════════════════════════════════════════════════════════════════════
+// CONTAS / FINANÇAS / RELATÓRIOS — áreas sem cobertura nenhuma até aqui,
+// incluindo a Planilha Mensal e a exportação "compras", onde mexi hoje
+// (percentual mensal e filtro minimo>0) sem nunca ter aberto a tela de
+// verdade pra confirmar que renderiza certo.
+// ═══════════════════════════════════════════════════════════════════════
+
+test("22. Realidade do Dia (fechamento diário) abre e carrega sem erro", async ({ page }) => {
+  // SÓ LEITURA de propósito: Realidade do Dia tem 1 registro por DIA — salvar algo de teste
+  // aqui sobrescreveria o fechamento de verdade que a equipe já lançou hoje. Confere só que a
+  // tela carrega (resumo aparece, sem tela de erro/vazia travada).
+  await login(page);
+  await page.getByRole("button", { name: "Dia" }).click();
+  await expect(page.locator("#real-resumo")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#real-resumo .loading")).toHaveCount(0, { timeout: 15_000 });
+});
+
+test("23. Contas pagas: criar → aparece na lista → excluir", async ({ page }) => {
+  // Diferente da Realidade do Dia: cada conta paga é um registro INDEPENDENTE (não é 1 por
+  // dia), então criar e apagar uma de teste é seguro — não sobrescreve nada real.
+  const fornecedor = `ROBO TESTE PAGAMENTO ${Date.now()}`;
+  await login(page);
+  await page.getByRole("button", { name: "Contas" }).click();
+  await expect(page.locator("#pag-form-card")).toBeVisible({ timeout: 10_000 });
+
+  await page.locator("#pag-data").fill(new Date().toISOString().slice(0, 10));
+  await page.locator("#pag-fornecedor").fill(fornecedor);
+  await page.locator("#pag-forma").selectOption("Pix");
+  await page.locator("#pag-bruto").fill("1,23");
+  await page.locator("#pag-descricao").fill("Lançamento de teste do robô — pode ignorar");
+  await page.getByRole("button", { name: "Salvar conta paga" }).click();
+  await expect(page.locator("#toast.show.ok")).toBeVisible({ timeout: 15_000 });
+
+  await expect(page.getByText(fornecedor)).toBeVisible({ timeout: 10_000 });
+
+  // Desfaz: exclui a conta de teste (askConfirm in-app, botão "Confirmar" padrão).
+  // Escopa no card ".pay-item" que contém o fornecedor desta rodada — a lista pode ter
+  // outras contas (inclusive de rodadas anteriores), então ".last()" é ambíguo e pode
+  // clicar em "Excluir" da linha errada.
+  const linha = page.locator(".pay-item", { hasText: fornecedor });
+  await linha.getByRole("button", { name: "Excluir" }).click();
+  await page.getByRole("button", { name: "Confirmar" }).click();
+  await expect(page.getByText(fornecedor)).toHaveCount(0, { timeout: 10_000 });
+});
+
+test("24. Planilha Mensal mostra os 4 percentuais (Compras/Consumo/Perdas/Despesas) sem erro", async ({ page }) => {
+  // Valida de ponta a ponta o que corrigi hoje (commits b054d9a/f5ebef9): os 4 cards de
+  // percentual sobre vendas têm que aparecer formatados (contendo "%"), não em branco/NaN.
+  await login(page);
+  await page.getByRole("button", { name: "Planilha" }).click();
+  await expect(page.locator("#planilha-resumo")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#planilha-resumo .loading")).toHaveCount(0, { timeout: 15_000 });
+
+  for (const label of ["Compras", "Consumo", "Perdas", "Despesas"]) {
+    // Escopa pelo texto EXATO do ".real-label", não pelo card inteiro: o card "Resultado do
+    // mês" tem no texto de apoio "vendas - consumo - perdas - despesas" (minúsculo), e o
+    // hasText do Playwright faz substring case-insensitive no elemento inteiro — "Consumo"
+    // batia nos dois cards e dava "strict mode violation".
+    const card = page.locator(".real-kpi").filter({
+      has: page.locator(".real-label", { hasText: new RegExp(`^${label}$`) }),
+    });
+    await expect(card).toContainText("%", { timeout: 10_000 });
+    await expect(card).not.toContainText("NaN");
+    await expect(card).not.toContainText("undefined");
+  }
+});
+
+test("25. Relatórios (comparativo por período) abre e carrega sem erro", async ({ page }) => {
+  await login(page);
+  await page.getByRole("button", { name: "Relatórios" }).click();
+  await expect(page.locator("#rel-resumo")).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator("#rel-resumo .loading")).toHaveCount(0, { timeout: 15_000 });
+});
