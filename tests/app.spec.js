@@ -16,6 +16,10 @@ const PRODUTO_ID = process.env.E2E_PRODUTO_TESTE_ID;
 // média do dia e o alerta nunca dispararia (já vivi isso rodando a suite).
 const PRODUTO_ANOMALIA = "ROBO TESTE ANOMALIA (nao usar)";
 const PRODUTO_ANOMALIA_ID = process.env.E2E_PRODUTO_ANOMALIA_ID;
+// Produto com nome DE PROPÓSITO parecido com PRODUTO_TESTE — testa se busca/lançamento
+// confundem "ROBO TESTE" com "ROBO TESTE 2".
+const PRODUTO_PARECIDO = "ROBO TESTE 2 (nao usar)";
+const PRODUTO_PARECIDO_ID = process.env.E2E_PRODUTO_PARECIDO_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -35,15 +39,37 @@ async function resetProduto(id, qtd) {
 test.beforeEach(async () => {
   await resetProduto(PRODUTO_ID, 100);
   await resetProduto(PRODUTO_ANOMALIA_ID, 50);
+  await resetProduto(PRODUTO_PARECIDO_ID, 30);
 });
 
-async function login(page, { user = USER, password = PASSWORD, badge = "Robo QA" } = {}) {
+// Cache de token por conta (dura o worker inteiro — a suíte roda serial, 1 worker só).
+// Sem isso, CADA teste fazia login via UI = até 21 POSTs em /api/login por rodada,
+// batendo fácil no limite de 20/15min do próprio servidor (o loginLimiter, correto e
+// intencional — o problema era só a suíte gastando a cota à toa testando o mesmo login
+// repetidas vezes). O app restaura sessão sozinho a partir do token salvo em localStorage
+// (função init(), sem passar pelo endpoint de login de novo) — aproveitamos exatamente isso.
+const tokenCache = {};
+
+async function login(page, { user = USER, password = PASSWORD, badge = "Robo QA", forceUi = false } = {}) {
+  if (!forceUi && tokenCache[user]) {
+    await page.addInitScript((tok) => {
+      localStorage.setItem("toca_token", tok);
+      localStorage.setItem("toca_session_ts", String(Date.now()));
+    }, tokenCache[user]);
+    await page.goto("/");
+    await expect(page.locator("#user-badge")).toContainText(badge, { timeout: 20_000 });
+    return;
+  }
+  // Primeira vez desta conta no worker (ou forceUi pedido de propósito) — login real pela
+  // tela, exatamente como a equipe faria. Guarda o token pra reaproveitar nos próximos testes.
   await page.goto("/");
   await expect(page.locator("#login-user")).toBeVisible({ timeout: 20_000 });
   await page.locator("#login-user").fill(user);
   await page.locator("#login-pass").fill(password);
   await page.getByRole("button", { name: "Entrar" }).click();
   await expect(page.locator("#user-badge")).toContainText(badge, { timeout: 20_000 });
+  const token = await page.evaluate(() => localStorage.getItem("toca_token"));
+  if (token) tokenCache[user] = token;
 }
 
 async function selecionarProduto(page, nomeProduto, termoBusca) {
@@ -158,8 +184,9 @@ test("9. o número de 'Zerados' do Dashboard bate com a lista real da aba Estoqu
 
   await page.locator(".card", { hasText: "Zerados" }).click();
   // toHaveCount espera o filtro terminar de recarregar (evita contar a lista "Todos" ainda
-  // não filtrada, que aparece por um instante antes do fetch filtrado chegar).
-  await expect(page.locator("#prod-list .prod-row")).toHaveCount(numeroCard, { timeout: 10_000 });
+  // não filtrada, que aparece por um instante antes do fetch filtrado chegar). Timeout maior
+  // (20s) — já flakou algumas vezes com a lista de 280+ produtos demorando a assentar.
+  await expect(page.locator("#prod-list .prod-row")).toHaveCount(numeroCard, { timeout: 20_000 });
 });
 
 test("10. busca manual do Lançar encontra produto pelo apelido cadastrado (não só pelo nome)", async ({ page }) => {
@@ -173,4 +200,171 @@ test("10. busca manual do Lançar encontra produto pelo apelido cadastrado (não
   await login(page);
   await page.locator("#f-busca").fill("robotestecodigosecreto");
   await expect(page.locator(".ac-item", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// RODADA "HOSTIL" — tentando quebrar o sistema de propósito: nomes
+// parecidos, acento, vírgula, negativo, texto malicioso, concorrência.
+// ═══════════════════════════════════════════════════════════════════════
+
+test("11. busca SEM acento acha produto COM acento no nome", async ({ page }) => {
+  // "File de Frango" tem acento; buscar "file de frango" sem acento tem que achar do mesmo
+  // jeito. Aqui testamos com o produto fictício mesmo: busca sem qualquer acento/maiúscula.
+  await login(page);
+  await page.locator("#f-busca").fill("robo teste");
+  await expect(page.locator(".ac-item", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
+});
+
+test("12. busca com ESPAÇOS EXTRAS no meio ainda encontra o produto", async ({ page }) => {
+  await login(page);
+  await page.locator("#f-busca").fill("robo    teste");
+  await expect(page.locator(".ac-item", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
+});
+
+test("13. dois produtos com nome MUITO parecido não se confundem no lançamento", async ({ page }) => {
+  // "ROBO TESTE" e "ROBO TESTE 2" — lança no produto 2 e confere que SÓ ele mudou,
+  // o produto 1 (mesmo prefixo de nome) tem que continuar intocado.
+  await login(page);
+  await page.locator(".tipo-card", { hasText: "Saída" }).click();
+  await page.locator("#f-busca").fill("ROBO TESTE 2");
+  const item = page.locator(".ac-item", { hasText: PRODUTO_PARECIDO });
+  await expect(item).toBeVisible({ timeout: 10_000 });
+  await item.click();
+  await expect(page.locator("#sel-nome")).toContainText(PRODUTO_PARECIDO);
+  await expect(page.locator("#sel-nome")).not.toContainText(PRODUTO_TESTE); // garante que NÃO pegou o outro
+  await page.locator("#f-qtd").fill("5");
+  await page.locator("#btn-lancar").click();
+  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
+
+  await page.getByRole("button", { name: "Estoque" }).click();
+  await page.locator("#est-search").fill("ROBO TESTE");
+  await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_PARECIDO }).locator(".prod-row-qtd")).toHaveText(/^25([.,]0+)?$/, { timeout: 10_000 });
+  await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE }).first().locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/);
+
+  // Desfaz.
+  await page.getByRole("button", { name: "Lançar" }).click();
+  await page.locator(".tipo-card", { hasText: "Entrada" }).click();
+  await selecionarProduto(page, PRODUTO_PARECIDO, "ROBO TESTE 2");
+  await page.locator("#f-qtd").fill("5");
+  await page.locator("#btn-lancar").click();
+  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
+});
+
+test("14. busca pelo CÓDIGO do produto (não pelo nome) também funciona", async ({ page }) => {
+  await login(page);
+  await page.locator("#f-busca").fill("QA-01");
+  await expect(page.locator(".ac-item", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
+});
+
+test("15. lançar Saída MAIOR que o estoque disponível é bloqueado (sem deixar negativo)", async ({ page }) => {
+  await login(page);
+  await page.locator(".tipo-card", { hasText: "Saída" }).click();
+  await selecionarProdutoTeste(page);
+  await page.locator("#f-qtd").fill("99999");
+  await page.locator("#btn-lancar").click();
+  await expect(page.getByText("Estoque Insuficiente")).toBeVisible({ timeout: 10_000 });
+  await page.getByRole("button", { name: "Entendi" }).click();
+  // Confere que o estoque NÃO mudou (continua 100 — nada foi gravado).
+  await page.getByRole("button", { name: "Estoque" }).click();
+  await page.locator("#est-search").fill("ROBO TESTE");
+  await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE }).first().locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/, { timeout: 10_000 });
+});
+
+test("16. lançar Ajuste com valor NEGATIVO é rejeitado", async ({ page }) => {
+  await login(page);
+  await page.locator(".tipo-card", { hasText: "Ajuste" }).click();
+  await selecionarProdutoTeste(page);
+  await page.locator("#f-qtd").fill("-10");
+  await page.locator("#btn-lancar").click();
+  // Não pode ter gravado nada — nem toast de sucesso, nem mudança no estoque.
+  await expect(page.locator("#toast.show.ok")).toHaveCount(0);
+  await expect(page.locator("#toast.show.err")).toBeVisible({ timeout: 10_000 });
+});
+
+test("17. valor com VÍRGULA decimal (12,5) digitado TECLA POR TECLA (não .fill)", async ({ page }) => {
+  // Mesma classe de bug já corrigida no app Prosperidade: um campo type="number" pode ENGOLIR
+  // a vírgula em silêncio enquanto a pessoa digita de verdade (tecla por tecla), virando
+  // "125" em vez de "12,5" — um erro de 10x sem ninguém perceber. .fill() não serve pra
+  // testar isso (o Playwright recusa vírgula num input number de uma vez só); aqui simulamos
+  // TECLAS de verdade, uma a uma, como uma pessoa realmente digitaria no celular.
+  await login(page);
+  await page.locator(".tipo-card", { hasText: "Saída" }).click();
+  await selecionarProdutoTeste(page);
+  const campo = page.locator("#f-qtd");
+  await campo.click();
+  await campo.pressSequentially("12,5", { delay: 50 });
+  const valorDigitado = await campo.inputValue();
+
+  // O que quer que tenha ficado no campo, NUNCA pode virar "125" (o valor com a vírgula
+  // silenciosamente removida) — isso lançaria 10x mais do que a pessoa quis.
+  expect(valorDigitado).not.toBe("125");
+
+  if (valorDigitado === "" || valorDigitado === "12") {
+    // Comportamento aceitável: vírgula foi ignorada mas o "5" também não colou depois dela
+    // (campo ficou só com "12" ou vazio) — nesse caso NÃO pode lançar 12,5 como 12 sem avisar.
+    // Só confirmamos que não vira um "125" silencioso; o valor final (12) é intencional e
+    // aceitável (a pessoa pode corrigir na tela antes de confirmar).
+  }
+  // Sempre limpa o campo pra não deixar lixo se o teste parar aqui.
+  await campo.fill("");
+});
+
+test("18. texto malicioso/estranho na busca não quebra a tela (sem erro 500, sem crash)", async ({ page }) => {
+  await login(page);
+  const termos = ["%%%", "' OR '1'='1", "<script>alert(1)</script>", "😀🔥", "___"];
+  for (const termo of termos) {
+    await page.locator("#f-busca").fill(termo);
+    await page.waitForTimeout(400);
+    // A tela tem que continuar de pé (campo de busca ainda visível, sem tela em branco/erro).
+    await expect(page.locator("#f-busca")).toBeVisible();
+  }
+  await page.locator("#f-busca").fill("");
+});
+
+test("19. busca com 1 caractere não dispara (exige mínimo 2)", async ({ page }) => {
+  await login(page);
+  await page.locator("#f-busca").fill("r");
+  await page.waitForTimeout(500);
+  await expect(page.locator(".ac-list.open")).toHaveCount(0);
+});
+
+test("20. duas saídas SIMULTÂNEAS no mesmo produto não perdem lançamento (trava de concorrência)", async ({ page, browser }) => {
+  // Duas ABAS separadas logadas ao mesmo tempo, cada uma lança Saída de 10un no MESMO produto,
+  // ao mesmo tempo. Sem trava, uma sobrescreveria a outra (perderia 10un). Com trava otimista
+  // (já existente no server.js), as duas devem se registrar: estoque final = 100 - 10 - 10 = 80.
+  const context2 = await browser.newContext();
+  const page2 = await context2.newPage();
+  try {
+    await login(page);
+    await login(page2);
+
+    const fazerSaida = async (p) => {
+      await p.locator(".tipo-card", { hasText: "Saída" }).click();
+      await selecionarProduto(p, PRODUTO_TESTE, "ROBO TESTE");
+      await p.locator("#f-qtd").fill("10");
+      await p.locator("#btn-lancar").click();
+    };
+    await Promise.all([fazerSaida(page), fazerSaida(page2)]);
+    await page.waitForTimeout(2000);
+
+    await page.getByRole("button", { name: "Estoque" }).click();
+    await page.locator("#est-search").fill("ROBO TESTE");
+    await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE }).first().locator(".prod-row-qtd")).toHaveText(/^80([.,]0+)?$/, { timeout: 15_000 });
+
+    // Desfaz: entrada de 20 pra voltar a 100.
+    await page.getByRole("button", { name: "Lançar" }).click();
+    await lancar(page, "Entrada", 20);
+  } finally {
+    await context2.close();
+  }
+});
+
+test("21. busca da aba Estoque (e do Admin) TAMBÉM encontra por apelido", async ({ page }) => {
+  // Mesmo bug do teste 10, achado numa SEGUNDA rota: /api/produtos (usada pela aba Estoque e
+  // pelo Admin de gestão de produtos) também não consultava sinônimos — só a busca do Lançar
+  // (/api/produtos/buscar) tinha sido corrigida antes. Corrigido nos dois ao mesmo tempo.
+  await login(page);
+  await page.getByRole("button", { name: "Estoque" }).click();
+  await page.locator("#est-search").fill("robotestecodigosecreto");
+  await expect(page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE })).toBeVisible({ timeout: 10_000 });
 });

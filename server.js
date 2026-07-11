@@ -407,14 +407,36 @@ app.post('/api/change-password', auth, async (req, res) => {
 // ==================== ROTAS PRODUTOS ====================
 app.get('/api/produtos', auth, async (req, res) => {
   const { cat, status, q, arquivados } = req.query;
-  let query = supabase.from('produtos').select('*');
-  if (arquivados === '1' && req.user.role === 'admin') query = query.eq('ativo', 0);
-  else query = query.or('ativo.eq.1,ativo.is.null');
-  if (q) { const qq = sanitizeText(q, 100); query = query.or(`nome_search.ilike.%${normalizeSearch(qq)}%,codigo.ilike.%${qq.toUpperCase()}%`); }
-  if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
-  query = query.order('categoria').order('nome');
-  const { data: rows, error } = await query;
-  if (error) return res.status(500).json({ erro: 'Erro ao buscar produtos.' });
+  const arquivar = arquivados === '1' && req.user.role === 'admin';
+  const comFiltroAtivo = (query) => arquivar ? query.eq('ativo', 0) : query.or('ativo.eq.1,ativo.is.null');
+
+  let rows;
+  if (q) {
+    const qq = sanitizeText(q, 100);
+    const qn = normalizeSearch(qq);
+    // Apelido/sinônimo cadastrado — mesma correção da busca de Lançar (commit 2b0ae95): sem
+    // isso, a aba Estoque e o Admin (gestão de produtos) TAMBÉM não achavam produto por
+    // apelido, só por pedaço do nome. Junta o match de apelido (se houver) com a busca normal.
+    const { data: sino } = await supabase.from('sinonimos').select('produto_nome').eq('termo', qn).limit(1);
+    let viaApelido = [];
+    if (sino && sino.length) {
+      const { data } = await comFiltroAtivo(supabase.from('produtos').select('*').eq('nome', sino[0].produto_nome));
+      viaApelido = data || [];
+    }
+    let qResto = comFiltroAtivo(supabase.from('produtos').select('*').or(`nome_search.ilike.%${qn}%,codigo.ilike.%${qq.toUpperCase()}%`));
+    if (cat) qResto = qResto.eq('categoria', sanitizeText(cat, 80));
+    const { data: resto, error } = await qResto.order('categoria').order('nome');
+    if (error) return res.status(500).json({ erro: 'Erro ao buscar produtos.' });
+    const vistos = new Set(viaApelido.map(p => p.id));
+    rows = [...viaApelido, ...(resto || []).filter(p => !vistos.has(p.id))];
+  } else {
+    let query = comFiltroAtivo(supabase.from('produtos').select('*'));
+    if (cat) query = query.eq('categoria', sanitizeText(cat, 80));
+    const { data, error } = await query.order('categoria').order('nome');
+    if (error) return res.status(500).json({ erro: 'Erro ao buscar produtos.' });
+    rows = data;
+  }
+
   let filtered = rows;
   if (status === 'zerado') filtered = rows.filter(r => r.qtd === 0);
   else if (status === 'critico') filtered = rows.filter(r => r.qtd > 0 && r.qtd <= r.minimo * 0.5);
