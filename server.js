@@ -2467,7 +2467,10 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     // algo que o restaurante nem usa mais).
     const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Sugerido Comprar'];
-    rows = (data || []).filter(r => Number(r.qtd) <= Number(r.minimo) * 0.5)
+    // minimo > 0 exigido — sem isso, produto sem mínimo definido (comum: 80 itens sem
+    // movimento) entrava aqui sugerindo "comprar 0" (mesma inconsistência do relatório HTML;
+    // o comando de WhatsApp já exigia minimo>0 corretamente, aqui não exigia).
+    rows = (data || []).filter(r => Number(r.minimo) > 0 && Number(r.qtd) <= Number(r.minimo) * 0.5)
       .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
     filename = 'lista_compras_toca_coelho.csv';
   } else if (tipo === 'fechamentos') {
@@ -2582,7 +2585,9 @@ app.get('/api/relatorio/:tipo', auth, async (req, res) => {
       const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo')
         .or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
       let prods = data || [];
-      if (ehCompras) prods = prods.filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);  // zerados + críticos
+      // minimo > 0 exigido — mesma correção do CSV: sem mínimo definido não dá pra sugerir
+      // quanto comprar (o comando de WhatsApp já filtrava certo; aqui não filtrava).
+      if (ehCompras) prods = prods.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);  // zerados + críticos
       const porCat = {};
       for (const p of prods) (porCat[p.categoria || 'Sem categoria'] = porCat[p.categoria || 'Sem categoria'] || []).push(p);
       const cont = { ZERADO: 0, CRITICO: 0, ATENCAO: 0, OK: 0 };
