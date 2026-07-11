@@ -661,7 +661,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }
 
   // Detecção de anomalia para Saída/Perda
-  if ((tipo === 'Saída' || tipo === 'Perda') && !req.body.forcar) {
+  if (tipo === 'Saída' || tipo === 'Perda') {
     const trintaDias = dateAgoDias(30);
     const { data: hist } = await supabase.from('movimentacoes')
       .select('qtd').eq('produto_id', prod.id)
@@ -671,12 +671,15 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
       const mediaDiaria = totalConsumo / 30;
       if (mediaDiaria > 0 && qtd > mediaDiaria * 3) {
         if (req.user.role === 'operador') {
+          // Bloqueio SEM bypass por `forcar` — antes o operador conseguia auto-confirmar o
+          // próprio alerta pelo mesmo diálogo genérico do app, o que anulava a exigência de
+          // "chamar o gerente". Agora só passa se quem lançar de fato tiver role gerente/admin.
           return res.status(409).json({
             alerta: true, codigo: 'QUANTIDADE_SUSPEITA',
             media_diaria: Number(mediaDiaria.toFixed(2)), qtd_lancada: qtd, unidade: prod.unidade,
-            msg: `Quantidade ${qtd} ${prod.unidade} é ${(qtd/mediaDiaria).toFixed(1)}× acima da média diária (${mediaDiaria.toFixed(1)} ${prod.unidade}). Chame o gerente para confirmar.`
+            msg: `Quantidade ${qtd} ${prod.unidade} é ${(qtd/mediaDiaria).toFixed(1)}× acima da média diária (${mediaDiaria.toFixed(1)} ${prod.unidade}). Peça pra um gerente ou admin lançar esse item.`
           });
-        } else {
+        } else if (!req.body.forcar) {
           req.body.obs = (req.body.obs ? req.body.obs + ' | ' : '') +
             `⚠️ Anomalia: ${qtd} ${prod.unidade} = ${(qtd/mediaDiaria).toFixed(1)}× média diária`;
           obs = sanitizeText(req.body.obs, 200);

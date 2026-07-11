@@ -2109,6 +2109,12 @@ async function lancar(forcar = false) {
     });
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
+      if (resultado.codigo === 'QUANTIDADE_SUSPEITA') {
+        // Bloqueio de operador é de verdade agora (servidor não aceita forcar pra isso) —
+        // sem botão de "confirmar mesmo assim" pra não fingir uma opção que não existe.
+        avisar(resultado.msg, { titulo: 'Precisa de um gerente', perigo: true });
+        return;
+      }
       if (await askConfirm(resultado.msg, { titulo: 'Confirmar mesmo assim?' })) lancar(true);
       return;
     }

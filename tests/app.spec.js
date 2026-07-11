@@ -7,6 +7,8 @@ import { test, expect } from "@playwright/test";
 
 const USER = process.env.E2E_USER;
 const PASSWORD = process.env.E2E_PASSWORD;
+const USER_OPERADOR = process.env.E2E_USER_OPERADOR;
+const PASSWORD_OPERADOR = process.env.E2E_PASSWORD_OPERADOR;
 const PRODUTO_TESTE = "ROBO TESTE (nao usar)";
 const PRODUTO_ID = process.env.E2E_PRODUTO_TESTE_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
@@ -26,13 +28,13 @@ test.beforeEach(async () => {
   });
 });
 
-async function login(page) {
+async function login(page, { user = USER, password = PASSWORD, badge = "Robo QA" } = {}) {
   await page.goto("/");
   await expect(page.locator("#login-user")).toBeVisible({ timeout: 20_000 });
-  await page.locator("#login-user").fill(USER);
-  await page.locator("#login-pass").fill(PASSWORD);
+  await page.locator("#login-user").fill(user);
+  await page.locator("#login-pass").fill(password);
   await page.getByRole("button", { name: "Entrar" }).click();
-  await expect(page.locator("#user-badge")).toContainText("Robo QA", { timeout: 20_000 });
+  await expect(page.locator("#user-badge")).toContainText(badge, { timeout: 20_000 });
 }
 
 async function selecionarProdutoTeste(page) {
@@ -90,6 +92,35 @@ test("5. lançar Saída reflete no estoque (some do zerado se aplicável) e volt
   await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
   // Desfaz: entrada da mesma quantidade.
   await lancar(page, "Entrada", 5);
+});
+
+test("7. operador NÃO consegue burlar o alerta de quantidade suspeita (sem botão de confirmar)", async ({ page }) => {
+  // Baseline semeado no banco: 5 saídas de 1un em 30 dias (média ~0,167/dia) — qualquer
+  // saída ≥1un dispara o alerta de anomalia (3x a média) pro papel operador.
+  await login(page, { user: USER_OPERADOR, password: PASSWORD_OPERADOR, badge: "Robo QA Operador" });
+  await page.locator(".tipo-card", { hasText: "Saída" }).click();
+  await selecionarProdutoTeste(page);
+  await page.locator("#f-qtd").fill("1");
+  await page.locator("#btn-lancar").click();
+
+  // Aviso claro, SEM opção de "confirmar mesmo assim" — o bloqueio é de verdade agora.
+  await expect(page.getByText("Precisa de um gerente")).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole("button", { name: "Confirmar mesmo assim" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Entendi" }).click();
+
+  // Confere que NADA foi gravado (estoque continua em 100 — o bloqueio segurou de verdade).
+  await page.getByRole("button", { name: "Estoque" }).click();
+  await page.locator("#est-search").fill("ROBO TESTE");
+  const linha = page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE });
+  await expect(linha.locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/, { timeout: 10_000 });
+});
+
+test("8. gerente consegue lançar a mesma quantidade sem bloqueio (fica só anotado)", async ({ page }) => {
+  await login(page);
+  await lancar(page, "Saída", 1);
+  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
+  // Desfaz: entrada da mesma quantidade.
+  await lancar(page, "Entrada", 1);
 });
 
 test("6. estoque do produto de teste sempre fecha em 100 (net-zero das rodadas acima)", async ({ page }) => {
