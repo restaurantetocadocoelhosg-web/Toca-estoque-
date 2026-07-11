@@ -1959,6 +1959,13 @@ async function montarPlanilhaMensal(mesParam) {
   }
   totais.dias_sem_caixa = dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).length;
   totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas / totais.pratos_vendidos).toFixed(2)) : null;
+  // Mesmos percentuais que o dia isolado já mostra (consumo/perdas/despesas/compras sobre
+  // vendas), agora também pro mês inteiro — calculados a partir dos TOTAIS somados (não a
+  // média dos percentuais diários, que seria matematicamente errado com dias de venda desigual).
+  totais.consumo_sobre_vendas_pct = pct(totais.consumo_estoque, totais.vendas);
+  totais.perdas_sobre_vendas_pct = pct(totais.perdas, totais.vendas);
+  totais.despesas_sobre_vendas_pct = pct(totais.despesas, totais.vendas);
+  totais.compras_sobre_vendas_pct = pct(totais.compras_estoque, totais.vendas);
 
   const formasPagamento = Object.values(formasMes)
     .map(row => ({ ...row, valor: Number(Number(row.valor || 0).toFixed(2)) }))
