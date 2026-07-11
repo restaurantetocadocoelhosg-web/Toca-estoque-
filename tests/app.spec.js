@@ -11,21 +11,30 @@ const USER_OPERADOR = process.env.E2E_USER_OPERADOR;
 const PASSWORD_OPERADOR = process.env.E2E_PASSWORD_OPERADOR;
 const PRODUTO_TESTE = "ROBO TESTE (nao usar)";
 const PRODUTO_ID = process.env.E2E_PRODUTO_TESTE_ID;
+// Produto SEPARADO só pro teste de anomalia (7/8): precisa de uma média de 30 dias baixa e
+// estável — se usasse o mesmo produto dos testes 4/5, as saídas desses testes inflariam a
+// média do dia e o alerta nunca dispararia (já vivi isso rodando a suite).
+const PRODUTO_ANOMALIA = "ROBO TESTE ANOMALIA (nao usar)";
+const PRODUTO_ANOMALIA_ID = process.env.E2E_PRODUTO_ANOMALIA_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 test.describe.configure({ mode: "serial" });
 
-// Reseta o saldo do produto fictício de teste pra 100 ANTES de cada teste — assim o robô nunca
-// depende do que sobrou de uma rodada anterior (retry, teste interrompido, etc). Só mexe no
-// produto isolado de QA; nunca toca no estoque real do restaurante.
-test.beforeEach(async () => {
-  if (!SUPABASE_URL || !SUPABASE_KEY || !PRODUTO_ID) return;
-  await fetch(`${SUPABASE_URL}/rest/v1/produtos?id=eq.${PRODUTO_ID}`, {
+// Reseta o saldo dos produtos fictícios de teste ANTES de cada teste — assim o robô nunca
+// depende do que sobrou de uma rodada anterior (retry, teste interrompido, etc). Só mexe nos
+// produtos isolados de QA; nunca toca no estoque real do restaurante.
+async function resetProduto(id, qtd) {
+  if (!SUPABASE_URL || !SUPABASE_KEY || !id) return;
+  await fetch(`${SUPABASE_URL}/rest/v1/produtos?id=eq.${id}`, {
     method: "PATCH",
     headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ qtd: 100 }),
+    body: JSON.stringify({ qtd }),
   });
+}
+test.beforeEach(async () => {
+  await resetProduto(PRODUTO_ID, 100);
+  await resetProduto(PRODUTO_ANOMALIA_ID, 50);
 });
 
 async function login(page, { user = USER, password = PASSWORD, badge = "Robo QA" } = {}) {
@@ -37,17 +46,19 @@ async function login(page, { user = USER, password = PASSWORD, badge = "Robo QA"
   await expect(page.locator("#user-badge")).toContainText(badge, { timeout: 20_000 });
 }
 
-async function selecionarProdutoTeste(page) {
+async function selecionarProduto(page, nomeProduto, termoBusca) {
   // Se o produto já está selecionado (ex.: sobrou de um lançamento anterior na mesma
   // sessão), o campo de busca fica escondido de propósito — não busca de novo.
-  const jaSelecionado = await page.locator("#sel-nome").filter({ hasText: PRODUTO_TESTE }).count();
+  const jaSelecionado = await page.locator("#sel-nome").filter({ hasText: nomeProduto }).count();
   if (jaSelecionado > 0) return;
-  await page.locator("#f-busca").fill("ROBO TESTE");
-  const item = page.locator(".ac-item", { hasText: PRODUTO_TESTE });
+  await page.locator("#f-busca").fill(termoBusca);
+  const item = page.locator(".ac-item", { hasText: nomeProduto });
   await expect(item).toBeVisible({ timeout: 10_000 });
   await item.click();
-  await expect(page.locator("#sel-nome")).toContainText(PRODUTO_TESTE);
+  await expect(page.locator("#sel-nome")).toContainText(nomeProduto);
 }
+async function selecionarProdutoTeste(page) { await selecionarProduto(page, PRODUTO_TESTE, "ROBO TESTE"); }
+async function selecionarProdutoAnomalia(page) { await selecionarProduto(page, PRODUTO_ANOMALIA, "ANOMALIA"); }
 
 async function lancar(page, tipoLabel, qtd) {
   await page.locator(".tipo-card", { hasText: tipoLabel }).click();
@@ -95,11 +106,11 @@ test("5. lançar Saída reflete no estoque (some do zerado se aplicável) e volt
 });
 
 test("7. operador NÃO consegue burlar o alerta de quantidade suspeita (sem botão de confirmar)", async ({ page }) => {
-  // Baseline semeado no banco: 5 saídas de 1un em 30 dias (média ~0,167/dia) — qualquer
-  // saída ≥1un dispara o alerta de anomalia (3x a média) pro papel operador.
+  // Baseline semeado no banco (produto isolado): 5 saídas de 1un em 30 dias (média ~0,167/dia)
+  // — qualquer saída ≥1un dispara o alerta de anomalia (3x a média) pro papel operador.
   await login(page, { user: USER_OPERADOR, password: PASSWORD_OPERADOR, badge: "Robo QA Operador" });
   await page.locator(".tipo-card", { hasText: "Saída" }).click();
-  await selecionarProdutoTeste(page);
+  await selecionarProdutoAnomalia(page);
   await page.locator("#f-qtd").fill("1");
   await page.locator("#btn-lancar").click();
 
@@ -108,19 +119,28 @@ test("7. operador NÃO consegue burlar o alerta de quantidade suspeita (sem bot�
   await expect(page.getByRole("button", { name: "Confirmar mesmo assim" })).toHaveCount(0);
   await page.getByRole("button", { name: "Entendi" }).click();
 
-  // Confere que NADA foi gravado (estoque continua em 100 — o bloqueio segurou de verdade).
+  // Confere que NADA foi gravado (estoque continua em 50 — o bloqueio segurou de verdade).
   await page.getByRole("button", { name: "Estoque" }).click();
-  await page.locator("#est-search").fill("ROBO TESTE");
-  const linha = page.locator("#prod-list .prod-row", { hasText: PRODUTO_TESTE });
-  await expect(linha.locator(".prod-row-qtd")).toHaveText(/^100([.,]0+)?$/, { timeout: 10_000 });
+  await page.locator("#est-search").fill("ROBO TESTE ANOMALIA");
+  const linha = page.locator("#prod-list .prod-row", { hasText: PRODUTO_ANOMALIA });
+  await expect(linha.locator(".prod-row-qtd")).toHaveText(/^50([.,]0+)?$/, { timeout: 10_000 });
 });
 
 test("8. gerente consegue lançar a mesma quantidade sem bloqueio (fica só anotado)", async ({ page }) => {
   await login(page);
-  await lancar(page, "Saída", 1);
-  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_TESTE, { timeout: 10_000 });
+  await page.locator(".tipo-card", { hasText: "Saída" }).click();
+  await selecionarProdutoAnomalia(page);
+  await page.locator("#f-qtd").fill("1");
+  await page.locator("#btn-lancar").click();
+  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator("#toast.show.err")).toHaveCount(0);
+  await expect(page.locator("#ultimos-list")).toContainText(PRODUTO_ANOMALIA, { timeout: 10_000 });
   // Desfaz: entrada da mesma quantidade.
-  await lancar(page, "Entrada", 1);
+  await page.locator(".tipo-card", { hasText: "Entrada" }).click();
+  await selecionarProdutoAnomalia(page);
+  await page.locator("#f-qtd").fill("1");
+  await page.locator("#btn-lancar").click();
+  await expect(page.locator("#toast.show")).toBeVisible({ timeout: 15_000 });
 });
 
 test("6. estoque do produto de teste sempre fecha em 100 (net-zero das rodadas acima)", async ({ page }) => {
