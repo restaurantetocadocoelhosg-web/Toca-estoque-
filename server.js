@@ -4149,12 +4149,16 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
 
 // ==================== BACKUP AUTOMÁTICO ====================
 async function criarBackupEstoque(motivo = 'automatico') {
+  // `dados` guarda TODOS os produtos (incl. arquivados) — o backup precisa disso pra
+  // restaurar de verdade. Mas o resumo (zerados/críticos/valor) só deve contar os ativos,
+  // senão o snapshot registra números que nunca bateriam com o que a tela mostra.
   const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo, ativo');
   if (!produtos || !produtos.length) return null;
+  const ativos = produtos.filter(p => p.ativo !== 0);
   const snapshot = { data_backup: nowSP(), motivo, total_produtos: produtos.length,
-    valor_total: produtos.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0),
-    zerados: produtos.filter(p => Number(p.qtd) === 0).length,
-    criticos: produtos.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length,
+    valor_total: ativos.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0),
+    zerados: ativos.filter(p => Number(p.qtd) === 0).length,
+    criticos: ativos.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length,
     dados: JSON.stringify(produtos) };
   const { data, error } = await supabase.from('backups_estoque').insert(snapshot).select('id, data_backup').single();
   if (error) { console.error('❌ Erro no backup:', error.message); return null; }
@@ -4531,7 +4535,11 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
       }
     }
     const paradosRel = prodGiro.filter(p => {
-      const th = THRESHOLDS_ALERTA[p.categoria] || 10;
+      // Mesma constante do /api/alertas/estoque-parado — antes usava "|| 10" fixo aqui, um
+      // terço do padrão real (THRESHOLD_PADRAO=30). Hoje as 9 categorias deste relatório já
+      // têm limite próprio definido, então isso não mudava nada NA PRÁTICA ainda — mas se uma
+      // categoria nova entrar na lista sem limite definido, os dois relatórios divergiam.
+      const th = THRESHOLDS_ALERTA[p.categoria] || THRESHOLD_PADRAO;
       if (p.grupo_troca && lastGrupoRel[p.grupo_troca] && (Date.now() - lastGrupoRel[p.grupo_troca]) < th * 86400000) return false;
       const last = lastMG[p.id];
       if (!last) return true;
