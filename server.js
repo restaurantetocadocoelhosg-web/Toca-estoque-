@@ -103,13 +103,13 @@ async function logErroAgenda(contexto, err, user) {
 }
 
 // ==================== PERMISSÕES (liberações por usuário) ====================
-const PERM_KEYS = ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin'];
+const PERM_KEYS = ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin','cardapio'];
 function permsPorRole(role) {
   // 'pendencias' (resolver itens em dúvida da nota do WhatsApp): admin-only por padrão;
   // admin libera por pessoa no painel de liberações.
-  if (role === 'admin')   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true };
-  if (role === 'gerente') return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false };
-  return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
+  if (role === 'admin')   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true, cardapio:true };
+  if (role === 'gerente') return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true };
+  return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
 function permsEfetivas(role, permissoes) {
   const base = permsPorRole(role);
@@ -2484,6 +2484,228 @@ app.post('/api/pagamentos/ler-comprovante', auth, requirePerm('contas'), async (
   } catch(e) {
     console.error(e);
     res.status(e.status || 500).json({ erro: e.message || 'Erro ao ler comprovante.' });
+  }
+});
+
+// ==================== CATÁLOGO DE PRATOS (com foto) ====================
+function isTabelaPratosCardapioMissing(error) {
+  const msg = String(error?.message || error?.details || '');
+  return error && (
+    error.code === '42P01' ||
+    error.code === 'PGRST205' ||
+    /pratos_cardapio|schema cache|does not exist|relation|column/i.test(msg)
+  );
+}
+
+app.get('/api/pratos-cardapio', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const q = sanitizeText(req.query?.q || '', 100);
+    let query = supabase.from('pratos_cardapio').select('*').eq('ativo', 1).order('nome');
+    if (q) query = query.ilike('nome', `%${q}%`);
+    const { data, error } = await query.limit(300);
+    if (error) {
+      if (isTabelaPratosCardapioMissing(error)) return res.json({ pratos: [], configuracao_pendente: true });
+      throw error;
+    }
+    res.json({ pratos: data || [] });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar catálogo de pratos.' });
+  }
+});
+
+app.post('/api/pratos-cardapio/foto', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const imagemB64 = req.body?.imagem;
+    if (!imagemB64) return res.status(400).json({ erro: 'Envie a imagem.' });
+    const mediaType = sanitizeText(req.body?.mediaType || 'image/jpeg', 40);
+    const ext = mediaType.includes('png') ? 'png' : (mediaType.includes('webp') ? 'webp' : 'jpg');
+    const nomeArquivo = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+    const buffer = Buffer.from(imagemB64, 'base64');
+    if (buffer.length > 6 * 1024 * 1024) return res.status(413).json({ erro: 'Imagem muito grande (máx. 6MB).' });
+    const { error } = await supabase.storage.from('pratos-fotos').upload(nomeArquivo, buffer, { contentType: mediaType, upsert: false });
+    if (error) throw error;
+    const { data: pub } = supabase.storage.from('pratos-fotos').getPublicUrl(nomeArquivo);
+    res.json({ foto_url: pub.publicUrl });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao enviar foto.' });
+  }
+});
+
+app.post('/api/pratos-cardapio', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const nome = sanitizeText(req.body?.nome || '', 120);
+    if (!nome) return res.status(400).json({ erro: 'Informe o nome do prato.' });
+    const fotoUrl = sanitizeText(req.body?.foto_url || '', 300);
+    const categoria = sanitizeText(req.body?.categoria || '', 60);
+    const produtoId = Number.isInteger(Number(req.body?.produto_id)) && Number(req.body.produto_id) > 0 ? Number(req.body.produto_id) : null;
+    const { data, error } = await supabase.from('pratos_cardapio').insert({
+      nome, foto_url: fotoUrl, categoria, produto_id: produtoId, ativo: 1,
+    }).select('*').single();
+    if (error) {
+      if (isTabelaPratosCardapioMissing(error)) return res.status(500).json({ erro: 'Tabela pratos_cardapio precisa ser criada. Rode o arquivo SUPABASE_PRATOS_CARDAPIO.sql no Supabase.' });
+      throw error;
+    }
+    await audit('prato_cardapio_criar', { id: data.id, nome }, req.user, getClientIp(req));
+    res.json(data);
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar prato.' });
+  }
+});
+
+app.put('/api/pratos-cardapio/:id', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Prato inválido.' });
+    const nome = sanitizeText(req.body?.nome || '', 120);
+    if (!nome) return res.status(400).json({ erro: 'Informe o nome do prato.' });
+    const fotoUrl = sanitizeText(req.body?.foto_url || '', 300);
+    const categoria = sanitizeText(req.body?.categoria || '', 60);
+    const produtoId = Number.isInteger(Number(req.body?.produto_id)) && Number(req.body.produto_id) > 0 ? Number(req.body.produto_id) : null;
+    const { error } = await supabase.from('pratos_cardapio').update({ nome, foto_url: fotoUrl, categoria, produto_id: produtoId }).eq('id', id);
+    if (error) throw error;
+    await audit('prato_cardapio_editar', { id, nome }, req.user, getClientIp(req));
+    res.json({ ok: true });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao editar prato.' });
+  }
+});
+
+app.delete('/api/pratos-cardapio/:id', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Prato inválido.' });
+    const { error } = await supabase.from('pratos_cardapio').update({ ativo: 0 }).eq('id', id);
+    if (error) throw error;
+    await audit('prato_cardapio_excluir', { id }, req.user, getClientIp(req));
+    res.json({ ok: true });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao excluir prato.' });
+  }
+});
+
+// ==================== CARDÁPIO DA SEMANA ====================
+const DIAS_SEMANA_CARDAPIO = ['segunda','terca','quarta','quinta','sexta','sabado','domingo'];
+
+function isTabelaCardapioMissing(error) {
+  const msg = String(error?.message || error?.details || '');
+  return error && (
+    error.code === '42P01' ||
+    error.code === 'PGRST205' ||
+    /cardapio_semanal|schema cache|does not exist|relation|column/i.test(msg)
+  );
+}
+
+function normalizarSecaoCardapio(value, max = 20) {
+  const rows = arrayFromMaybeJson(value);
+  return rows.slice(0, max).map(row => {
+    const pratoId = Number.isInteger(Number(row?.prato_id)) && Number(row?.prato_id) > 0 ? Number(row.prato_id) : null;
+    const cubas = parseNonNegativeInteger(row?.cubas ?? 1) || 1;
+    const obs = sanitizeText(row?.obs || '', 160);
+    return { prato_id: pratoId, cubas, obs };
+  }).filter(row => row.prato_id);
+}
+
+async function montarCardapio(diaSemana) {
+  const { data: row, error } = await supabase.from('cardapio_semanal').select('*').eq('dia_semana', diaSemana).maybeSingle();
+  if (error) {
+    if (isTabelaCardapioMissing(error)) return { dia_semana: diaSemana, configuracao_pendente: true, buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [] };
+    throw error;
+  }
+  const base = row || { dia_semana: diaSemana, buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [], responsavel: '', updated_at: null };
+
+  const secoes = ['buffet_principal', 'rechaud_redondo', 'rechaud_retangular'];
+  const idsPratos = [...new Set(
+    secoes.flatMap(s => arrayFromMaybeJson(base[s]).map(item => item?.prato_id).filter(Boolean))
+  )];
+  let pratosPorId = {};
+  if (idsPratos.length) {
+    const { data: pratos } = await supabase.from('pratos_cardapio').select('id,nome,foto_url,produto_id').in('id', idsPratos);
+    for (const p of (pratos || [])) pratosPorId[p.id] = p;
+  }
+  const idsProdutos = [...new Set(Object.values(pratosPorId).map(p => p.produto_id).filter(Boolean))];
+  let estoquePorId = {};
+  if (idsProdutos.length) {
+    const { data: produtosLigados } = await supabase.from('produtos').select('id,qtd,unidade,ativo,minimo').in('id', idsProdutos);
+    for (const p of (produtosLigados || [])) estoquePorId[p.id] = p;
+  }
+  const comDetalhes = (secaoRows) => arrayFromMaybeJson(secaoRows).map(item => {
+    const prato = item?.prato_id ? pratosPorId[item.prato_id] : null;
+    const prod = prato?.produto_id ? estoquePorId[prato.produto_id] : null;
+    return {
+      ...item,
+      nome: prato ? prato.nome : '(prato removido do catálogo)',
+      foto_url: prato ? prato.foto_url : '',
+      prato_removido: !!(item?.prato_id && !prato),
+      estoque_atual: prod ? Number(prod.qtd) : null,
+      estoque_unidade: prod ? prod.unidade : null,
+      estoque_baixo: prod ? (Number(prod.qtd) <= Number(prod.minimo || 0) && Number(prod.minimo || 0) > 0) : false,
+      produto_arquivado: prod ? !(prod.ativo === 1 || prod.ativo === null) : false,
+    };
+  });
+
+  return {
+    dia_semana: diaSemana,
+    buffet_principal: comDetalhes(base.buffet_principal),
+    rechaud_redondo: comDetalhes(base.rechaud_redondo),
+    rechaud_retangular: comDetalhes(base.rechaud_retangular),
+    responsavel: base.responsavel || '',
+    updated_at: base.updated_at,
+  };
+}
+
+app.get('/api/cardapio', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const dia = String(req.query?.dia || '').toLowerCase();
+    if (!DIAS_SEMANA_CARDAPIO.includes(dia)) return res.status(400).json({ erro: 'Dia da semana inválido.' });
+    res.json(await montarCardapio(dia));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar cardápio.' });
+  }
+});
+
+app.get('/api/cardapio/semana', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const dias = await Promise.all(DIAS_SEMANA_CARDAPIO.map(montarCardapio));
+    res.json({ dias });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar a semana do cardápio.' });
+  }
+});
+
+app.post('/api/cardapio', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const dia = String(req.body?.dia_semana || '').toLowerCase();
+    if (!DIAS_SEMANA_CARDAPIO.includes(dia)) return res.status(400).json({ erro: 'Dia da semana inválido.' });
+    const buffet_principal = normalizarSecaoCardapio(req.body?.buffet_principal, 20);
+    const rechaud_redondo = normalizarSecaoCardapio(req.body?.rechaud_redondo, 10);
+    const rechaud_retangular = normalizarSecaoCardapio(req.body?.rechaud_retangular, 10);
+
+    const { error } = await supabase.from('cardapio_semanal').upsert({
+      dia_semana: dia,
+      buffet_principal,
+      rechaud_redondo,
+      rechaud_retangular,
+      responsavel: req.user.nome || req.user.username,
+      updated_at: nowSP(),
+    }, { onConflict: 'dia_semana' });
+    if (error) {
+      if (isTabelaCardapioMissing(error)) {
+        return res.status(500).json({ erro: 'Tabela cardapio_semanal precisa ser criada. Rode o arquivo SUPABASE_CARDAPIO.sql no Supabase.' });
+      }
+      throw error;
+    }
+    await audit('cardapio_salvar', { dia_semana: dia, itens: buffet_principal.length + rechaud_redondo.length + rechaud_retangular.length }, req.user, getClientIp(req));
+    res.json(await montarCardapio(dia));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar cardápio.' });
   }
 });
 

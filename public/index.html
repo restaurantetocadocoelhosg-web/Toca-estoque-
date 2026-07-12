@@ -330,6 +330,48 @@ select.big-input { font-size: 14px; }
 .pay-item-value { text-align: right; font-size: 15px; font-weight: 800; color: var(--green); white-space: nowrap; }
 .pay-item-actions { grid-column: 1 / -1; display: flex; gap: 8px; justify-content: flex-end; }
 .pay-file { width: 100%; font-size: 13px; color: var(--muted); background: var(--bg); border: 1px dashed var(--border); border-radius: 12px; padding: 11px; }
+.card-cubas-total { font-size: 11px; font-weight: 700; color: var(--muted); }
+.card-alert-list { display: flex; flex-direction: column; gap: 6px; }
+.card-alert-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: rgba(239,68,68,0.07); border: 1px solid rgba(239,68,68,0.25); border-radius: 10px; padding: 9px 11px; font-size: 12px; }
+.card-alert-item b { color: var(--red); }
+
+/* Grade de cubas (buffet/rechauds) — cards com foto do prato */
+.card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
+.card-cuba-item { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; aspect-ratio: 1; display: flex; flex-direction: column; }
+.card-cuba-item.vazia { display: flex; align-items: center; justify-content: center; border-style: dashed; color: var(--muted); font-size: 24px; }
+.card-cuba-item.estoque-baixo { border-color: rgba(239,68,68,0.5); box-shadow: 0 0 0 2px rgba(239,68,68,0.2) inset; }
+.card-cuba-foto { width: 100%; flex: 1; object-fit: cover; background: var(--s2); display: block; }
+.card-cuba-sem-foto { width: 100%; flex: 1; background: var(--s2); display: flex; align-items: center; justify-content: center; font-size: 26px; }
+.card-cuba-nome { font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; line-height: 1.25; background: var(--s1); text-align: center; }
+.card-cuba-badge { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; z-index: 2; }
+.card-cuba-remove { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 11px; font-weight: 800; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2; }
+.card-cuba-warn { position: absolute; bottom: 22px; right: 4px; font-size: 13px; z-index: 2; }
+.card-cuba-cubas-badge { position: absolute; bottom: 22px; left: 4px; background: rgba(0,0,0,0.6); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
+
+/* Catálogo de pratos — galeria de cadastro */
+.card-catalogo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
+.card-catalogo-item { background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; transition: border-color .15s; }
+.card-catalogo-item:hover { border-color: var(--accent); }
+.card-catalogo-item img, .card-catalogo-item .card-cuba-sem-foto { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
+.card-catalogo-nome { font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; text-align: center; line-height: 1.25; }
+.card-catalogo-item.excluir-mode { position: relative; }
+.card-catalogo-del { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border-radius: 50%; background: rgba(239,68,68,0.85); color: #fff; border: none; font-size: 10px; font-weight: 800; cursor: pointer; z-index: 2; }
+#card-prato-foto-preview img { max-width: 120px; border-radius: 10px; margin-top: 8px; display: block; }
+
+/* Modal de seleção de prato */
+.card-seletor-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); z-index: 200; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card-seletor-modal { background: var(--s1); border-radius: 18px; padding: 18px; max-width: 480px; width: 100%; max-height: 80vh; display: flex; flex-direction: column; gap: 10px; border: 2px solid var(--accent); }
+.card-seletor-head { display: flex; justify-content: space-between; align-items: center; font-size: 15px; }
+.card-seletor-modal .card-catalogo-grid { overflow-y: auto; max-height: 55vh; }
+
+/* Recorte de foto — arraste + zoom, corte quadrado igual a cuba */
+.card-crop-frame { width: 100%; aspect-ratio: 1; border-radius: 14px; overflow: hidden; background: #000; position: relative; touch-action: none; cursor: grab; margin: 0 auto; }
+.card-crop-frame:active { cursor: grabbing; }
+.card-crop-frame img { position: absolute; top: 0; left: 0; transform-origin: 0 0; max-width: none; user-select: none; -webkit-user-drag: none; }
+#card-crop-zoom { width: 100%; }
+@media (max-width: 480px) {
+  .card-cuba-grid, .card-catalogo-grid { grid-template-columns: repeat(3, 1fr); }
+}
 @media (max-width: 380px) {
   .real-money-row { grid-template-columns: 1fr 58px 92px 32px; gap: 5px; }
   .real-money-row.no-qtd { grid-template-columns: 1fr 92px 32px; }
@@ -842,6 +884,94 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- CARDÁPIO DA SEMANA -->
+  <div id="p-cardapio" class="page">
+    <div class="real-section">
+      <div class="real-head" id="card-dias-tabs"></div>
+
+      <div id="card-config" class="real-alert" style="display:none"></div>
+      <div id="card-config-pratos" class="real-alert" style="display:none"></div>
+
+      <div class="real-card" id="card-alerta-card" style="display:none">
+        <div class="real-card-title">⚠️ Estoque baixo neste cardápio</div>
+        <div class="card-alert-list" id="card-alerta-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">🍽️ Buffet principal <span id="card-cubas-total" class="sheet-muted"></span>
+          <button class="btn-sm" onclick="abrirSeletorPrato('buffet_principal')">+ cuba</button>
+        </div>
+        <div class="card-cuba-grid" id="card-buffet_principal-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">🔥 Rechaud redondo (R1-R3)
+          <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_redondo')">+ cuba</button>
+        </div>
+        <div class="card-cuba-grid" id="card-rechaud_redondo-list"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">🔥 Rechaud retangular (R4-R5)
+          <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_retangular')">+ cuba</button>
+        </div>
+        <div class="card-cuba-grid" id="card-rechaud_retangular-list"></div>
+      </div>
+
+      <div class="real-form-actions">
+        <button class="btn-sm" onclick="duplicarCardapioDeOutroDia()">📋 Duplicar de outro dia</button>
+        <button class="btn-sm" onclick="imprimirCardapio()">🖨️ Imprimir</button>
+      </div>
+      <button class="btn-export btn-success" id="card-btn-salvar" onclick="salvarCardapio()">Salvar cardápio de <span id="card-dia-label"></span></button>
+      <div class="sheet-muted" id="card-atualizado" style="margin-top:6px"></div>
+
+      <div class="real-card">
+        <div class="real-card-title">📸 Catálogo de pratos <button class="btn-sm" onclick="toggleFormNovoPrato()">+ cadastrar prato</button></div>
+        <div id="card-prato-form" style="display:none">
+          <div class="real-form-actions">
+            <input class="small-input" id="card-prato-nome" type="text" maxlength="120" placeholder="Nome do prato">
+            <input class="small-input" id="card-prato-produto-busca" type="text" placeholder="Produto do estoque (opcional)" oninput="buscaCardPratoProduto(this.value)" autocomplete="off">
+          </div>
+          <div class="ac-list" id="card-prato-produto-ac"></div>
+          <input type="file" id="card-prato-foto-input" accept="image/*" style="margin-top:8px">
+          <div id="card-prato-foto-preview"></div>
+          <button class="btn-sm success" style="margin-top:8px" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+        </div>
+        <input class="small-input" id="card-catalogo-busca" type="text" placeholder="Buscar no catálogo..." oninput="carregarCatalogoPratos(this.value)" autocomplete="off" style="margin-top:10px">
+        <div class="card-catalogo-grid" id="card-catalogo-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="card-seletor-overlay" class="card-seletor-overlay" style="display:none" onclick="if(event.target===this) fecharSeletorPrato()">
+    <div class="card-seletor-modal">
+      <div class="card-seletor-head">
+        <b>Escolher prato</b>
+        <button class="btn-sm" onclick="fecharSeletorPrato()">✕</button>
+      </div>
+      <input class="small-input" id="card-seletor-busca" type="text" placeholder="Buscar prato no catálogo..." oninput="renderSeletorPrato(this.value)" autocomplete="off">
+      <div class="card-catalogo-grid" id="card-seletor-grid"></div>
+    </div>
+  </div>
+
+  <div id="card-crop-overlay" class="card-seletor-overlay" style="display:none">
+    <div class="card-seletor-modal" style="max-width:360px">
+      <div class="card-seletor-head">
+        <b>Ajustar foto</b>
+        <button class="btn-sm" onclick="cancelarCropFoto()">✕</button>
+      </div>
+      <div class="card-crop-frame" id="card-crop-frame">
+        <img id="card-crop-img" draggable="false">
+      </div>
+      <input type="range" id="card-crop-zoom" min="100" max="300" value="100" oninput="aplicarCropTransform()">
+      <div class="sheet-muted" style="text-align:center">Arraste a foto pra posicionar · use a régua pra dar zoom</div>
+      <div class="real-form-actions">
+        <button class="btn-sm" onclick="cancelarCropFoto()">Cancelar</button>
+        <button class="btn-sm success" onclick="confirmarCropFoto()">Usar esta foto</button>
+      </div>
+    </div>
+  </div>
+
   <!-- PLANILHA MENSAL -->
   <div id="p-planilha" class="page">
     <div class="sheet-section">
@@ -1310,6 +1440,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" onclick="goPage('estoque', this)"><span class="icon">📦</span>Estoque</button>
   <button class="nav-btn" onclick="goPage('hist', this)"><span class="icon">📋</span>Histórico</button>
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
+  <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
@@ -1607,14 +1738,14 @@ async function loadSession() {
   // Liberações com FALLBACK por papel (à prova de falha — admin sempre vê tudo,
   // mesmo se /api/me não trouxer as permissões).
   const ROLE_DEF = {
-    admin:    { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true },
-    gerente:  { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false },
-    operador: { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false }
+    admin:    { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:true, admin:true, cardapio:true },
+    gerente:  { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true },
+    operador: { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }
   };
   const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
   const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
   const P = {};
-  ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
+  ['lancar','dia','planilha','contas','exportar','ia','auditoria','alertas','agenda','pendencias','admin','cardapio'].forEach(k => { P[k] = (typeof srvP[k] === 'boolean') ? srvP[k] : !!baseP[k]; });
   window.permPendencias = P.pendencias;
   const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
   gate('nav-admin', P.admin);
@@ -1622,6 +1753,7 @@ async function loadSession() {
   gate('nav-audit', P.auditoria);
   gate('nav-export', P.exportar);
   gate('nav-realidade', P.dia);
+  gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
   gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
@@ -1631,7 +1763,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
+    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-cardapio','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -1684,6 +1816,7 @@ function goPage(id, btn) {
   if (id === 'estoque') loadEstoque();
   if (id === 'hist') loadHist();
   if (id === 'realidade') loadRealidade();
+  if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
   if (id === 'relatorios') loadRelatorios();
   if (id === 'pagamentos') loadPagamentos();
@@ -2575,6 +2708,421 @@ function atualizarRealTotais() {
     insight.textContent = `Recebido ${fmtBRLMoney(totalPag)}, cortes ${fmtBRLMoney(totalCortes)} e despesas ${fmtBRLMoney(totalDespesas)}. Resultado estimado: ${fmtBRLMoney(resultado)}.`;
   }
   atualizarConferenciaCaixa();
+}
+
+// ==================== CARDÁPIO DA SEMANA (com catálogo de pratos + foto) ====================
+const DIAS_SEMANA_CARDAPIO = [
+  { key: 'segunda', label: 'Segunda' },
+  { key: 'terca', label: 'Terça' },
+  { key: 'quarta', label: 'Quarta' },
+  { key: 'quinta', label: 'Quinta' },
+  { key: 'sexta', label: 'Sexta' },
+  { key: 'sabado', label: 'Sábado' },
+  { key: 'domingo', label: 'Domingo' },
+];
+let cardDiaAtual = DIAS_SEMANA_CARDAPIO[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1].key;
+// Estado em memória do dia atual — a fonte da verdade não é mais o DOM (inputs), é este objeto.
+let cardapioEstado = { buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [] };
+let catalogoPratos = [];
+let cardSeletorSecaoAlvo = null;
+let cardSeletorIdxTroca = null;
+let cardPratoProdutoSel = null;
+let cardPratoFotoBase64 = null;
+
+function renderCardDiasTabs() {
+  const el = document.getElementById('card-dias-tabs');
+  if (!el) return;
+  el.innerHTML = DIAS_SEMANA_CARDAPIO.map(d =>
+    `<button class="btn-sm${d.key === cardDiaAtual ? ' success' : ''}" onclick="selecionarDiaCardapio('${d.key}')">${d.label}</button>`
+  ).join('');
+}
+
+function selecionarDiaCardapio(dia) {
+  cardDiaAtual = dia;
+  loadCardapio();
+}
+
+// ---- Cubas (grade do dia) ----
+function cubaFotoHtml(item) {
+  if (item.foto_url) return `<img class="card-cuba-foto" src="${escapeHtml(item.foto_url)}" alt="">`;
+  return `<div class="card-cuba-sem-foto">🍽️</div>`;
+}
+
+function cubaItemHtml(secao, item, idx) {
+  const baixo = item.estoque_baixo ? ' estoque-baixo' : '';
+  return `<div class="card-cuba-item${baixo}" onclick="abrirSeletorPrato('${secao}', ${idx})">
+    <div class="card-cuba-badge">${idx + 1}</div>
+    <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
+    ${cubaFotoHtml(item)}
+    <div class="card-cuba-nome">${escapeHtml(item.nome || '')}</div>
+    ${item.cubas > 1 ? `<div class="card-cuba-cubas-badge">${item.cubas} cubas</div>` : ''}
+    ${item.estoque_baixo ? `<div class="card-cuba-warn">⚠️</div>` : ''}
+  </div>`;
+}
+
+function renderCardapioSecao(secao) {
+  const el = document.getElementById(`card-${secao}-list`);
+  if (!el) return;
+  const itens = cardapioEstado[secao] || [];
+  el.innerHTML = itens.map((item, idx) => cubaItemHtml(secao, item, idx)).join('')
+    + `<div class="card-cuba-item vazia" onclick="abrirSeletorPrato('${secao}')">+</div>`;
+}
+
+function renderTodasCubas() {
+  renderCardapioSecao('buffet_principal');
+  renderCardapioSecao('rechaud_redondo');
+  renderCardapioSecao('rechaud_retangular');
+  atualizarCardCubasTotal();
+  atualizarCardAlerta();
+}
+
+function removerCuba(secao, idx) {
+  cardapioEstado[secao].splice(idx, 1);
+  renderTodasCubas();
+}
+
+function atualizarCardCubasTotal() {
+  const el = document.getElementById('card-cubas-total');
+  if (!el) return;
+  const total = (cardapioEstado.buffet_principal || []).reduce((s, i) => s + Number(i.cubas || 1), 0);
+  el.textContent = `(${total} cubas)`;
+}
+
+function atualizarCardAlerta() {
+  const card = document.getElementById('card-alerta-card');
+  const list = document.getElementById('card-alerta-list');
+  if (!card || !list) return;
+  const todos = [...cardapioEstado.buffet_principal, ...cardapioEstado.rechaud_redondo, ...cardapioEstado.rechaud_retangular]
+    .filter(i => i.estoque_baixo);
+  if (!todos.length) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+  list.innerHTML = todos.map(item =>
+    `<div class="card-alert-item"><span>${escapeHtml(item.nome)}</span><b>${item.estoque_atual ?? '?'} ${escapeHtml(item.estoque_unidade || '')}</b></div>`
+  ).join('');
+}
+
+function coletarCardapioSecao(secao) {
+  return (cardapioEstado[secao] || []).map(i => ({ prato_id: i.prato_id, cubas: i.cubas || 1, obs: i.obs || '' }));
+}
+
+// ---- Seletor de prato (modal) ----
+function abrirSeletorPrato(secao, idxTroca = null) {
+  cardSeletorSecaoAlvo = secao;
+  cardSeletorIdxTroca = idxTroca;
+  document.getElementById('card-seletor-busca').value = '';
+  document.getElementById('card-seletor-overlay').style.display = 'flex';
+  renderSeletorPrato('');
+}
+
+function fecharSeletorPrato() {
+  document.getElementById('card-seletor-overlay').style.display = 'none';
+  cardSeletorSecaoAlvo = null;
+  cardSeletorIdxTroca = null;
+}
+
+function renderSeletorPrato(q) {
+  const el = document.getElementById('card-seletor-grid');
+  const termo = (q || '').toLowerCase().trim();
+  const filtrados = termo ? catalogoPratos.filter(p => p.nome.toLowerCase().includes(termo)) : catalogoPratos;
+  if (!filtrados.length) { el.innerHTML = '<div class="sheet-muted" style="padding:10px 2px">Nenhum prato no catálogo ainda. Cadastre um lá embaixo.</div>'; return; }
+  el.innerHTML = filtrados.map(p => `
+    <div class="card-catalogo-item" onclick="escolherPratoNoSeletor(${p.id})">
+      ${p.foto_url ? `<img src="${escapeHtml(p.foto_url)}" alt="">` : '<div class="card-cuba-sem-foto">🍽️</div>'}
+      <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
+    </div>`).join('');
+}
+
+function escolherPratoNoSeletor(pratoId) {
+  const prato = catalogoPratos.find(p => p.id === pratoId);
+  if (!prato || !cardSeletorSecaoAlvo) return;
+  const secao = cardSeletorSecaoAlvo;
+  const idx = cardSeletorIdxTroca;
+  fecharSeletorPrato();
+  // Estoque (estoque_atual/estoque_baixo) só vem calculado do servidor depois de Salvar +
+  // recarregar — nesta escolha ainda não-salva, mostra só nome/foto (sem alerta de estoque).
+  const novoItem = { prato_id: prato.id, nome: prato.nome, foto_url: prato.foto_url, cubas: 1, obs: '', estoque_baixo: false, estoque_atual: null, estoque_unidade: null };
+  if (idx !== null && idx !== undefined) {
+    const cubasAntigas = cardapioEstado[secao][idx]?.cubas || 1;
+    novoItem.cubas = cubasAntigas;
+    cardapioEstado[secao][idx] = novoItem;
+  } else {
+    cardapioEstado[secao].push(novoItem);
+  }
+  renderTodasCubas();
+}
+
+// ---- Catálogo de pratos ----
+async function carregarCatalogoPratos(q = '') {
+  try {
+    const d = await api('/api/pratos-cardapio' + (q ? '?q=' + encodeURIComponent(q) : ''));
+    const configEl = document.getElementById('card-config-pratos');
+    if (d.configuracao_pendente) {
+      configEl.style.display = 'block';
+      configEl.textContent = 'Configure a tabela pratos_cardapio no Supabase para cadastrar pratos com foto.';
+    } else {
+      configEl.style.display = 'none';
+    }
+    catalogoPratos = d.pratos || [];
+    const el = document.getElementById('card-catalogo-grid');
+    if (!catalogoPratos.length) { el.innerHTML = '<div class="sheet-muted" style="padding:6px 2px">Nenhum prato cadastrado ainda.</div>'; return; }
+    el.innerHTML = catalogoPratos.map(p => `
+      <div class="card-catalogo-item">
+        ${p.foto_url ? `<img src="${escapeHtml(p.foto_url)}" alt="">` : '<div class="card-cuba-sem-foto">🍽️</div>'}
+        <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
+        <button class="card-catalogo-del" onclick="event.stopPropagation();excluirPratoCatalogo(${p.id})" title="Excluir do catálogo">✕</button>
+      </div>`).join('');
+  } catch(e) { handleApiError(e, true); }
+}
+
+function toggleFormNovoPrato() {
+  const el = document.getElementById('card-prato-form');
+  el.style.display = el.style.display === 'none' ? 'block' : 'none';
+}
+
+async function buscaCardPratoProduto(q) {
+  const ac = document.getElementById('card-prato-produto-ac');
+  if (cardPratoProdutoSel && cardPratoProdutoSel.nome !== q) cardPratoProdutoSel = null;
+  if (!q || q.length < 2) { ac.classList.remove('open'); return; }
+  try {
+    const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
+    if (!items.length) { ac.classList.remove('open'); return; }
+    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown='selCardPratoProduto(${p.id}, ${JSON.stringify(p.nome)})'>${escapeHtml(p.nome)} <span class="sheet-muted">(${p.qtd} ${escapeHtml(p.unidade || '')})</span></div>`).join('');
+    ac.classList.add('open');
+  } catch(e) {}
+}
+
+function selCardPratoProduto(id, nome) {
+  cardPratoProdutoSel = { id, nome };
+  document.getElementById('card-prato-produto-busca').value = nome;
+  document.getElementById('card-prato-produto-ac').classList.remove('open');
+}
+
+// ---- Recorte de foto (arraste + zoom, saída quadrada) ----
+let cropNatural = { w: 0, h: 0 };
+let cropPan = { x: 0, y: 0 };
+let cropDrag = null;
+let cropFrameSize = 300;
+
+document.addEventListener('DOMContentLoaded', () => {
+  const fotoInput = document.getElementById('card-prato-foto-input');
+  if (fotoInput) fotoInput.addEventListener('change', () => {
+    const file = fotoInput.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => abrirCropFoto(reader.result);
+    reader.readAsDataURL(file);
+  });
+
+  const frame = document.getElementById('card-crop-frame');
+  if (frame) {
+    frame.addEventListener('pointerdown', (e) => {
+      cropDrag = { startX: e.clientX, startY: e.clientY, panX: cropPan.x, panY: cropPan.y };
+      frame.setPointerCapture(e.pointerId);
+    });
+    frame.addEventListener('pointermove', (e) => {
+      if (!cropDrag) return;
+      cropPan.x = cropDrag.panX + (e.clientX - cropDrag.startX);
+      cropPan.y = cropDrag.panY + (e.clientY - cropDrag.startY);
+      aplicarCropTransform();
+    });
+    frame.addEventListener('pointerup', () => { cropDrag = null; });
+    frame.addEventListener('pointercancel', () => { cropDrag = null; });
+  }
+});
+
+function abrirCropFoto(dataUrl) {
+  const img = document.getElementById('card-crop-img');
+  img.onload = () => {
+    cropNatural = { w: img.naturalWidth, h: img.naturalHeight };
+    cropPan = { x: 0, y: 0 };
+    document.getElementById('card-crop-zoom').value = 100;
+    // O overlay precisa estar visível ANTES de medir o frame — com display:none o
+    // getBoundingClientRect() retorna 0 (bug já visto: imagem sumia, ficava tudo preto).
+    document.getElementById('card-crop-overlay').style.display = 'flex';
+    cropFrameSize = document.getElementById('card-crop-frame').getBoundingClientRect().width;
+    aplicarCropTransform();
+  };
+  img.src = dataUrl;
+}
+
+function cropTotalScale() {
+  const zoom = Number(document.getElementById('card-crop-zoom').value) / 100;
+  const baseScale = Math.max(cropFrameSize / cropNatural.w, cropFrameSize / cropNatural.h);
+  return baseScale * zoom;
+}
+
+// Canto superior-esquerdo da imagem (em px, relativo ao canto do quadro) — calculado direto
+// aqui, sem usar translate(-50%,-50%) no CSS: essa combinação com scale() e transform-origin
+// central amplifica o deslocamento de forma não-intuitiva (bug real encontrado e confirmado
+// com medição no navegador). Com transform-origin:0 0 no CSS, este valor bate exatamente com
+// onde a imagem é desenhada, então a mesma fórmula serve tanto pra exibir quanto pra recortar.
+function cropCantoImagem(totalScale) {
+  return {
+    x: cropFrameSize / 2 - (cropNatural.w * totalScale) / 2 + cropPan.x,
+    y: cropFrameSize / 2 - (cropNatural.h * totalScale) / 2 + cropPan.y,
+  };
+}
+
+function aplicarCropTransform() {
+  if (!cropNatural.w) return;
+  const totalScale = cropTotalScale();
+  // Trava o arraste pra imagem nunca deixar de cobrir o quadro (sem borda vazia).
+  const maxPanX = Math.max(0, (cropNatural.w * totalScale - cropFrameSize) / 2);
+  const maxPanY = Math.max(0, (cropNatural.h * totalScale - cropFrameSize) / 2);
+  cropPan.x = Math.max(-maxPanX, Math.min(maxPanX, cropPan.x));
+  cropPan.y = Math.max(-maxPanY, Math.min(maxPanY, cropPan.y));
+  const canto = cropCantoImagem(totalScale);
+  const img = document.getElementById('card-crop-img');
+  img.style.transform = `translate(${canto.x}px, ${canto.y}px) scale(${totalScale})`;
+}
+
+function cancelarCropFoto() {
+  document.getElementById('card-crop-overlay').style.display = 'none';
+  document.getElementById('card-prato-foto-input').value = '';
+}
+
+function confirmarCropFoto() {
+  const img = document.getElementById('card-crop-img');
+  const totalScale = cropTotalScale();
+  const canto = cropCantoImagem(totalScale);
+  const srcX = -canto.x / totalScale;
+  const srcY = -canto.y / totalScale;
+  const srcSize = cropFrameSize / totalScale;
+
+  const OUT = 500;
+  const canvas = document.createElement('canvas');
+  canvas.width = OUT; canvas.height = OUT;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, srcX, srcY, srcSize, srcSize, 0, 0, OUT, OUT);
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+  cardPratoFotoBase64 = { data: dataUrl.split(',')[1], mediaType: 'image/jpeg' };
+  document.getElementById('card-prato-foto-preview').innerHTML = `<img src="${dataUrl}">`;
+  document.getElementById('card-crop-overlay').style.display = 'none';
+}
+
+async function salvarPratoCatalogo() {
+  const nome = document.getElementById('card-prato-nome').value.trim();
+  if (!nome) { toast('Digite o nome do prato', 'err'); return; }
+  try {
+    let foto_url = '';
+    if (cardPratoFotoBase64) {
+      const r = await apiPost('/api/pratos-cardapio/foto', { imagem: cardPratoFotoBase64.data, mediaType: cardPratoFotoBase64.mediaType });
+      foto_url = r.foto_url;
+    }
+    await apiPost('/api/pratos-cardapio', { nome, foto_url, produto_id: cardPratoProdutoSel?.id || null });
+    toast('Prato cadastrado!', 'ok');
+    document.getElementById('card-prato-nome').value = '';
+    document.getElementById('card-prato-produto-busca').value = '';
+    document.getElementById('card-prato-foto-preview').innerHTML = '';
+    document.getElementById('card-prato-foto-input').value = '';
+    cardPratoProdutoSel = null;
+    cardPratoFotoBase64 = null;
+    toggleFormNovoPrato();
+    await carregarCatalogoPratos();
+  } catch(e) { toast(e.message || 'Erro ao cadastrar prato', 'err'); }
+}
+
+async function excluirPratoCatalogo(id) {
+  const ok = await askConfirm('', { titulo: 'Remover este prato do catálogo?' });
+  if (!ok) return;
+  try {
+    await apiPost(`/api/pratos-cardapio/${id}`, {}, 'DELETE');
+    toast('Prato removido do catálogo', 'ok');
+    await carregarCatalogoPratos();
+  } catch(e) { toast(e.message || 'Erro ao remover prato', 'err'); }
+}
+
+// ---- Carregar / salvar o dia ----
+async function loadCardapio() {
+  renderCardDiasTabs();
+  const label = DIAS_SEMANA_CARDAPIO.find(d => d.key === cardDiaAtual)?.label || '';
+  document.getElementById('card-dia-label').textContent = label;
+  const configEl = document.getElementById('card-config');
+  await carregarCatalogoPratos();
+  try {
+    const d = await api('/api/cardapio?dia=' + encodeURIComponent(cardDiaAtual));
+    if (d.configuracao_pendente) {
+      configEl.style.display = 'block';
+      configEl.textContent = 'Configure a tabela cardapio_semanal no Supabase para usar o cardápio da semana.';
+    } else {
+      configEl.style.display = 'none';
+    }
+    cardapioEstado.buffet_principal = d.buffet_principal || [];
+    cardapioEstado.rechaud_redondo = d.rechaud_redondo || [];
+    cardapioEstado.rechaud_retangular = d.rechaud_retangular || [];
+    renderTodasCubas();
+    const at = document.getElementById('card-atualizado');
+    at.textContent = d.updated_at ? `Última edição: ${new Date(d.updated_at).toLocaleString('pt-BR')}${d.responsavel ? ' · ' + d.responsavel : ''}` : 'Ainda não salvo.';
+  } catch(e) {
+    handleApiError(e, true);
+  }
+}
+
+async function salvarCardapio() {
+  try {
+    const body = {
+      dia_semana: cardDiaAtual,
+      buffet_principal: coletarCardapioSecao('buffet_principal'),
+      rechaud_redondo: coletarCardapioSecao('rechaud_redondo'),
+      rechaud_retangular: coletarCardapioSecao('rechaud_retangular'),
+    };
+    await apiPost('/api/cardapio', body);
+    toast('Cardápio salvo!', 'ok');
+    await loadCardapio();
+  } catch(e) { toast(e.message || 'Erro ao salvar cardápio', 'err'); }
+}
+
+async function duplicarCardapioDeOutroDia() {
+  const opcoes = DIAS_SEMANA_CARDAPIO.filter(d => d.key !== cardDiaAtual).map(d => d.label).join(', ');
+  const escolha = await askPrompt(`Copiar o cardápio de qual dia? (${opcoes})`, '');
+  if (!escolha) return;
+  const alvo = DIAS_SEMANA_CARDAPIO.find(d => d.label.toLowerCase() === escolha.trim().toLowerCase() || d.key === escolha.trim().toLowerCase());
+  if (!alvo) { toast('Dia não reconhecido. Digite exatamente como aparece nas abas.', 'err'); return; }
+  try {
+    const d = await api('/api/cardapio?dia=' + encodeURIComponent(alvo.key));
+    cardapioEstado.buffet_principal = d.buffet_principal || [];
+    cardapioEstado.rechaud_redondo = d.rechaud_redondo || [];
+    cardapioEstado.rechaud_retangular = d.rechaud_retangular || [];
+    renderTodasCubas();
+    toast(`Cardápio de ${alvo.label} copiado — revise e clique em Salvar para gravar em ${DIAS_SEMANA_CARDAPIO.find(x=>x.key===cardDiaAtual).label}`, 'ok');
+  } catch(e) { toast(e.message || 'Erro ao copiar cardápio', 'err'); }
+}
+
+function imprimirCardapio() {
+  const label = DIAS_SEMANA_CARDAPIO.find(d => d.key === cardDiaAtual)?.label.toUpperCase() || '';
+  const linha = (item, numero) => `<tr><td>${numero}</td><td>${escapeHtml(item.nome)}${item.cubas > 1 ? ` <b>(${item.cubas} CUBAS)</b>` : ''}${item.obs ? `<br><small>${escapeHtml(item.obs)}</small>` : ''}</td></tr>`;
+  const buffet = cardapioEstado.buffet_principal;
+  const redondo = cardapioEstado.rechaud_redondo;
+  const retangular = cardapioEstado.rechaud_retangular;
+  const totalCubas = buffet.reduce((s, i) => s + Number(i.cubas || 1), 0);
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Cardápio ${label}</title>
+    <style>
+      body{font-family:Arial,sans-serif;padding:24px;color:#111}
+      h1{font-size:20px;text-align:center;margin-bottom:4px}
+      h2{font-size:14px;color:#555;text-align:center;margin-top:0}
+      h3{font-size:13px;text-transform:uppercase;border-bottom:2px solid #333;padding-bottom:4px;margin-top:26px}
+      table{width:100%;border-collapse:collapse;margin-top:8px}
+      td{padding:6px 8px;border-bottom:1px solid #ddd;font-size:13px;vertical-align:top}
+      td:first-child{width:28px;font-weight:800}
+      small{color:#666}
+      @media print{body{padding:0}}
+    </style></head><body>
+    <h1>BUFFET TOCA — PLANO DE PRODUÇÃO</h1>
+    <h2>${label}</h2>
+    <h3>Buffet principal (${totalCubas} cubas)</h3>
+    <table>${buffet.map((item, i) => linha(item, i + 1)).join('')}</table>
+    <h3>Bancada lateral de rechauds redondos</h3>
+    <table>${redondo.map((item, i) => linha(item, 'R' + (i + 1))).join('')}</table>
+    <h3>Bancada lateral de rechauds retangulares</h3>
+    <table>${retangular.map((item, i) => linha(item, 'R' + (i + 4))).join('')}</table>
+  </body></html>`;
+  const win = window.open('', '_blank');
+  if (!win) { toast('Permita pop-ups para imprimir', 'err'); return; }
+  win.document.write(html);
+  win.document.close();
+  win.focus();
+  win.print();
 }
 
 function modeloMovimentoDia() {
