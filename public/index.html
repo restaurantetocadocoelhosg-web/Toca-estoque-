@@ -941,6 +941,7 @@ select.big-input { font-size: 14px; }
       <div class="real-card">
         <div class="real-card-title">📸 Catálogo de pratos <button class="btn-sm" onclick="toggleFormNovoPrato()">+ cadastrar prato</button></div>
         <div id="card-prato-form" style="display:none">
+          <div class="real-card-title" id="card-prato-form-titulo" style="margin-bottom:8px">Cadastrar prato novo</div>
           <div class="real-form-actions">
             <input class="small-input" id="card-prato-nome" type="text" maxlength="120" placeholder="Nome do prato">
             <input class="small-input" id="card-prato-produto-busca" type="text" placeholder="Produto do estoque (opcional)" oninput="buscaCardPratoProduto(this.value)" autocomplete="off">
@@ -948,7 +949,10 @@ select.big-input { font-size: 14px; }
           <div class="ac-list" id="card-prato-produto-ac"></div>
           <input type="file" id="card-prato-foto-input" accept="image/*" style="margin-top:8px">
           <div id="card-prato-foto-preview"></div>
-          <button class="btn-sm success" id="card-prato-btn-salvar" style="margin-top:8px" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+          <div class="real-form-actions" style="margin-top:8px">
+            <button class="btn-sm" onclick="fecharFormPrato()">Cancelar</button>
+            <button class="btn-sm success" id="card-prato-btn-salvar" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+          </div>
         </div>
         <input class="small-input" id="card-catalogo-busca" type="text" placeholder="Buscar no catálogo..." oninput="carregarCatalogoPratos(this.value)" autocomplete="off" style="margin-top:10px">
         <div class="card-catalogo-grid" id="card-catalogo-grid"></div>
@@ -2941,7 +2945,7 @@ async function carregarCatalogoPratos(q = '') {
     const el = document.getElementById('card-catalogo-grid');
     if (!catalogoPratos.length) { el.innerHTML = '<div class="sheet-muted" style="padding:6px 2px">Nenhum prato cadastrado ainda.</div>'; return; }
     el.innerHTML = catalogoPratos.map(p => `
-      <div class="card-catalogo-item">
+      <div class="card-catalogo-item" onclick="abrirEdicaoPrato(${p.id})">
         ${p.foto_url ? `<img src="${escapeHtml(p.foto_url)}" alt="">` : '<div class="card-cuba-sem-foto">🍽️</div>'}
         <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
         <button class="card-catalogo-del" onclick="event.stopPropagation();excluirPratoCatalogo(${p.id})" title="Excluir do catálogo">✕</button>
@@ -2949,9 +2953,45 @@ async function carregarCatalogoPratos(q = '') {
   } catch(e) { handleApiError(e, true); }
 }
 
+let cardPratoEditandoId = null;
+
 function toggleFormNovoPrato() {
+  cardPratoEditandoId = null;
+  limparFormPrato();
+  document.getElementById('card-prato-form-titulo').textContent = 'Cadastrar prato novo';
+  document.getElementById('card-prato-btn-salvar').textContent = 'Salvar prato no catálogo';
   const el = document.getElementById('card-prato-form');
   el.style.display = el.style.display === 'none' ? 'block' : 'none';
+  if (el.style.display === 'block') el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function limparFormPrato() {
+  document.getElementById('card-prato-nome').value = '';
+  document.getElementById('card-prato-produto-busca').value = '';
+  document.getElementById('card-prato-foto-preview').innerHTML = '';
+  document.getElementById('card-prato-foto-input').value = '';
+  cardPratoProdutoSel = null;
+  cardPratoFotoBase64 = null;
+}
+
+function abrirEdicaoPrato(id) {
+  const prato = catalogoPratos.find(p => p.id === id);
+  if (!prato) return;
+  cardPratoEditandoId = id;
+  limparFormPrato();
+  document.getElementById('card-prato-nome').value = prato.nome;
+  if (prato.foto_url) document.getElementById('card-prato-foto-preview').innerHTML = `<img src="${escapeHtml(prato.foto_url)}">`;
+  document.getElementById('card-prato-form-titulo').textContent = `Editando "${prato.nome}"`;
+  document.getElementById('card-prato-btn-salvar').textContent = 'Salvar alterações';
+  const el = document.getElementById('card-prato-form');
+  el.style.display = 'block';
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function fecharFormPrato() {
+  cardPratoEditandoId = null;
+  limparFormPrato();
+  document.getElementById('card-prato-form').style.display = 'none';
 }
 
 async function buscaCardPratoProduto(q) {
@@ -3085,23 +3125,27 @@ function confirmarCropFoto() {
 async function salvarPratoCatalogo() {
   const nome = document.getElementById('card-prato-nome').value.trim();
   if (!nome) { toast('Digite o nome do prato', 'err'); return; }
+  const editando = catalogoPratos.find(p => p.id === cardPratoEditandoId);
   try {
-    let foto_url = '';
+    // Mantém a foto atual se estiver editando e não escolheu uma foto nova.
+    let foto_url = editando?.foto_url || '';
     if (cardPratoFotoBase64) {
       const r = await apiPost('/api/pratos-cardapio/foto', { imagem: cardPratoFotoBase64.data, mediaType: cardPratoFotoBase64.mediaType });
       foto_url = r.foto_url;
     }
-    await apiPost('/api/pratos-cardapio', { nome, foto_url, produto_id: cardPratoProdutoSel?.id || null });
-    toast('Prato cadastrado!', 'ok');
-    document.getElementById('card-prato-nome').value = '';
-    document.getElementById('card-prato-produto-busca').value = '';
-    document.getElementById('card-prato-foto-preview').innerHTML = '';
-    document.getElementById('card-prato-foto-input').value = '';
-    cardPratoProdutoSel = null;
-    cardPratoFotoBase64 = null;
-    toggleFormNovoPrato();
+    const body = { nome, foto_url, produto_id: cardPratoProdutoSel?.id || null };
+    if (cardPratoEditandoId) {
+      await apiPost('/api/pratos-cardapio/' + cardPratoEditandoId, body, 'PUT');
+      toast('Prato atualizado!', 'ok');
+    } else {
+      await apiPost('/api/pratos-cardapio', body);
+      toast('Prato cadastrado!', 'ok');
+    }
+    cardPratoEditandoId = null;
+    limparFormPrato();
+    document.getElementById('card-prato-form').style.display = 'none';
     await carregarCatalogoPratos();
-  } catch(e) { toast(e.message || 'Erro ao cadastrar prato', 'err'); }
+  } catch(e) { toast(e.message || 'Erro ao salvar prato', 'err'); }
 }
 
 async function excluirPratoCatalogo(id) {
