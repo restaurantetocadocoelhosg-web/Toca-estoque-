@@ -2588,15 +2588,15 @@ app.delete('/api/pratos-cardapio/:id', auth, requirePerm('cardapio'), async (req
   }
 });
 
-// ==================== CARDÁPIO DA SEMANA ====================
-const DIAS_SEMANA_CARDAPIO = ['segunda','terca','quarta','quinta','sexta','sabado','domingo'];
-
-function isTabelaCardapioMissing(error) {
+// ==================== BANCO DE CARDÁPIOS SALVOS ====================
+// Cada "Salvar" pede um nome e cria um registro novo (ex: "Terça Mineira", "Quarta do
+// Rock") — nada se sobrescreve/apaga sozinho, formando uma biblioteca reutilizável.
+function isTabelaCardapiosSalvosMissing(error) {
   const msg = String(error?.message || error?.details || '');
   return error && (
     error.code === '42P01' ||
     error.code === 'PGRST205' ||
-    /cardapio_semanal|schema cache|does not exist|relation|column/i.test(msg)
+    /cardapios_salvos|schema cache|does not exist|relation|column/i.test(msg)
   );
 }
 
@@ -2610,14 +2610,7 @@ function normalizarSecaoCardapio(value, max = 20) {
   }).filter(row => row.prato_id);
 }
 
-async function montarCardapio(diaSemana) {
-  const { data: row, error } = await supabase.from('cardapio_semanal').select('*').eq('dia_semana', diaSemana).maybeSingle();
-  if (error) {
-    if (isTabelaCardapioMissing(error)) return { dia_semana: diaSemana, configuracao_pendente: true, buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [] };
-    throw error;
-  }
-  const base = row || { dia_semana: diaSemana, buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [], responsavel: '', updated_at: null };
-
+async function comDetalhesPratos(base) {
   const secoes = ['buffet_principal', 'rechaud_redondo', 'rechaud_retangular'];
   const idsPratos = [...new Set(
     secoes.flatMap(s => arrayFromMaybeJson(base[s]).map(item => item?.prato_id).filter(Boolean))
@@ -2647,65 +2640,118 @@ async function montarCardapio(diaSemana) {
       produto_arquivado: prod ? !(prod.ativo === 1 || prod.ativo === null) : false,
     };
   });
-
   return {
-    dia_semana: diaSemana,
+    id: base.id,
+    nome: base.nome,
     buffet_principal: comDetalhes(base.buffet_principal),
     rechaud_redondo: comDetalhes(base.rechaud_redondo),
     rechaud_retangular: comDetalhes(base.rechaud_retangular),
     responsavel: base.responsavel || '',
     updated_at: base.updated_at,
+    created_at: base.created_at,
   };
 }
 
-app.get('/api/cardapio', auth, requirePerm('cardapio'), async (req, res) => {
+app.get('/api/cardapios-salvos', auth, requirePerm('cardapio'), async (req, res) => {
   try {
-    const dia = String(req.query?.dia || '').toLowerCase();
-    if (!DIAS_SEMANA_CARDAPIO.includes(dia)) return res.status(400).json({ erro: 'Dia da semana inválido.' });
-    res.json(await montarCardapio(dia));
+    const q = sanitizeText(req.query?.q || '', 100);
+    let query = supabase.from('cardapios_salvos').select('id,nome,responsavel,updated_at,created_at').eq('ativo', 1).order('updated_at', { ascending: false });
+    if (q) query = query.ilike('nome', `%${q}%`);
+    const { data, error } = await query.limit(200);
+    if (error) {
+      if (isTabelaCardapiosSalvosMissing(error)) return res.json({ cardapios: [], configuracao_pendente: true });
+      throw error;
+    }
+    res.json({ cardapios: data || [] });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao carregar cardápios salvos.' });
+  }
+});
+
+app.get('/api/cardapios-salvos/:id', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Cardápio inválido.' });
+    const { data, error } = await supabase.from('cardapios_salvos').select('*').eq('id', id).maybeSingle();
+    if (error) {
+      if (isTabelaCardapiosSalvosMissing(error)) return res.status(500).json({ erro: 'Tabela cardapios_salvos precisa ser criada. Rode o arquivo SUPABASE_CARDAPIOS_SALVOS.sql no Supabase.' });
+      throw error;
+    }
+    if (!data) return res.status(404).json({ erro: 'Cardápio não encontrado.' });
+    res.json(await comDetalhesPratos(data));
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar cardápio.' });
   }
 });
 
-app.get('/api/cardapio/semana', auth, requirePerm('cardapio'), async (req, res) => {
+app.post('/api/cardapios-salvos', auth, requirePerm('cardapio'), async (req, res) => {
   try {
-    const dias = await Promise.all(DIAS_SEMANA_CARDAPIO.map(montarCardapio));
-    res.json({ dias });
-  } catch(e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao carregar a semana do cardápio.' });
-  }
-});
-
-app.post('/api/cardapio', auth, requirePerm('cardapio'), async (req, res) => {
-  try {
-    const dia = String(req.body?.dia_semana || '').toLowerCase();
-    if (!DIAS_SEMANA_CARDAPIO.includes(dia)) return res.status(400).json({ erro: 'Dia da semana inválido.' });
+    const nome = sanitizeText(req.body?.nome || '', 120);
+    if (!nome) return res.status(400).json({ erro: 'Dê um nome pro cardápio (ex: "Terça Mineira").' });
     const buffet_principal = normalizarSecaoCardapio(req.body?.buffet_principal, 20);
     const rechaud_redondo = normalizarSecaoCardapio(req.body?.rechaud_redondo, 10);
     const rechaud_retangular = normalizarSecaoCardapio(req.body?.rechaud_retangular, 10);
 
-    const { error } = await supabase.from('cardapio_semanal').upsert({
-      dia_semana: dia,
+    const { data, error } = await supabase.from('cardapios_salvos').insert({
+      nome,
       buffet_principal,
       rechaud_redondo,
       rechaud_retangular,
       responsavel: req.user.nome || req.user.username,
+      ativo: 1,
       updated_at: nowSP(),
-    }, { onConflict: 'dia_semana' });
+    }).select('*').single();
     if (error) {
-      if (isTabelaCardapioMissing(error)) {
-        return res.status(500).json({ erro: 'Tabela cardapio_semanal precisa ser criada. Rode o arquivo SUPABASE_CARDAPIO.sql no Supabase.' });
+      if (isTabelaCardapiosSalvosMissing(error)) {
+        return res.status(500).json({ erro: 'Tabela cardapios_salvos precisa ser criada. Rode o arquivo SUPABASE_CARDAPIOS_SALVOS.sql no Supabase.' });
       }
       throw error;
     }
-    await audit('cardapio_salvar', { dia_semana: dia, itens: buffet_principal.length + rechaud_redondo.length + rechaud_retangular.length }, req.user, getClientIp(req));
-    res.json(await montarCardapio(dia));
+    await audit('cardapio_criar', { id: data.id, nome, itens: buffet_principal.length + rechaud_redondo.length + rechaud_retangular.length }, req.user, getClientIp(req));
+    res.json(await comDetalhesPratos(data));
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao salvar cardápio.' });
+  }
+});
+
+app.put('/api/cardapios-salvos/:id', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Cardápio inválido.' });
+    const nome = sanitizeText(req.body?.nome || '', 120);
+    if (!nome) return res.status(400).json({ erro: 'Dê um nome pro cardápio.' });
+    const buffet_principal = normalizarSecaoCardapio(req.body?.buffet_principal, 20);
+    const rechaud_redondo = normalizarSecaoCardapio(req.body?.rechaud_redondo, 10);
+    const rechaud_retangular = normalizarSecaoCardapio(req.body?.rechaud_retangular, 10);
+
+    const { data, error } = await supabase.from('cardapios_salvos').update({
+      nome, buffet_principal, rechaud_redondo, rechaud_retangular,
+      responsavel: req.user.nome || req.user.username,
+      updated_at: nowSP(),
+    }).eq('id', id).select('*').single();
+    if (error) throw error;
+    await audit('cardapio_atualizar', { id, nome }, req.user, getClientIp(req));
+    res.json(await comDetalhesPratos(data));
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao atualizar cardápio.' });
+  }
+});
+
+app.delete('/api/cardapios-salvos/:id', auth, requirePerm('cardapio'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Cardápio inválido.' });
+    const { error } = await supabase.from('cardapios_salvos').update({ ativo: 0 }).eq('id', id);
+    if (error) throw error;
+    await audit('cardapio_excluir', { id }, req.user, getClientIp(req));
+    res.json({ ok: true });
+  } catch(e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao excluir cardápio.' });
   }
 });
 

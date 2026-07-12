@@ -363,6 +363,11 @@ select.big-input { font-size: 14px; }
 .card-seletor-modal { background: var(--s1); border-radius: 18px; padding: 18px; max-width: 480px; width: 100%; max-height: 80vh; display: flex; flex-direction: column; gap: 10px; border: 2px solid var(--accent); }
 .card-seletor-head { display: flex; justify-content: space-between; align-items: center; font-size: 15px; }
 .card-seletor-modal .card-catalogo-grid { overflow-y: auto; max-height: 55vh; }
+.card-salvos-lista { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 260px; overflow-y: auto; }
+.card-salvos-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; font-size: 13px; }
+.card-salvos-item:hover { border-color: var(--accent); }
+.card-salvos-item b { color: var(--text); }
+.card-salvos-item span { color: var(--muted); font-size: 11px; }
 
 /* Recorte de foto — arraste + zoom, corte quadrado igual a cuba */
 .card-crop-frame { width: 100%; aspect-ratio: 1; border-radius: 14px; overflow: hidden; background: #000; position: relative; touch-action: none; cursor: grab; margin: 0 auto; }
@@ -887,7 +892,14 @@ select.big-input { font-size: 14px; }
   <!-- CARDÁPIO DA SEMANA -->
   <div id="p-cardapio" class="page">
     <div class="real-section">
-      <div class="real-head" id="card-dias-tabs"></div>
+      <div class="real-card">
+        <div class="real-card-title">📂 <span id="card-titulo-atual">Novo cardápio</span></div>
+        <div class="real-form-actions">
+          <input class="small-input" id="card-busca-salvos" type="text" placeholder="🔍 Buscar cardápio salvo (ex: Terça Mineira)..." oninput="buscarCardapiosSalvos(this.value)" autocomplete="off">
+          <button class="btn-sm" onclick="novoCardapioEmBranco()">+ Novo cardápio</button>
+        </div>
+        <div class="card-salvos-lista" id="card-busca-salvos-lista"></div>
+      </div>
 
       <div id="card-config" class="real-alert" style="display:none"></div>
       <div id="card-config-pratos" class="real-alert" style="display:none"></div>
@@ -919,10 +931,11 @@ select.big-input { font-size: 14px; }
       </div>
 
       <div class="real-form-actions">
-        <button class="btn-sm" onclick="duplicarCardapioDeOutroDia()">📋 Duplicar de outro dia</button>
         <button class="btn-sm" onclick="imprimirCardapio()">🖨️ Imprimir</button>
+        <button class="btn-sm danger" id="card-btn-excluir" onclick="excluirCardapioAtual()" style="display:none">🗑️ Excluir este cardápio</button>
       </div>
-      <button class="btn-export btn-success" id="card-btn-salvar" onclick="salvarCardapio()">Salvar cardápio de <span id="card-dia-label"></span></button>
+      <button class="btn-export btn-primary" id="card-btn-atualizar" onclick="atualizarCardapioAtual()" style="display:none">Atualizar "<span id="card-nome-atualizar"></span>"</button>
+      <button class="btn-export btn-success" id="card-btn-salvar" onclick="salvarComoNovoCardapio()">Salvar cardápio (novo nome)</button>
       <div class="sheet-muted" id="card-atualizado" style="margin-top:6px"></div>
 
       <div class="real-card">
@@ -935,7 +948,7 @@ select.big-input { font-size: 14px; }
           <div class="ac-list" id="card-prato-produto-ac"></div>
           <input type="file" id="card-prato-foto-input" accept="image/*" style="margin-top:8px">
           <div id="card-prato-foto-preview"></div>
-          <button class="btn-sm success" style="margin-top:8px" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+          <button class="btn-sm success" id="card-prato-btn-salvar" style="margin-top:8px" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
         </div>
         <input class="small-input" id="card-catalogo-busca" type="text" placeholder="Buscar no catálogo..." oninput="carregarCatalogoPratos(this.value)" autocomplete="off" style="margin-top:10px">
         <div class="card-catalogo-grid" id="card-catalogo-grid"></div>
@@ -2710,36 +2723,88 @@ function atualizarRealTotais() {
   atualizarConferenciaCaixa();
 }
 
-// ==================== CARDÁPIO DA SEMANA (com catálogo de pratos + foto) ====================
-const DIAS_SEMANA_CARDAPIO = [
-  { key: 'segunda', label: 'Segunda' },
-  { key: 'terca', label: 'Terça' },
-  { key: 'quarta', label: 'Quarta' },
-  { key: 'quinta', label: 'Quinta' },
-  { key: 'sexta', label: 'Sexta' },
-  { key: 'sabado', label: 'Sábado' },
-  { key: 'domingo', label: 'Domingo' },
-];
-let cardDiaAtual = DIAS_SEMANA_CARDAPIO[new Date().getDay() === 0 ? 6 : new Date().getDay() - 1].key;
-// Estado em memória do dia atual — a fonte da verdade não é mais o DOM (inputs), é este objeto.
+// ==================== BANCO DE CARDÁPIOS SALVOS (com catálogo de pratos + foto) ====================
+// Estado em memória do cardápio sendo editado — a fonte da verdade não é mais o DOM
+// (inputs), é este objeto. cardapioAtualId null = ainda não foi salvo (é novo).
+let cardapioAtualId = null;
+let cardapioAtualNome = '';
 let cardapioEstado = { buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [] };
 let catalogoPratos = [];
 let cardSeletorSecaoAlvo = null;
 let cardSeletorIdxTroca = null;
 let cardPratoProdutoSel = null;
 let cardPratoFotoBase64 = null;
+let cardBuscaSalvosTimer = null;
 
-function renderCardDiasTabs() {
-  const el = document.getElementById('card-dias-tabs');
-  if (!el) return;
-  el.innerHTML = DIAS_SEMANA_CARDAPIO.map(d =>
-    `<button class="btn-sm${d.key === cardDiaAtual ? ' success' : ''}" onclick="selecionarDiaCardapio('${d.key}')">${d.label}</button>`
-  ).join('');
+function atualizarUIBotoesCardapio() {
+  const titulo = document.getElementById('card-titulo-atual');
+  const btnAtualizar = document.getElementById('card-btn-atualizar');
+  const btnSalvar = document.getElementById('card-btn-salvar');
+  const btnExcluir = document.getElementById('card-btn-excluir');
+  const nomeSpan = document.getElementById('card-nome-atualizar');
+  if (cardapioAtualId) {
+    titulo.textContent = cardapioAtualNome;
+    btnAtualizar.style.display = 'block';
+    nomeSpan.textContent = cardapioAtualNome;
+    btnSalvar.textContent = 'Salvar como novo cardápio';
+    btnExcluir.style.display = 'block';
+  } else {
+    titulo.textContent = 'Novo cardápio';
+    btnAtualizar.style.display = 'none';
+    btnSalvar.textContent = 'Salvar cardápio (novo nome)';
+    btnExcluir.style.display = 'none';
+  }
 }
 
-function selecionarDiaCardapio(dia) {
-  cardDiaAtual = dia;
-  loadCardapio();
+function novoCardapioEmBranco() {
+  cardapioAtualId = null;
+  cardapioAtualNome = '';
+  cardapioEstado = { buffet_principal: [], rechaud_redondo: [], rechaud_retangular: [] };
+  document.getElementById('card-busca-salvos').value = '';
+  document.getElementById('card-busca-salvos-lista').innerHTML = '';
+  document.getElementById('card-atualizado').textContent = 'Ainda não salvo.';
+  atualizarUIBotoesCardapio();
+  renderTodasCubas();
+}
+
+function buscarCardapiosSalvos(q) {
+  clearTimeout(cardBuscaSalvosTimer);
+  const el = document.getElementById('card-busca-salvos-lista');
+  if (!q || q.length < 2) { el.innerHTML = ''; return; }
+  cardBuscaSalvosTimer = setTimeout(async () => {
+    try {
+      const d = await api('/api/cardapios-salvos?q=' + encodeURIComponent(q));
+      if (d.configuracao_pendente) {
+        document.getElementById('card-config').style.display = 'block';
+        document.getElementById('card-config').textContent = 'Configure a tabela cardapios_salvos no Supabase para usar o banco de cardápios.';
+        return;
+      }
+      if (!d.cardapios.length) { el.innerHTML = '<div class="sheet-muted" style="padding:6px 2px">Nenhum cardápio encontrado com esse nome.</div>'; return; }
+      el.innerHTML = d.cardapios.map(c => `
+        <div class="card-salvos-item" onclick="carregarCardapioSalvo(${c.id})">
+          <div><b>${escapeHtml(c.nome)}</b></div>
+          <span>${new Date(c.updated_at).toLocaleDateString('pt-BR')}</span>
+        </div>`).join('');
+    } catch(e) {}
+  }, 250);
+}
+
+async function carregarCardapioSalvo(id) {
+  try {
+    const d = await api('/api/cardapios-salvos/' + id);
+    cardapioAtualId = d.id;
+    cardapioAtualNome = d.nome;
+    cardapioEstado.buffet_principal = d.buffet_principal || [];
+    cardapioEstado.rechaud_redondo = d.rechaud_redondo || [];
+    cardapioEstado.rechaud_retangular = d.rechaud_retangular || [];
+    document.getElementById('card-busca-salvos').value = '';
+    document.getElementById('card-busca-salvos-lista').innerHTML = '';
+    atualizarUIBotoesCardapio();
+    renderTodasCubas();
+    const at = document.getElementById('card-atualizado');
+    at.textContent = `Última edição: ${new Date(d.updated_at).toLocaleString('pt-BR')}${d.responsavel ? ' · ' + d.responsavel : ''}`;
+    toast(`"${d.nome}" carregado`, 'ok');
+  } catch(e) { toast(e.message || 'Erro ao carregar cardápio', 'err'); }
 }
 
 // ---- Cubas (grade do dia) ----
@@ -2999,6 +3064,12 @@ function confirmarCropFoto() {
   cardPratoFotoBase64 = { data: dataUrl.split(',')[1], mediaType: 'image/jpeg' };
   document.getElementById('card-prato-foto-preview').innerHTML = `<img src="${dataUrl}">`;
   document.getElementById('card-crop-overlay').style.display = 'none';
+  // No celular, o teclado costumia esconder o botão "Salvar prato no catálogo" (relatado
+  // pelo Rubens) — fecha o teclado (tira o foco de qualquer input) e rola até o botão.
+  document.activeElement?.blur?.();
+  setTimeout(() => {
+    document.getElementById('card-prato-btn-salvar')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, 150);
 }
 
 async function salvarPratoCatalogo() {
@@ -3035,62 +3106,61 @@ async function excluirPratoCatalogo(id) {
 
 // ---- Carregar / salvar o dia ----
 async function loadCardapio() {
-  renderCardDiasTabs();
-  const label = DIAS_SEMANA_CARDAPIO.find(d => d.key === cardDiaAtual)?.label || '';
-  document.getElementById('card-dia-label').textContent = label;
-  const configEl = document.getElementById('card-config');
   await carregarCatalogoPratos();
-  try {
-    const d = await api('/api/cardapio?dia=' + encodeURIComponent(cardDiaAtual));
-    if (d.configuracao_pendente) {
-      configEl.style.display = 'block';
-      configEl.textContent = 'Configure a tabela cardapio_semanal no Supabase para usar o cardápio da semana.';
-    } else {
-      configEl.style.display = 'none';
-    }
-    cardapioEstado.buffet_principal = d.buffet_principal || [];
-    cardapioEstado.rechaud_redondo = d.rechaud_redondo || [];
-    cardapioEstado.rechaud_retangular = d.rechaud_retangular || [];
-    renderTodasCubas();
-    const at = document.getElementById('card-atualizado');
-    at.textContent = d.updated_at ? `Última edição: ${new Date(d.updated_at).toLocaleString('pt-BR')}${d.responsavel ? ' · ' + d.responsavel : ''}` : 'Ainda não salvo.';
-  } catch(e) {
-    handleApiError(e, true);
-  }
+  atualizarUIBotoesCardapio();
+  renderTodasCubas();
+  document.getElementById('card-atualizado').textContent = cardapioAtualId ? '' : 'Ainda não salvo.';
 }
 
-async function salvarCardapio() {
+async function salvarComoNovoCardapio() {
+  const nome = await askPrompt('Nome deste cardápio (ex: "Terça Mineira")', '');
+  if (!nome || !nome.trim()) return;
   try {
     const body = {
-      dia_semana: cardDiaAtual,
+      nome: nome.trim(),
       buffet_principal: coletarCardapioSecao('buffet_principal'),
       rechaud_redondo: coletarCardapioSecao('rechaud_redondo'),
       rechaud_retangular: coletarCardapioSecao('rechaud_retangular'),
     };
-    await apiPost('/api/cardapio', body);
-    toast('Cardápio salvo!', 'ok');
-    await loadCardapio();
+    const d = await apiPost('/api/cardapios-salvos', body);
+    cardapioAtualId = d.id;
+    cardapioAtualNome = d.nome;
+    atualizarUIBotoesCardapio();
+    toast(`Cardápio "${d.nome}" salvo!`, 'ok');
+    const at = document.getElementById('card-atualizado');
+    at.textContent = `Última edição: ${new Date(d.updated_at).toLocaleString('pt-BR')}${d.responsavel ? ' · ' + d.responsavel : ''}`;
   } catch(e) { toast(e.message || 'Erro ao salvar cardápio', 'err'); }
 }
 
-async function duplicarCardapioDeOutroDia() {
-  const opcoes = DIAS_SEMANA_CARDAPIO.filter(d => d.key !== cardDiaAtual).map(d => d.label).join(', ');
-  const escolha = await askPrompt(`Copiar o cardápio de qual dia? (${opcoes})`, '');
-  if (!escolha) return;
-  const alvo = DIAS_SEMANA_CARDAPIO.find(d => d.label.toLowerCase() === escolha.trim().toLowerCase() || d.key === escolha.trim().toLowerCase());
-  if (!alvo) { toast('Dia não reconhecido. Digite exatamente como aparece nas abas.', 'err'); return; }
+async function atualizarCardapioAtual() {
+  if (!cardapioAtualId) return;
   try {
-    const d = await api('/api/cardapio?dia=' + encodeURIComponent(alvo.key));
-    cardapioEstado.buffet_principal = d.buffet_principal || [];
-    cardapioEstado.rechaud_redondo = d.rechaud_redondo || [];
-    cardapioEstado.rechaud_retangular = d.rechaud_retangular || [];
-    renderTodasCubas();
-    toast(`Cardápio de ${alvo.label} copiado — revise e clique em Salvar para gravar em ${DIAS_SEMANA_CARDAPIO.find(x=>x.key===cardDiaAtual).label}`, 'ok');
-  } catch(e) { toast(e.message || 'Erro ao copiar cardápio', 'err'); }
+    const body = {
+      nome: cardapioAtualNome,
+      buffet_principal: coletarCardapioSecao('buffet_principal'),
+      rechaud_redondo: coletarCardapioSecao('rechaud_redondo'),
+      rechaud_retangular: coletarCardapioSecao('rechaud_retangular'),
+    };
+    const d = await apiPost('/api/cardapios-salvos/' + cardapioAtualId, body, 'PUT');
+    toast(`"${d.nome}" atualizado!`, 'ok');
+    const at = document.getElementById('card-atualizado');
+    at.textContent = `Última edição: ${new Date(d.updated_at).toLocaleString('pt-BR')}${d.responsavel ? ' · ' + d.responsavel : ''}`;
+  } catch(e) { toast(e.message || 'Erro ao atualizar cardápio', 'err'); }
+}
+
+async function excluirCardapioAtual() {
+  if (!cardapioAtualId) return;
+  const ok = await askConfirm('', { titulo: `Excluir o cardápio "${cardapioAtualNome}"? Essa ação não pode ser desfeita.` });
+  if (!ok) return;
+  try {
+    await apiPost('/api/cardapios-salvos/' + cardapioAtualId, {}, 'DELETE');
+    toast('Cardápio excluído', 'ok');
+    novoCardapioEmBranco();
+  } catch(e) { toast(e.message || 'Erro ao excluir cardápio', 'err'); }
 }
 
 function imprimirCardapio() {
-  const label = DIAS_SEMANA_CARDAPIO.find(d => d.key === cardDiaAtual)?.label.toUpperCase() || '';
+  const label = (cardapioAtualNome || 'NOVO CARDÁPIO').toUpperCase();
   const linha = (item, numero) => `<tr><td>${numero}</td><td>${escapeHtml(item.nome)}${item.cubas > 1 ? ` <b>(${item.cubas} CUBAS)</b>` : ''}${item.obs ? `<br><small>${escapeHtml(item.obs)}</small>` : ''}</td></tr>`;
   const buffet = cardapioEstado.buffet_principal;
   const redondo = cardapioEstado.rechaud_redondo;
