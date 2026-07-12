@@ -340,9 +340,9 @@ select.big-input { font-size: 14px; }
 .card-cuba-item { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; aspect-ratio: 1; display: flex; flex-direction: column; }
 .card-cuba-item.vazia { display: flex; align-items: center; justify-content: center; border-style: dashed; color: var(--muted); font-size: 24px; }
 .card-cuba-item.estoque-baixo { border-color: rgba(239,68,68,0.5); box-shadow: 0 0 0 2px rgba(239,68,68,0.2) inset; }
-.card-cuba-foto { width: 100%; flex: 1; object-fit: cover; background: var(--s2); display: block; }
-.card-cuba-sem-foto { width: 100%; flex: 1; background: var(--s2); display: flex; align-items: center; justify-content: center; font-size: 26px; }
-.card-cuba-nome { font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; line-height: 1.25; background: var(--s1); text-align: center; }
+.card-cuba-foto { width: 100%; flex: 1; min-height: 0; object-fit: cover; background: var(--s2); display: block; }
+.card-cuba-sem-foto { width: 100%; flex: 1; min-height: 0; background: var(--s2); display: flex; align-items: center; justify-content: center; font-size: 26px; }
+.card-cuba-nome { flex-shrink: 0; font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; line-height: 1.25; background: var(--s1); text-align: center; }
 .card-cuba-badge { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; z-index: 2; }
 .card-cuba-remove { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 11px; font-weight: 800; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2; }
 .card-cuba-warn { position: absolute; bottom: 22px; right: 4px; font-size: 13px; z-index: 2; }
@@ -373,6 +373,7 @@ select.big-input { font-size: 14px; }
 .card-crop-frame { width: 100%; aspect-ratio: 1; border-radius: 14px; overflow: hidden; background: #000; position: relative; touch-action: none; cursor: grab; margin: 0 auto; }
 .card-crop-frame:active { cursor: grabbing; }
 .card-crop-frame img { position: absolute; top: 0; left: 0; transform-origin: 0 0; max-width: none; user-select: none; -webkit-user-drag: none; }
+.card-crop-nome-atual { font-size: 15px; font-weight: 700; color: var(--text); text-align: center; margin-top: 8px; }
 #card-crop-zoom { width: 100%; }
 @media (max-width: 480px) {
   .card-cuba-grid, .card-catalogo-grid { grid-template-columns: repeat(3, 1fr); }
@@ -980,6 +981,7 @@ select.big-input { font-size: 14px; }
       <div class="card-crop-frame" id="card-crop-frame">
         <img id="card-crop-img" draggable="false">
       </div>
+      <div class="card-crop-nome-atual" id="card-crop-nome-atual"></div>
       <input type="range" id="card-crop-zoom" min="100" max="300" value="100" oninput="aplicarCropTransform()">
       <div class="sheet-muted" style="text-align:center">Arraste a foto pra posicionar · use a régua pra dar zoom</div>
       <div class="real-form-actions">
@@ -3047,6 +3049,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function abrirCropFoto(dataUrl) {
   const img = document.getElementById('card-crop-img');
+  const nome = document.getElementById('card-prato-nome').value.trim();
+  document.getElementById('card-crop-nome-atual').textContent = nome || 'Prato sem nome (defina o nome antes de salvar)';
   img.onload = () => {
     cropNatural = { w: img.naturalWidth, h: img.naturalHeight };
     cropPan = { x: 0, y: 0 };
