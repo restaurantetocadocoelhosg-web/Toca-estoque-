@@ -1250,7 +1250,18 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v49</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v50</b></span></div>
+
+      <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
+           apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
+      <div class="admin-card">
+        <div class="admin-card-title">🧰 Ferramentas</div>
+        <div class="card-salvos-lista">
+          <div class="card-salvos-item" id="admin-link-inventario" onclick="goPage('inventario', document.getElementById('nav-admin'))"><b>🧮 Inventário</b><span>abrir →</span></div>
+          <div class="card-salvos-item" id="admin-link-exportar" onclick="goPage('export', document.getElementById('nav-admin'))"><b>⬇️ Exportar</b><span>abrir →</span></div>
+          <div class="card-salvos-item" id="admin-link-auditoria" onclick="goPage('audit', document.getElementById('nav-admin'))"><b>🔍 Auditoria</b><span>abrir →</span></div>
+        </div>
+      </div>
 
       <!-- GESTÃO DE PRODUTOS -->
       <div class="admin-card">
@@ -1457,10 +1468,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
-  <button class="nav-btn" id="nav-export" onclick="goPage('export', this)"><span class="icon">⬇️</span>Exportar</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
-  <button class="nav-btn" id="nav-audit" onclick="goPage('audit', this)"><span class="icon">🔍</span>Auditoria</button>
-  <button class="nav-btn" id="nav-inventario" onclick="goPage('inventario', this)"><span class="icon">🧮</span>Inventário</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
 </nav>
 <!-- Modal: vincular ou cadastrar produto do cupom -->
@@ -1763,20 +1771,22 @@ async function loadSession() {
   const gate = (id, ok) => { const el = document.getElementById(id); if (el) el.style.display = ok ? 'flex' : 'none'; };
   gate('nav-admin', P.admin);
   gate('nav-chat', P.ia);
-  gate('nav-audit', P.auditoria);
-  gate('nav-export', P.exportar);
   gate('nav-realidade', P.dia);
   gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
   gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
+  // Auditoria/Exportar saíram do menu inferior e viraram atalhos dentro do Admin —
+  // Inventário não tinha permissão própria, sempre ficou visível pra quem entra no Admin.
+  gate('admin-link-auditoria', P.auditoria);
+  gate('admin-link-exportar', P.exportar);
   // Leitor de nota fiscal = ferramenta de LANÇAMENTO (todos que lançam usam, inclusive operador).
   // NÃO atrelar ao 'ia' — senão desligar a varredura automática esconde o leitor junto.
   const btnCupom = document.getElementById('btn-cupom-ia');
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','nav-audit','nav-export','nav-realidade','nav-cardapio','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
+    ['nav-admin','nav-chat','admin-link-auditoria','admin-link-exportar','nav-realidade','nav-cardapio','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
