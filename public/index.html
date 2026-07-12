@@ -378,6 +378,45 @@ select.big-input { font-size: 14px; }
 @media (max-width: 480px) {
   .card-cuba-grid, .card-catalogo-grid { grid-template-columns: repeat(3, 1fr); }
 }
+
+/* ==================== Tema Cardápio — dourado & creme ====================
+   Escopado só na página #p-cardapio (sobrescreve as CSS custom properties
+   globais dentro deste container) — não afeta nenhuma outra aba do app. */
+#p-cardapio {
+  --bg: #FBF5E6; --s1: #FFFDF8; --s2: #F3E7C8; --border: #E4CE9B;
+  --accent: #B8863B; --text: #3A2E17; --muted: #8C7A54;
+  --shadow: 0 2px 10px rgba(120,90,20,0.10), 0 8px 26px rgba(120,90,20,0.07);
+  --shadow-md: 0 4px 16px rgba(120,90,20,0.14), 0 12px 34px rgba(120,90,20,0.10);
+  --radius: 16px;
+  background: var(--bg);
+  min-height: 100%;
+}
+#p-cardapio .real-card { box-shadow: var(--shadow); }
+#p-cardapio .real-card-title { border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+#p-cardapio .btn-export.btn-primary { box-shadow: 0 2px 10px rgba(184,134,59,0.30); }
+
+#p-cardapio .card-cuba-item,
+#p-cardapio .card-catalogo-item {
+  box-shadow: var(--shadow);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+#p-cardapio .card-cuba-item:hover,
+#p-cardapio .card-catalogo-item:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+#p-cardapio .card-cuba-nome,
+#p-cardapio .card-catalogo-nome {
+  border-top: 2px solid var(--accent);
+}
+#p-cardapio .card-cuba-badge {
+  background: linear-gradient(135deg, #D4A94D, #A8752E);
+}
+#p-cardapio .card-cuba-item.vazia {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 @media (max-width: 380px) {
   .real-money-row { grid-template-columns: 1fr 58px 92px 32px; gap: 5px; }
   .real-money-row.no-qtd { grid-template-columns: 1fr 92px 32px; }
