@@ -766,6 +766,9 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }
 
   await audit('movimentacao', { produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }, req.user, getClientIp(req));
+  if (tipo === 'Entrada' && motivo === 'Compra') {
+    await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs });
+  }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
   res.json({ ok: true, produto: prodAtualizado });
 });
@@ -1099,6 +1102,46 @@ const CONTAS_PLANILHA_PAGAMENTOS = [
 const CONTAS_PLANILHA_FLAT = CONTAS_PLANILHA_PAGAMENTOS.flatMap(g =>
   g.contas.map((conta, ordem) => ({ grupo: g.grupo, categoria: conta, ordem }))
 );
+
+// Categoria do produto no estoque → (grupo, conta) do plano de contas da aba Contas.
+const MAPA_CONTA_COMPRA = {
+  'Hortifruti':       ['Despesas Variáveis - CMV', 'Hortifruti'],
+  'Carnes Bovinas':   ['Despesas Variáveis - CMV', 'Proteína Bovina'],
+  'Carnes Suínas':    ['Despesas Variáveis - CMV', 'Proteína Suína'],
+  'Aves':             ['Despesas Variáveis - CMV', 'Proteína Aves'],
+  'Pescados':         ['Despesas Variáveis - CMV', 'Pescados'],
+  'Secos e Grãos':    ['Despesas Variáveis - CMV', 'Estoque Seco (Farinha)'],
+  'Laticínios':       ['Despesas Variáveis - CMV', 'Lácteos'],
+  'Embutidos':        ['Despesas Variáveis - CMV', 'Embutidos'],
+  'Especiarias':      ['Despesas Variáveis - CMV', 'Condimentos'],
+  'Óleos':            ['Despesas Variáveis - CMV', 'Óleos'],
+  'Massa Fresca':     ['Despesas Variáveis - CMV', 'Massa Fresca'],
+  'Outras Proteínas': ['Despesas Variáveis - CMV', 'Estoque Congelado'],
+  'Descartáveis':     ['Despesas Variáveis - CMV', 'Kit (descartáveis)'],
+  'Bebidas':          ['CMV Bebidas', 'Não Alcoólicos'],
+  'Limpeza':          ['Despesas de Produção', 'Higiene, Limpeza'],
+};
+
+// Compra que entra no estoque vira lançamento automático na aba Contas — organiza o
+// financeiro por categoria sem depender de lançamento manual. Falha aqui NUNCA derruba
+// a movimentação (best-effort). origem='estoque-auto' identifica os lançamentos
+// automáticos e os separa dos digitados na aba Contas.
+async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs }) {
+  try {
+    const v = Number((Number(custoUnit) * Number(qtd)).toFixed(2));
+    if (!v || v <= 0) return;                          // sem preço real não polui as Contas
+    const cat = produto.categoria || '';
+    if (/^qa robo/i.test(cat)) return;                 // produtos de teste do robô ficam fora
+    const [grupo, conta] = MAPA_CONTA_COMPRA[cat] || ['Despesas Variáveis - CMV', 'Outros'];
+    await supabase.from('pagamentos_comprovantes').insert({
+      data: dateSP(), grupo, categoria: conta, forma: 'compra_estoque',
+      valor_bruto: v, taxa: 0, valor_liquido: v, parcelas: 0,
+      descricao: sanitizeText(`Compra estoque: ${produto.nome} × ${qtd}${obs ? ' — ' + obs : ''}`, 180),
+      origem: 'estoque-auto', responsavel: responsavel || 'estoque',
+      created_at: nowSP(), updated_at: nowSP(),
+    });
+  } catch (e) { console.error('contas-auto:', e.message); }
+}
 
 function acharContaPagamento(categoria) {
   const alvo = normalizeSearch(categoria);
@@ -3248,6 +3291,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
       });
       const custoAntes = Number(item.produto.custo || 0);
+      await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp' });
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
         custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
     }
@@ -3323,9 +3367,10 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: 'termo' }); } catch (e) {}
   }
+  await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)' });
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
-  await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, memorizar }, req.user, getClientIp(req));
-  res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd });
+  await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, custo: custoUnit, memorizar }, req.user, getClientIp(req));
+  res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd, custo_aplicado: custoUnit });
 });
 
 // Cadastra um produto NOVO direto da pendência (quando não existe no estoque) e lança a entrada.
@@ -3360,6 +3405,7 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     valor: Number((custo * qtd).toFixed(2)), motivo: 'Compra',
     responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
   });
+  await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota' });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: 'termo' }); } catch (e) {}
   }
@@ -4634,6 +4680,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
       motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
     });
     if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
+    if (tipo === 'Entrada') await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp' });
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, custo_novo: custoNovoW, remetente }, null, '');
     const linhaCusto = custoNovoW !== null && Math.abs(custoNovoW - Number(prod.custo || 0)) >= 0.01
       ? `\n💲 Custo: R$${Number(prod.custo || 0).toFixed(2)} → R$${custoNovoW.toFixed(2)}` : '';

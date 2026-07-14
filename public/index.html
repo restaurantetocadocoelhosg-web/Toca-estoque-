@@ -1295,7 +1295,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v51</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v52</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2555,7 +2555,14 @@ function renderPendCard(p) {
   const memo = `<label class="pc-memo"><input type="checkbox" id="pc-memo-${p.id}" checked> 💾 Memorizar apelido "<b>${escapeHtml(p.produto_cupom)}</b>" (${memoTxt})</label>`;
   const qtdBox = `<div class="pc-qtd-wrap">
       <span class="pc-qtd-lbl">Quantidade (corrija o peso se a IA errou):</span>
-      <div class="pc-qtd-row"><input type="number" step="0.001" min="0" class="pc-qtd" id="pc-qtd-${p.id}" value="${fmt(p.qtd)}"><span class="pc-qtd-un">${uni}</span></div>
+      <div class="pc-qtd-row"><input type="number" step="0.001" min="0" class="pc-qtd" id="pc-qtd-${p.id}" value="${fmt(p.qtd)}" oninput="pendRecalcPreco(${p.id})"><span class="pc-qtd-un">${uni}</span></div>
+    </div>`;
+  // Preço da nota: valor_total ÷ qtd = unitário sugerido. Confirme ou corrija antes de lançar.
+  const vt = Number(p.valor_total) || 0;
+  const precoSugerido = vt > 0 && Number(p.qtd) > 0 ? (vt / Number(p.qtd)) : null;
+  const precoBox = `<div class="pc-qtd-wrap">
+      <span class="pc-qtd-lbl">Preço unitário${vt > 0 ? ` (da nota: total R$ ${vt.toFixed(2)})` : ' (a nota não trouxe — informe se souber)'}:</span>
+      <div class="pc-qtd-row"><span class="pc-qtd-un">R$</span><input type="number" step="0.01" min="0" class="pc-qtd" id="pc-custo-${p.id}" data-vt="${vt}" value="${precoSugerido !== null ? precoSugerido.toFixed(2) : ''}" placeholder="0,00" oninput="this.dataset.touched='1'"><span class="pc-qtd-un">/ ${uni || 'un'}</span></div>
     </div>`;
   const btnConf = st.criando
     ? `<button class="pc-conf" onclick="criarProdutoPendencia(${p.id})">➕ Cadastrar e lançar</button>`
@@ -2563,12 +2570,22 @@ function renderPendCard(p) {
   return `<div class="pend-card" id="pend-${p.id}">
     <div class="pc-cupom">🧾 ${escapeHtml(p.produto_cupom)}</div>
     <div class="pc-meta">Lido da nota: <b>${fmt(p.qtd)} ${uni}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
-    ${selBox}${searchBox}${criaBox}${qtdBox}${memo}
+    ${selBox}${searchBox}${criaBox}${qtdBox}${precoBox}${memo}
     <div class="pc-acoes">
       ${btnConf}
       <button class="pc-ign" onclick="ignorarPendencia(${p.id})">Ignorar</button>
     </div>
   </div>`;
+}
+// Corrigiu a quantidade? Recalcula o preço unitário sugerido (valor da nota ÷ nova qtd),
+// a menos que o usuário já tenha digitado um preço na mão (data-touched).
+function pendRecalcPreco(id) {
+  const custoEl = document.getElementById('pc-custo-' + id);
+  const qtdEl = document.getElementById('pc-qtd-' + id);
+  if (!custoEl || !qtdEl || custoEl.dataset.touched === '1') return;
+  const vt = Number(custoEl.dataset.vt) || 0;
+  const q = Number(String(qtdEl.value).replace(',', '.')) || 0;
+  custoEl.value = vt > 0 && q > 0 ? (vt / q).toFixed(2) : '';
 }
 function pendPick(id, val) {
   const st = pendState[id] || (pendState[id] = {});
@@ -2587,8 +2604,10 @@ async function criarProdutoPendencia(id) {
   const qtd = qtdEl ? Number(String(qtdEl.value).replace(',', '.')) : null;
   if (!qtd || qtd <= 0) { toast('Quantidade inválida.', 'err'); return; }
   const memo = document.getElementById('pc-memo-' + id);
+  const custoEl = document.getElementById('pc-custo-' + id);
+  const custo = custoEl ? Number(String(custoEl.value).replace(',', '.')) : null;
   try {
-    const r = await apiPost(`/api/pendencias/${id}/criar-produto`, { nome, categoria, unidade, qtd, memorizar: memo ? memo.checked : true });
+    const r = await apiPost(`/api/pendencias/${id}/criar-produto`, { nome, categoria, unidade, qtd, memorizar: memo ? memo.checked : true, ...(custo > 0 ? { custo } : {}) });
     toast(`✅ ${r.produto} cadastrado: +${fmt(r.qtd)} ${unidade}`, 'ok');
     delete pendState[id];
     await loadPendencias(); await loadHist();
@@ -2621,9 +2640,11 @@ async function resolverPendencia(id) {
   const qtdEl = document.getElementById('pc-qtd-' + id);
   const qtd = qtdEl ? Number(String(qtdEl.value).replace(',', '.')) : null;
   if (qtdEl && (!qtd || qtd <= 0)) { toast('Quantidade inválida.', 'err'); return; }
+  const custoEl = document.getElementById('pc-custo-' + id);
+  const custo = custoEl ? Number(String(custoEl.value).replace(',', '.')) : null;
   try {
-    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd });
-    toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})`, 'ok');
+    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd, ...(custo > 0 ? { custo } : {}) });
+    toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})${r.custo_aplicado > 0 ? ` · R$ ${Number(r.custo_aplicado).toFixed(2)}/un` : ''}`, 'ok');
     delete pendState[id];
     await loadPendencias();
     await loadHist();
