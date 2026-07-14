@@ -1295,7 +1295,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v50</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v51</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2144,7 +2144,7 @@ function renderCupomItens() {
 
     return `<div class="${classeItem}" id="ci-${idx}">
       <div class="ci-top">
-        <div class="ci-nome-cupom">Cupom: ${escapeHtml(item.nome_cupom)}</div>
+        <div class="ci-nome-cupom">Cupom: ${escapeHtml(item.nome_cupom)}${item.valor_total > 0 && item.qtd > 0 ? ` <span style="color:var(--green);font-weight:600">· R$ ${(item.valor_total/item.qtd).toFixed(2)}/un</span>` : ''}</div>
         ${badge}
       </div>
       ${!ignorado ? `
@@ -2206,11 +2206,14 @@ async function lancarLote() {
   let ok = 0; let erros = [];
   for (const item of ativos) {
     try {
+      // Preço da nota (valor_total ÷ qtd) atualiza o custo do produto na Entrada.
+      const custoNota = item.valor_total > 0 && item.qtd > 0 ? Number((item.valor_total / item.qtd).toFixed(4)) : null;
       await apiPost('/api/movimentacoes', {
         produto_id: item.produto.id,
         produto_nome: item.produto.nome,
         tipo: 'Entrada',
         qtd: item.qtd,
+        ...(custoNota ? { custo: custoNota } : {}),
         motivo: 'Compra',
         obs: `Cupom: ${item.nome_cupom}`
       });

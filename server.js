@@ -3075,7 +3075,7 @@ async function lerNotaComIA(listaImg, mediaType, userLog) {
         model: 'claude-sonnet-4-6', max_tokens: 16384,
         messages: [{ role: 'user', content: [
           ...listaImg.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
-          { type: 'text', text: avisoFatias + `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade e unidade.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. Para BEBIDA/LÍQUIDO em garrafa/lata/pote fechado, o volume no nome (350ML, 500ML, 2L) NÃO é a quantidade — conte as UNIDADES. MAS para SACO/CAIXA/FARDO de hortifruti, legume, tubérculo ou grão vendido por peso, o PESO no nome (25KG, 20KG) É a quantidade em kg.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\"}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN'}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN\n'FILE FRANGO CX 20KG' -> qtd:20, KG\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
+          { type: 'text', text: avisoFatias + `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade, unidade e VALOR TOTAL da linha.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. Para BEBIDA/LÍQUIDO em garrafa/lata/pote fechado, o volume no nome (350ML, 500ML, 2L) NÃO é a quantidade — conte as UNIDADES. MAS para SACO/CAIXA/FARDO de hortifruti, legume, tubérculo ou grão vendido por peso, o PESO no nome (25KG, 20KG) É a quantidade em kg.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nVALOR TOTAL da linha (campo valor_total): o número da coluna Vl Total do item, em reais, número com PONTO decimal (ex: 42.00). É o valor que você já usa na conferência Total ÷ Unit. Se houver desconto na linha, use o valor final pago. Se não conseguir ler o valor daquela linha, use null — NUNCA invente.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\",\"valor_total\":42.00}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN', valor_total:42.00}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN, valor_total:28.80\n'FILE FRANGO CX 20KG 22,90 458,00' -> qtd:20, KG, valor_total:458.00\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
         ]}]
       })
     });
@@ -3147,10 +3147,17 @@ async function lerNotaComIA(listaImg, mediaType, userLog) {
 
       // Auto-seleciona o produto SÓ quando o match é confiável; senão a tela exige confirmação.
       const confiavel = via === 'apelido' || via === 'nome_exato' || via === 'forte';
+      // Preço da nota: valor_total da linha ÷ qtd (já normalizada p/ unidade do produto,
+      // ex. saco 25kg → qtd 25) = custo unitário REAL da compra. Mantém preço vivo.
+      const qtdItem = Number(item.qtd) || 1;
+      const vt = Number(item.valor_total);
+      const valorTotal = Number.isFinite(vt) && vt > 0 ? Number(vt.toFixed(2)) : null;
       itens.push({
         nome_cupom: item.nome,
-        qtd: Number(item.qtd) || 1,
+        qtd: qtdItem,
         unidade_cupom: item.unidade || 'UN',
+        valor_total: valorTotal,
+        custo_unit: valorTotal ? Number((valorTotal / qtdItem).toFixed(4)) : null,
         candidatos,
         produto: confiavel ? (candidatos[0] || null) : null,
         via, via_sinonimo: via === 'apelido',
@@ -3211,6 +3218,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
         // Guarda a pendência pra resolver no app (aba Histórico → Pendentes), sem refazer foto.
         pendencias.push({
           produto_cupom: item.nome_cupom, qtd: item.qtd, unidade_cupom: item.unidade_cupom || null,
+          valor_total: item.valor_total || null,
           candidatos: (item.candidatos || []).map(c => ({ id: c.id, nome: c.nome, unidade: c.unidade, codigo: c.codigo || null })),
           remetente, status: 'pendente', created_at: nowSP(),
         });
@@ -3219,23 +3227,29 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
         continue;
       }
       // Entrada com trava otimista (mesma blindagem do webhook entrada)
+      // Preço da nota atualiza o custo do produto — senão o custo congela pra sempre.
+      const custoNovo = item.custo_unit && item.custo_unit > 0 ? item.custo_unit : null;
       let prodAtual = item.produto, novaQtd = 0, sucesso = false;
       for (let tent = 0; tent < 4 && !sucesso; tent++) {
         novaQtd = Number((Number(prodAtual.qtd) + Number(item.qtd)).toFixed(3));
-        const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+        const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
+        const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
         if (upd && upd.length) { sucesso = true; break; }
         const { data: re } = await supabase.from('produtos').select('*').eq('id', item.produto.id).single();
         if (!re) break;
         prodAtual = re;
       }
       if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
+      const custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
       await supabase.from('movimentacoes').insert({
         produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
         tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
-        custo: item.produto.custo, valor: Number((Number(item.produto.custo) * item.qtd).toFixed(2)),
+        custo: custoUnit, valor: Number((custoUnit * item.qtd).toFixed(2)),
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
       });
-      lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd });
+      const custoAntes = Number(item.produto.custo || 0);
+      lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
+        custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
     }
     // Salva os itens em dúvida como pendências (resolver no app, aba Histórico → Pendentes).
     if (pendencias.length) { try { await supabase.from('nota_pendencias').insert(pendencias); } catch (e) { console.error('pendencias insert:', e.message); } }
@@ -3243,7 +3257,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
     if (lancados.length) {
-      msg += `✅ *Lançados (${lancados.length}):*\n` + lancados.map(l => `• ${l.nome}: +${l.qtd} ${l.unidade} (estoque: ${l.estoque})`).join('\n') + '\n';
+      msg += `✅ *Lançados (${lancados.length}):*\n` + lancados.map(l => `• ${l.nome}: +${l.qtd} ${l.unidade} (estoque: ${l.estoque})` + (l.custo_novo !== null && l.custo_novo !== undefined ? `\n   💲 custo R$${l.custo_antes.toFixed(2)} → R$${l.custo_novo.toFixed(2)}` : '')).join('\n') + '\n';
     }
     if (confirmar.length) msg += `\n⚠️ *Confira no app (${confirmar.length}) — não lancei no chute:*\n` + confirmar.map(c => `• "${c.nome_cupom}" (${c.qtd}) → seria ${c.sugestao}?`).join('\n') + '\n';
     if (naoachados.length) msg += `\n❓ *Não achei no estoque:*\n` + naoachados.map(n => `• ${n}`).join('\n') + '\n';
@@ -3277,12 +3291,18 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   const qtdCorrigida = parsePositiveNumber(req.body?.qtd);
   const qtd = qtdCorrigida !== null ? qtdCorrigida : (Number(pend.qtd) || 0);
   if (qtd <= 0) return res.status(400).json({ erro: 'Quantidade inválida.' });
+  // Custo: usa o informado pelo usuário; senão o preço da nota (valor_total ÷ qtd final).
+  const custoInformado = parsePositiveNumber(req.body?.custo);
+  const vtPend = Number(pend.valor_total);
+  const custoNovo = custoInformado !== null ? custoInformado
+    : (Number.isFinite(vtPend) && vtPend > 0 ? Number((vtPend / qtd).toFixed(4)) : null);
 
   // Entrada com trava otimista (mesma blindagem dos outros lançamentos).
   let prodAtual = prod, novaQtd = 0, sucesso = false;
   for (let tent = 0; tent < 4 && !sucesso; tent++) {
     novaQtd = Number((Number(prodAtual.qtd) + qtd).toFixed(3));
-    const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+    const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
+    const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
     if (upd && upd.length) { sucesso = true; break; }
     const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
     if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
@@ -3290,10 +3310,11 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   }
   if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente de novo.' });
 
+  const custoUnit = custoNovo !== null ? custoNovo : Number(prod.custo || 0);
   const { error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo: 'Entrada', qtd, unidade: prod.unidade,
-    custo: prod.custo, valor: Number((Number(prod.custo) * qtd).toFixed(2)),
+    custo: custoUnit, valor: Number((custoUnit * qtd).toFixed(2)),
     motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
   });
   if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
@@ -3319,7 +3340,9 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   const qtdCorrigida = parsePositiveNumber(req.body?.qtd);
   const qtd = qtdCorrigida !== null ? qtdCorrigida : (Number(pend.qtd) || 0);
   if (qtd <= 0) return res.status(400).json({ erro: 'Quantidade inválida.' });
-  const custo = parseNonNegativeNumber(req.body?.custo ?? 0) ?? 0;
+  let custo = parseNonNegativeNumber(req.body?.custo ?? 0) ?? 0;
+  // Sem custo informado: usa o preço da própria nota (valor_total ÷ qtd).
+  if (!custo) { const vtP = Number(pend.valor_total); if (Number.isFinite(vtP) && vtP > 0) custo = Number((vtP / qtd).toFixed(4)); }
 
   // Cria o produto já com a quantidade da nota (é a primeira entrada).
   const { data: novo, error } = await supabase.from('produtos').insert({
@@ -4572,6 +4595,12 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
     const qtd = parsePositiveNumber(req.body?.qtd);
     if (!produto_nome || !qtd) return res.json({ resposta: `Para lançar ${tipo.toLowerCase()}, envie: produto, quantidade` });
+    // Preço opcional na Entrada: custo (unitário) ou valor (total da compra) → atualiza o custo do produto.
+    const custoInfW = parsePositiveNumber(req.body?.custo);
+    const valorInfW = parsePositiveNumber(req.body?.valor);
+    const custoNovoW = tipo === 'Entrada'
+      ? (custoInfW !== null ? custoInfW : (valorInfW !== null ? Number((valorInfW / qtd).toFixed(4)) : null))
+      : null;
     // Matcher completo: acento-insensível + aceita código (BOV-01) e apelido cadastrado.
     const { prod, opcoes } = await acharProdutoUnico(produto_nome);
     if (opcoes) {
@@ -4589,7 +4618,8 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
         if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prodAtual.nome}. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}` });
         novaQtd = Number((novaQtd - qtd).toFixed(3));
       }
-      const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+      const updDataW = custoNovoW !== null ? { qtd: novaQtd, custo: custoNovoW } : { qtd: novaQtd };
+      const { data: upd } = await supabase.from('produtos').update(updDataW).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
       if (upd && upd.length) { sucesso = true; break; }
       const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
       if (!re) break;
@@ -4597,14 +4627,17 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     }
     if (!sucesso) return res.json({ resposta: `❌ Não consegui atualizar ${prod.nome} agora (outro lançamento simultâneo). Tente de novo em instantes.` });
     const qtdAntesW = Number(prodAtual.qtd);
+    const custoUnitW = custoNovoW !== null ? custoNovoW : Number(prod.custo || 0);
     const { error: movErr } = await supabase.from('movimentacoes').insert({
       produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
-      custo: prod.custo, valor: Number((Number(prod.custo)*qtd).toFixed(2)),
+      custo: custoUnitW, valor: Number((custoUnitW*qtd).toFixed(2)),
       motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
     });
-    if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
-    await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, remetente }, null, '');
-    return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}` });
+    if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
+    await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, custo_novo: custoNovoW, remetente }, null, '');
+    const linhaCusto = custoNovoW !== null && Math.abs(custoNovoW - Number(prod.custo || 0)) >= 0.01
+      ? `\n💲 Custo: R$${Number(prod.custo || 0).toFixed(2)} → R$${custoNovoW.toFixed(2)}` : '';
+    return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}${linhaCusto}` });
   }
 
   if (acao === 'compras') {
