@@ -1295,7 +1295,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v53</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v54</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1994,9 +1994,11 @@ async function reconciliarTodosFantasmas() {
 }
 
 function irEstoque(status) {
-  goPage('estoque', document.querySelectorAll('.nav-btn')[1]);
+  // estStatus PRIMEIRO: goPage já chama loadEstoque, e chamar de novo depois criava
+  // corrida (fetch sem filtro × fetch filtrado — o que chegasse por último vencia).
+  estStatus = status;
   document.querySelectorAll('.pill').forEach(p => p.classList.toggle('active', p.dataset.st === status));
-  estStatus = status; loadEstoque();
+  goPage('estoque', document.querySelectorAll('.nav-btn')[1]);
 }
 function renderUltimos(items) {
   const el = document.getElementById('ultimos-list');
@@ -2364,6 +2366,7 @@ async function loadCats() {
   } catch(e) { handleApiError(e,false); }
 }
 
+let _estoqueSeq = 0; // descarta resposta atrasada (digitação rápida na busca / troca de filtro)
 async function loadEstoque() {
   const q = document.getElementById('est-search').value;
   const cat = document.getElementById('est-cat').value;
@@ -2371,8 +2374,10 @@ async function loadEstoque() {
   if (q) params.set('q', q);
   if (cat) params.set('cat', cat);
   if (estStatus) params.set('status', estStatus);
+  const seq = ++_estoqueSeq;
   try {
     const items = await api('/api/produtos?' + params);
+    if (seq !== _estoqueSeq) return; // já existe pedido mais novo — não sobrescreve
     const el = document.getElementById('prod-list');
     if (!items.length) { el.innerHTML='<div class="empty"><div class="empty-icon">📦</div><div class="empty-text">Nenhum produto encontrado.</div></div>'; return; }
     el.innerHTML = items.map(p => {
