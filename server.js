@@ -753,13 +753,13 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }
   if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
 
-  const { error: movErr } = await supabase.from('movimentacoes').insert({
+  const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
     custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs,
     qtd_antes: qtdAntes, qtd_depois: novaQtd,
     created_at: nowSP(),
-  });
+  }).select('id').single();
   if (movErr) {
     await supabase.from('produtos').update({ qtd: qtdAntes, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd);
     return res.status(500).json({ erro: 'Erro ao registrar movimentação.' });
@@ -767,7 +767,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
 
   await audit('movimentacao', { produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }, req.user, getClientIp(req));
   if (tipo === 'Entrada' && motivo === 'Compra') {
-    await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs });
+    await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movIns?.id });
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
   res.json({ ok: true, produto: prodAtualizado });
@@ -811,6 +811,12 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
     await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd);
     return res.status(500).json({ erro: 'Erro ao cancelar movimentação. Estoque não foi alterado.' });
   }
+  // Cancelou a compra → some também das Contas/Planilha/Relatórios (só lançamentos
+  // automáticos vinculados; pagamento digitado na mão na aba Contas nunca é tocado).
+  try {
+    await supabase.from('pagamentos_comprovantes').delete()
+      .eq('mov_id', mov.id).in('origem', ['estoque-auto', 'estoque-backfill']);
+  } catch (e) { console.error('contas-auto delete:', e.message); }
   await audit('cancelar_movimentacao', { mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }, req.user, getClientIp(req));
   res.json({ ok: true, novaQtd });
 });
@@ -1126,7 +1132,7 @@ const MAPA_CONTA_COMPRA = {
 // financeiro por categoria sem depender de lançamento manual. Falha aqui NUNCA derruba
 // a movimentação (best-effort). origem='estoque-auto' identifica os lançamentos
 // automáticos e os separa dos digitados na aba Contas.
-async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs }) {
+async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId }) {
   try {
     const v = Number((Number(custoUnit) * Number(qtd)).toFixed(2));
     if (!v || v <= 0) return;                          // sem preço real não polui as Contas
@@ -1138,6 +1144,7 @@ async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs
       valor_bruto: v, taxa: 0, valor_liquido: v, parcelas: 0,
       descricao: sanitizeText(`Compra estoque: ${produto.nome} × ${qtd}${obs ? ' — ' + obs : ''}`, 180),
       origem: 'estoque-auto', responsavel: responsavel || 'estoque',
+      mov_id: movId || null,                           // vínculo: cancelou a movimentação → apaga aqui também
       created_at: nowSP(), updated_at: nowSP(),
     });
   } catch (e) { console.error('contas-auto:', e.message); }
@@ -3284,14 +3291,14 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
       }
       if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
       const custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
-      await supabase.from('movimentacoes').insert({
+      const { data: movNota } = await supabase.from('movimentacoes').insert({
         produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
         tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
         custo: custoUnit, valor: Number((custoUnit * item.qtd).toFixed(2)),
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
-      });
+      }).select('id').single();
       const custoAntes = Number(item.produto.custo || 0);
-      await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp' });
+      await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
         custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
     }
@@ -3355,19 +3362,19 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente de novo.' });
 
   const custoUnit = custoNovo !== null ? custoNovo : Number(prod.custo || 0);
-  const { error: movErr } = await supabase.from('movimentacoes').insert({
+  const { data: movPend, error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo: 'Entrada', qtd, unidade: prod.unidade,
     custo: custoUnit, valor: Number((custoUnit * qtd).toFixed(2)),
     motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
-  });
+  }).select('id').single();
   if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
 
   // "Memorizar": salva o apelido (nome da nota → produto), pra próxima lançar sozinho.
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: 'termo' }); } catch (e) {}
   }
-  await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)' });
+  await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
   await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, custo: custoUnit, memorizar }, req.user, getClientIp(req));
   res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd, custo_aplicado: custoUnit });
@@ -3399,13 +3406,13 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     return res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
   }
   // Registra a movimentação de Entrada correspondente (rastreabilidade).
-  await supabase.from('movimentacoes').insert({
+  const { data: movNovo } = await supabase.from('movimentacoes').insert({
     produto_id: novo.id, produto_nome: novo.nome, categoria: novo.categoria,
     tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
     valor: Number((custo * qtd).toFixed(2)), motivo: 'Compra',
     responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
-  });
-  await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota' });
+  }).select('id').single();
+  await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: 'termo' }); } catch (e) {}
   }
@@ -4674,13 +4681,13 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     if (!sucesso) return res.json({ resposta: `❌ Não consegui atualizar ${prod.nome} agora (outro lançamento simultâneo). Tente de novo em instantes.` });
     const qtdAntesW = Number(prodAtual.qtd);
     const custoUnitW = custoNovoW !== null ? custoNovoW : Number(prod.custo || 0);
-    const { error: movErr } = await supabase.from('movimentacoes').insert({
+    const { data: movWpp, error: movErr } = await supabase.from('movimentacoes').insert({
       produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
       custo: custoUnitW, valor: Number((custoUnitW*qtd).toFixed(2)),
       motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
-    });
+    }).select('id').single();
     if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
-    if (tipo === 'Entrada') await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp' });
+    if (tipo === 'Entrada') await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id });
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, custo_novo: custoNovoW, remetente }, null, '');
     const linhaCusto = custoNovoW !== null && Math.abs(custoNovoW - Number(prod.custo || 0)) >= 0.01
       ? `\n💲 Custo: R$${Number(prod.custo || 0).toFixed(2)} → R$${custoNovoW.toFixed(2)}` : '';

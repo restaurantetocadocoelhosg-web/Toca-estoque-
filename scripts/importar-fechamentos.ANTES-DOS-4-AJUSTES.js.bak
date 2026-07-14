@@ -1,0 +1,305 @@
+const fs = require('fs');
+const path = require('path');
+
+const folder = process.argv[2];
+if (!folder) {
+  console.error('Uso: node scripts/importar-fechamentos.js "C:\\\\caminho\\\\da\\\\pasta"');
+  process.exit(1);
+}
+
+function norm(s) {
+  return String(s || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim();
+}
+
+function cleanLine(s) {
+  return String(s || '').replace(/\uFEFF/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function parseMoney(raw) {
+  if (raw === null || raw === undefined) return null;
+  let s = String(raw).replace(/R\$/gi, '').replace(/\s/g, '').trim();
+  if (!s) return null;
+  s = s.replace(/[^\d,.-]/g, '');
+  if (!s) return null;
+  const commas = (s.match(/,/g) || []).length;
+  if (commas > 1) {
+    const last = s.lastIndexOf(',');
+    s = s.slice(0, last).replace(/[.,]/g, '') + '.' + s.slice(last + 1);
+  } else if (s.includes(',') && s.includes('.')) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  } else if (s.includes(',')) {
+    s = s.replace(',', '.');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? Number(n.toFixed(2)) : null;
+}
+
+function findMoney(line) {
+  const text = String(line || '');
+  const prefixed = text.match(/R\$?\s*\d{1,3}(?:[.,]\d{3})*[,.]\d{2}|R\$?\s*\d+[,.]\d{2}/gi);
+  const matches = prefixed && prefixed.length
+    ? prefixed
+    : text.match(/(?:R\$?\s*)?\d{1,3}(?:[.,]\d{3})*[,.]\d{2}|(?:R\$?\s*)?\d+[,.]\d{2}/gi);
+  if (!matches || !matches.length) return null;
+  const raw = prefixed && prefixed.length ? matches[0] : matches[matches.length - 1];
+  const value = parseMoney(raw);
+  return value === null ? null : { raw, value };
+}
+
+function parseQtyStart(line) {
+  const m = String(line || '').trim().match(/^(\d{1,4})\b/);
+  return m ? Number(m[1]) : null;
+}
+
+function isoFromBR(d, m, y) {
+  const yy = Number(y.length === 2 ? `20${y}` : y);
+  const mm = Number(m);
+  const dd = Number(d);
+  const dt = new Date(Date.UTC(yy, mm - 1, dd));
+  if (dt.getUTCFullYear() !== yy || dt.getUTCMonth() !== mm - 1 || dt.getUTCDate() !== dd) return '';
+  return `${yy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+}
+
+function dateFromText(text) {
+  const m = String(text || '').match(/\b(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})\b/);
+  return m ? isoFromBR(m[1], m[2], m[3]) : '';
+}
+
+function dateFromFilename(file) {
+  const m = path.basename(file).match(/(\d{1,2})-(\d{1,2})-(\d{2,4})/);
+  return m ? isoFromBR(m[1], m[2], m[3]) : '';
+}
+
+function pagamentoDescricao(line) {
+  const n = norm(line);
+  if (/stone/.test(n)) return 'STONE';
+  if (/pag\s*bank|pagbank/.test(n)) return 'PAGBANK';
+  if (/pix/.test(n)) return line.match(/pix.*$/i)?.[0] || 'PIX';
+  if (/dinheiro/.test(n)) return 'DINHEIRO';
+  if (/buffet sem taxa/.test(n)) return 'BUFFET SEM TAXA';
+  if (/buffet/.test(n)) return 'BUFFET';
+  if (/encomenda|quentinha/.test(n)) return 'ENCOMENDA';
+  if (/restante do evento/.test(n)) return 'RESTANTE DO EVENTO';
+  if (/agua|água/.test(line)) return 'AGUAS';
+  return cleanLine(line.replace(/(?:R\$?\s*)?\d{1,3}(?:[.,]\d{3})*[,.]\d{2}|(?:R\$?\s*)?\d+[,.]\d{2}/gi, '')).slice(0, 90) || 'OUTROS';
+}
+
+function isPagamentoLine(line) {
+  const n = norm(line);
+  return /(stone|pag\s*bank|pagbank|pix|dinheiro|buffet|encomenda|quentinha|restante do evento|aguas? com gas)/.test(n);
+}
+
+function isCorteLine(line) {
+  const n = norm(line);
+  return /(erro|tara|canc|patroes|patroes|patrao|funcionario)/.test(n);
+}
+
+function shouldIgnoreDespesa(line) {
+  const n = norm(line);
+  return !n || /^obs\b/.test(n) || /resta pagar|ficou so o troco|ficou só o troco|troco para amanha|troco para amanhã/.test(n);
+}
+
+function sqlString(value) {
+  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+}
+
+function sqlJson(value) {
+  return sqlString(JSON.stringify(value ?? []));
+}
+
+function parseFile(file) {
+  const raw = fs.readFileSync(file, 'utf8');
+  const lines = raw.split(/\r?\n/).map(cleanLine).filter(Boolean);
+  const dateText = dateFromText(raw);
+  const dateFile = dateFromFilename(file);
+  const data = dateText || dateFile;
+  const issues = [];
+  const warnings = [];
+  const pagamentos = [];
+  const cortes = [];
+  const despesas = [];
+  const totaisVenda = [];
+  const totaisDespesa = [];
+  let pratos = 0;
+  let inDespesas = false;
+  let sawPeriodoNoite = false;
+  let sawTotalVenda = false;
+
+  if (!data) issues.push('sem data detectada');
+  if (dateText && dateFile && dateText !== dateFile) issues.push(`data do texto (${dateText}) diferente do arquivo (${dateFile})`);
+
+  for (const line of lines) {
+    const n = norm(line);
+    const money = findMoney(line);
+
+    if (/periodo noite|per[ií]odo noite/.test(n)) {
+      sawPeriodoNoite = true;
+      warnings.push('tem período noite/evento no mesmo arquivo');
+      continue;
+    }
+    if (/^despesa\b/.test(n)) {
+      inDespesas = true;
+      continue;
+    }
+    if (/pratos vendidos/.test(n)) {
+      const q = parseQtyStart(line);
+      if (q !== null) pratos += q;
+      continue;
+    }
+
+    if (/^total\b/.test(n)) {
+      if (money) {
+        if (inDespesas) totaisDespesa.push(money.value);
+        else {
+          totaisVenda.push(money.value);
+          sawTotalVenda = true;
+        }
+      }
+      continue;
+    }
+    if (/^valor despesa\b/.test(n)) {
+      if (money) totaisDespesa.push(money.value);
+      continue;
+    }
+    if (/taxas? de servi/.test(n)) {
+      warnings.push(`taxa de serviço informada fora do total: ${money ? money.value.toFixed(2) : '?'}`);
+      continue;
+    }
+
+    if (!inDespesas) {
+      if (!money) continue;
+      const qtd = parseQtyStart(line);
+      if (isCorteLine(line) && sawTotalVenda) {
+        cortes.push({ descricao: cleanLine(line.replace(money.raw, '').replace(/R\$/gi, '')).slice(0, 90), qtd, valor: money.value });
+      } else if (isPagamentoLine(line) && !/^obs\b/.test(n)) {
+        pagamentos.push({ descricao: pagamentoDescricao(line), qtd, valor: money.value });
+      } else if (/^obs\b/.test(n)) {
+        continue;
+      } else {
+        warnings.push(`linha com valor antes da despesa não classificada: ${line}`);
+      }
+      continue;
+    }
+
+    if (shouldIgnoreDespesa(line) || !money) continue;
+    const desc = cleanLine(line.replace(money.raw, '').replace(/R\$/gi, '')).slice(0, 90);
+    despesas.push({ descricao: desc || 'DESPESA', valor: money.value });
+  }
+
+  const somaPag = Number(pagamentos.reduce((s, p) => s + Number(p.valor || 0), 0).toFixed(2));
+  const somaQtdPag = pagamentos.reduce((s, p) => s + Number(p.qtd || 0), 0);
+  const somaCortes = Number(cortes.reduce((s, p) => s + Number(p.valor || 0), 0).toFixed(2));
+  const somaDesp = Number(despesas.reduce((s, p) => s + Number(p.valor || 0), 0).toFixed(2));
+  const totalVenda = Number(totaisVenda.reduce((s, v) => s + Number(v || 0), 0).toFixed(2));
+  const totalDespesa = totaisDespesa.length ? Number(totaisDespesa.reduce((s, v) => s + Number(v || 0), 0).toFixed(2)) : null;
+
+  if (totaisVenda.length === 0) issues.push('sem TOTAL de venda');
+  if (totaisVenda.length > 1) issues.push(`mais de um TOTAL de venda (${totaisVenda.map(v => v.toFixed(2)).join(' + ')})`);
+  if (sawPeriodoNoite) issues.push('contém PERÍODO NOITE/evento: revisar antes de importar');
+  if (Math.abs(somaPag - totalVenda) > 0.02) issues.push(`pagamentos (${somaPag.toFixed(2)}) diferente do total (${totalVenda.toFixed(2)})`);
+  if (pratos > 0 && somaQtdPag > 0 && somaQtdPag !== pratos) issues.push(`quantidade pagamentos (${somaQtdPag}) diferente dos pratos (${pratos})`);
+  if (totalDespesa !== null && Math.abs(somaDesp - totalDespesa) > 0.02) issues.push(`despesas somadas (${somaDesp.toFixed(2)}) diferente do total de despesa (${totalDespesa.toFixed(2)})`);
+
+  const status = issues.length ? 'REVISAR' : 'OK';
+  return {
+    arquivo: path.basename(file),
+    data,
+    status,
+    issues,
+    warnings,
+    pratos_vendidos: pratos,
+    vendas: totalVenda,
+    total_venda_declarado: totalVenda,
+    pagamentos,
+    soma_pagamentos: somaPag,
+    qtd_pagamentos: somaQtdPag,
+    cortes,
+    soma_cortes: somaCortes,
+    despesas,
+    soma_despesas: somaDesp,
+    total_despesa_declarado: totalDespesa,
+    relatorio_texto: raw.trim(),
+  };
+}
+
+const files = fs.readdirSync(folder)
+  .filter(f => /\.txt$/i.test(f))
+  .map(f => path.join(folder, f))
+  .sort((a, b) => a.localeCompare(b));
+
+const rows = files.map(parseFile);
+const outDir = path.join(folder, '_import_preview');
+fs.mkdirSync(outDir, { recursive: true });
+
+const csvHeader = [
+  'status', 'arquivo', 'data', 'pratos', 'qtd_pagamentos', 'vendas_total', 'soma_pagamentos',
+  'despesas_total', 'soma_despesas', 'cortes', 'avisos', 'problemas',
+];
+const csvRows = rows.map(r => [
+  r.status,
+  r.arquivo,
+  r.data,
+  r.pratos_vendidos,
+  r.qtd_pagamentos,
+  r.total_venda_declarado.toFixed(2).replace('.', ','),
+  r.soma_pagamentos.toFixed(2).replace('.', ','),
+  r.total_despesa_declarado === null ? '' : r.total_despesa_declarado.toFixed(2).replace('.', ','),
+  r.soma_despesas.toFixed(2).replace('.', ','),
+  r.soma_cortes.toFixed(2).replace('.', ','),
+  r.warnings.join(' | '),
+  r.issues.join(' | '),
+]);
+const csv = [csvHeader, ...csvRows].map(row => row.map(c => `"${String(c ?? '').replace(/"/g, '""')}"`).join(';')).join('\n');
+fs.writeFileSync(path.join(outDir, 'preview.csv'), '\uFEFF' + csv, 'utf8');
+fs.writeFileSync(path.join(outDir, 'preview.json'), JSON.stringify(rows, null, 2), 'utf8');
+
+const pendentes = rows
+  .filter(r => r.status !== 'OK')
+  .map(r => [
+    `${r.arquivo} -> ${r.data || 'sem data'}`,
+    `  problemas: ${r.issues.join('; ') || '-'}`,
+    `  vendas: total ${r.total_venda_declarado.toFixed(2)} / pagamentos ${r.soma_pagamentos.toFixed(2)}`,
+    `  pratos: ${r.pratos_vendidos} / qtd pagamentos ${r.qtd_pagamentos}`,
+    `  despesas: total ${r.total_despesa_declarado === null ? '-' : r.total_despesa_declarado.toFixed(2)} / soma ${r.soma_despesas.toFixed(2)}`,
+  ].join('\n'))
+  .join('\n\n');
+fs.writeFileSync(
+  path.join(outDir, 'pendentes_revisao.txt'),
+  pendentes || 'Nenhum fechamento pendente de revisao.\n',
+  'utf8'
+);
+
+const okRows = rows.filter(r => r.status === 'OK');
+const values = okRows.map(r => `(${[
+  sqlString(r.data),
+  r.vendas.toFixed(2),
+  sqlString(`Importado automaticamente de ${r.arquivo}`),
+  sqlString('Codex importador'),
+  Number(r.pratos_vendidos || 0),
+  sqlJson(r.pagamentos),
+  sqlJson(r.cortes),
+  sqlJson(r.despesas),
+  sqlString(r.relatorio_texto.slice(0, 6000)),
+  'NOW()',
+  'NOW()',
+].join(', ')})`);
+
+const sql = values.length
+  ? `INSERT INTO fechamentos_diarios (data, vendas, observacao, responsavel, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, created_at, updated_at)\nVALUES\n${values.join(',\n')}\nON CONFLICT (data) DO NOTHING;\n`
+  : '-- Nenhum dia OK para importar automaticamente.\n';
+fs.writeFileSync(path.join(outDir, 'import_ok.sql'), sql, 'utf8');
+
+const ok = rows.filter(r => r.status === 'OK').length;
+const revisar = rows.length - ok;
+console.log(`Arquivos: ${rows.length}`);
+console.log(`OK: ${ok}`);
+console.log(`REVISAR: ${revisar}`);
+console.log(`Preview: ${path.join(outDir, 'preview.csv')}`);
+console.log(`SQL OK: ${path.join(outDir, 'import_ok.sql')}`);
+for (const r of rows.filter(x => x.status !== 'OK')) {
+  console.log(`REVISAR ${r.data || r.arquivo}: ${r.issues.join('; ')}`);
+}
