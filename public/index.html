@@ -907,6 +907,11 @@ select.big-input { font-size: 14px; }
             <div class="real-money-list" id="real-despesas-list"></div>
           </div>
 
+          <div class="real-block">
+            <div class="real-block-head"><span>🥡 Lixo final do buffet (anotação — não entra nas contas)</span></div>
+            <input class="small-input" id="real-lixo" type="number" step="1" min="0" max="99999" inputmode="numeric" placeholder="Peso em gramas (ex: 2785)">
+          </div>
+
           <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
           <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar movimento</button>
           <div class="real-danger-actions">
@@ -1295,7 +1300,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v54</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v55</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2731,9 +2736,16 @@ function moneyInputValue(n) {
 
 function defaultRealRows(kind) {
   if (kind === 'pagamentos') {
+    // Formato novo (18/07): registro por TIPO de pagamento em cada maquininha,
+    // igual ao texto do movimento que o Rubens manda todo dia.
     return [
-      { qtd: '', descricao: 'STONE', valor: '' },
-      { qtd: '', descricao: 'PAGBANK', valor: '' },
+      { qtd: '', descricao: 'CRED STONE', valor: '' },
+      { qtd: '', descricao: 'DEB STONE', valor: '' },
+      { qtd: '', descricao: 'VOUCHER STONE', valor: '' },
+      { qtd: '', descricao: 'PIX', valor: '' },
+      { qtd: '', descricao: 'CRED PAG BANK', valor: '' },
+      { qtd: '', descricao: 'DEB PAG BANK', valor: '' },
+      { qtd: '', descricao: 'PIX PAG BANK', valor: '' },
       { qtd: '', descricao: 'DINHEIRO', valor: '' },
     ];
   }
@@ -3337,12 +3349,30 @@ function extrairValorLinha(linha) {
 }
 
 function normalizarLinhaRelatorio(linha) {
+  // Tira tamb\u00e9m os "______" dos t\u00edtulos de se\u00e7\u00e3o (______DESPESA DO DIA______),
+  // sen\u00e3o /^despesa/ nunca casa e as despesas iam parar nos recebimentos.
   return String(linha || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
-    .replace(/^[.\-\s]+/, '')
+    .replace(/^[._\-\s]+/, '')
+    .replace(/[._\-\s]+$/, '')
     .toLowerCase()
     .trim();
+}
+
+// "LIXO FINAL BUFFET 2.785g" \u2192 2785 (gramas). Aceita g/kg, ponto ou v\u00edrgula.
+// \u00c9 ANOTA\u00c7\u00c3O: nunca vira despesa nem recebimento.
+function extrairLixoBuffet(linha) {
+  const m = String(linha || '').match(/([\d.,]+)\s*(kg|g)\b/i);
+  if (!m) return null;
+  const unidade = m[2].toLowerCase();
+  if (unidade === 'kg') {
+    // Em kg o separador (vírgula OU ponto) é decimal: "2,7kg"/"2.785kg" → 2700/2785g.
+    const v = Number(m[1].replace(',', '.'));
+    return Number.isFinite(v) ? Math.round(v * 1000) : null;
+  }
+  const v = Number(m[1].replace(/[.,]/g, ''));
+  return Number.isFinite(v) ? v : null;
 }
 
 function deveIgnorarLinhaFinanceira(linha) {
@@ -3469,9 +3499,17 @@ async function lerRelatorioColado() {
   let emDespesas = false;
   let passouTotal = false;
   let pratos = 0;
+  let lixoBuffetG = null;
 
   for (const linha of linhas) {
     const linhaNorm = normalizarLinhaRelatorio(linha);
+    // LIXO vem ANTES de tudo: é anotação em gramas, nunca despesa/recebimento
+    // (sem isso, "LIXO FINAL BUFFET 2.785g" virava despesa de R$2,78).
+    if (/\blixo\b/.test(linhaNorm)) {
+      const g = extrairLixoBuffet(linha);
+      if (g != null) lixoBuffetG = g;
+      continue;
+    }
     if (/^despesa\b/i.test(linhaNorm)) { emDespesas = true; continue; }
     if (deveIgnorarLinhaFinanceira(linha)) continue;
     const pratosMatch = linha.match(/(\d+)\s+pratos?\s+vendidos?/i);
@@ -3494,6 +3532,7 @@ async function lerRelatorioColado() {
   }
 
   if (pratos) document.getElementById('real-pratos').value = pratos;
+  if (lixoBuffetG != null) { const lx = document.getElementById('real-lixo'); if (lx) lx.value = lixoBuffetG; }
   if (pagamentos.length) renderRealMoneyRows('pagamentos', pagamentos);
   if (cortes.length) renderRealMoneyRows('cortes', cortes);
   if (despesas.length) renderRealMoneyRows('despesas', despesas);
@@ -3542,6 +3581,8 @@ function renderRealidade(d) {
   pratosInput.value = d.pratos_vendidos || '';
   relatorioInput.value = d.relatorio_texto || '';
   obsInput.value = d.observacao || '';
+  const lixoInput = document.getElementById('real-lixo');
+  if (lixoInput) lixoInput.value = d.lixo_buffet_g != null ? d.lixo_buffet_g : '';
   const pagamentosRows = d.pagamentos?.length ? d.pagamentos : (d.venda_lancada && Number(d.vendas || 0) > 0 ? [{ descricao: 'TOTAL DO DIA', valor: d.vendas }] : []);
   renderRealMoneyRows('pagamentos', pagamentosRows);
   renderRealMoneyRows('cortes', d.cortes || []);
@@ -3608,6 +3649,11 @@ function renderRealidade(d) {
       <div class="real-label">Lançamentos</div>
       <div class="real-val">${d.movimentos?.total || 0}</div>
       <div class="real-sub">${d.movimentos?.n_consumo || 0} saídas · ${d.movimentos?.n_perdas || 0} perdas</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">🥡 Lixo buffet</div>
+      <div class="real-val">${d.lixo_buffet_g != null ? (d.lixo_buffet_g >= 1000 ? (d.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + ' kg' : d.lixo_buffet_g + ' g') : '—'}</div>
+      <div class="real-sub">anotação — fora das contas</div>
     </div>`;
 
   const ontem = d.comparativo?.ontem;
@@ -3653,6 +3699,7 @@ async function salvarRealidade() {
   const btn = document.getElementById('real-btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
   try {
+    const lixoRaw = document.getElementById('real-lixo')?.value ?? '';
     const d = await apiPost('/api/realidade-dia', {
       data,
       vendas,
@@ -3662,6 +3709,7 @@ async function salvarRealidade() {
       cortes,
       despesas,
       relatorio_texto: relatorioTexto,
+      lixo_buffet_g: lixoRaw === '' ? null : Math.floor(Number(lixoRaw) || 0),
     });
     realidadeCache = d;
     renderRealidade(d);
@@ -3819,6 +3867,11 @@ function renderPlanilhaMensal(d) {
       <div class="real-label">Dias fechados</div>
       <div class="real-val">${t.dias_com_caixa || 0}/${t.dias_mes || 0}</div>
       <div class="real-sub">${t.dias_sem_caixa || 0} com estoque sem caixa</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">🥡 Lixo buffet no mês</div>
+      <div class="real-val">${t.lixo_buffet_g > 0 ? (t.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + ' kg' : '—'}</div>
+      <div class="real-sub">${t.dias_com_lixo || 0} dia(s) anotado(s) — fora das contas</div>
     </div>`;
 
   insightEl.textContent = `Mês ${d.mes_label}: ${t.dias_com_movimento || 0} dia(s) com movimento. Compras aparecem separadas do resultado, igual combinamos.`;
@@ -3836,8 +3889,8 @@ function renderPlanilhaMensal(d) {
   tabelaEl.innerHTML = `
     <thead><tr>
       <th>Data</th><th>Dia</th><th>Status</th><th class="num">Pratos</th><th class="num">Vendas</th>
-      <th class="num">Dinheiro</th><th class="num">Stone</th><th class="num">PagBank</th><th class="num">Pix</th>
-      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Mov.</th>
+      <th class="num">Dinheiro</th><th class="num">Crédito</th><th class="num">Débito</th><th class="num">Voucher</th><th class="num">Pix</th><th class="num">Cartão(maq.)</th>
+      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Lixo</th><th class="num">Mov.</th>
     </tr></thead>
     <tbody>${(d.dias || []).map(row => `
       <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
@@ -3847,14 +3900,17 @@ function renderPlanilhaMensal(d) {
         <td class="num">${row.pratos_vendidos || '—'}</td>
         <td class="num">${fmtSheetMoney(row.vendas)}</td>
         <td class="num">${fmtSheetMoney(row.formas?.dinheiro?.valor)}</td>
-        <td class="num">${fmtSheetMoney(row.formas?.stone?.valor)}</td>
-        <td class="num">${fmtSheetMoney(row.formas?.pagbank?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.credito?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.debito?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.voucher?.valor)}</td>
         <td class="num">${fmtSheetMoney(row.formas?.pix?.valor)}</td>
+        <td class="num">${fmtSheetMoney(row.formas?.cartao?.valor)}</td>
         <td class="num">${fmtSheetMoney(row.total_cortes)}</td>
         <td class="num">${fmtSheetMoney(row.despesas)}</td>
         <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
         <td class="num">${fmtSheetMoney(row.perdas)}</td>
         <td class="num"><b class="${Number(row.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_dia_estimado)}</b></td>
+        <td class="num">${row.lixo_buffet_g != null && row.lixo_buffet_g > 0 ? row.lixo_buffet_g + 'g' : '—'}</td>
         <td class="num">${row.movimentos_total || '—'}</td>
       </tr>`).join('')}</tbody>`;
 

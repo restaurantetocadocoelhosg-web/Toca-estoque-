@@ -1035,24 +1035,32 @@ function linhaFinanceiraTexto(row, comQtd = false) {
   return `${qtd}${row.descricao} ${fmtBRL(row.valor)}${obs}`;
 }
 
+// Classificação por TIPO de pagamento (pedido do Rubens 18/07): o que importa é
+// Dinheiro/Crédito/Débito/Voucher/PIX somando as duas maquininhas — não a maquininha.
+// Formato novo do movimento: "CRED STONE", "DEB PAG BANK", "VOUCHER STONE", "PIX PAG BANK"...
+// A ORDEM dos testes importa: "CRED STONE" tem que cair em Crédito ANTES do teste de
+// maquininha. Dias antigos (só "STONE"/"PAGBANK", sem tipo — 69 dias de mai-jul/26) caem
+// no balde "Cartão (maq.)" pra continuarem aparecendo e somando certo na Planilha.
 function formaPagamentoInfo(descricao) {
   const n = normalizeSearch(descricao);
   if (/dinheiro|especie/.test(n)) return { key: 'dinheiro', label: 'Dinheiro' };
-  if (/stone/.test(n)) return { key: 'stone', label: 'Stone' };
-  if (/pag\s*bank|pagbank/.test(n)) return { key: 'pagbank', label: 'PagBank' };
+  if (/voucher|vale\s*refeicao|alelo|sodexo|pluxee|\bvr\b|\bva\b/.test(n)) return { key: 'voucher', label: 'Voucher' };
+  if (/\bcred(ito)?\b/.test(n)) return { key: 'credito', label: 'Crédito' };
+  if (/\bdeb(ito)?\b/.test(n)) return { key: 'debito', label: 'Débito' };
   if (/pix/.test(n)) return { key: 'pix', label: 'Pix' };
   if (/ifood|i-food|entrega|delivery/.test(n)) return { key: 'ifood', label: 'Ifood/Entrega' };
-  if (/cartao|cart|credito|debito|visa|master|elo|hipercard|amex|voucher/.test(n)) return { key: 'cartao', label: 'Cartão' };
+  if (/stone|pag\s*bank|pagbank|cartao|visa|master|elo|hipercard|amex/.test(n)) return { key: 'cartao', label: 'Cartão (maq.)' };
   return { key: 'outros', label: 'Outros' };
 }
 
 function resumoFormasPagamento(pagamentos) {
   const base = {
     dinheiro: { key: 'dinheiro', forma: 'Dinheiro', qtd: 0, valor: 0 },
-    stone: { key: 'stone', forma: 'Stone', qtd: 0, valor: 0 },
-    pagbank: { key: 'pagbank', forma: 'PagBank', qtd: 0, valor: 0 },
+    credito: { key: 'credito', forma: 'Crédito', qtd: 0, valor: 0 },
+    debito: { key: 'debito', forma: 'Débito', qtd: 0, valor: 0 },
+    voucher: { key: 'voucher', forma: 'Voucher', qtd: 0, valor: 0 },
     pix: { key: 'pix', forma: 'Pix', qtd: 0, valor: 0 },
-    cartao: { key: 'cartao', forma: 'Cartão', qtd: 0, valor: 0 },
+    cartao: { key: 'cartao', forma: 'Cartão (maq.)', qtd: 0, valor: 0 },
     ifood: { key: 'ifood', forma: 'Ifood/Entrega', qtd: 0, valor: 0 },
     outros: { key: 'outros', forma: 'Outros', qtd: 0, valor: 0 },
   };
@@ -1784,7 +1792,7 @@ async function resumoMovimentosDia(dataDia) {
 
 async function buscarFechamentoDia(dataDia) {
   const { data, error } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g')
     .eq('data', dataDia)
     .maybeSingle();
   if (error) {
@@ -1842,6 +1850,8 @@ async function montarRealidadeDia(dataDiaParam) {
     despesas_lista: despesasLista,
     despesas: despesasCaixa,
     relatorio_texto: row?.relatorio_texto || '',
+    // Lixo do buffet é ANOTAÇÃO (gramas): não entra em venda, despesa nem estoque.
+    lixo_buffet_g: row?.lixo_buffet_g ?? null,
     configuracao_pendente: fechamento.configuracao_pendente,
     compras_estoque: mov.compras,
     consumo_estoque: mov.consumo,
@@ -1921,7 +1931,7 @@ async function montarPlanilhaMensal(mesParam) {
 
   let fechamentos = [];
   const { data: fechData, error: fechErr } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g')
     .gte('data', inicio)
     .lte('data', fim)
     .order('data', { ascending: true });
@@ -1954,6 +1964,8 @@ async function montarPlanilhaMensal(mesParam) {
     fluxo_caixa: 0,
     anomalias: 0,
     ticket_medio: null,
+    lixo_buffet_g: 0, // anotação acumulada do mês (gramas) — fora das somas financeiras
+    dias_com_lixo: 0,
   };
 
   const dias = datas.map(dataDia => {
@@ -1994,6 +2006,8 @@ async function montarPlanilhaMensal(mesParam) {
     totais.resultado_dia_estimado += resultadoDia;
     totais.fluxo_caixa += fluxoCaixa;
     totais.anomalias += mov.anomalias;
+    const lixoDia = row?.lixo_buffet_g != null ? Number(row.lixo_buffet_g) : null;
+    if (lixoDia != null && lixoDia > 0) { totais.lixo_buffet_g += lixoDia; totais.dias_com_lixo += 1; }
 
     return {
       data: dataDia,
@@ -2022,6 +2036,7 @@ async function montarPlanilhaMensal(mesParam) {
       movimentos: mov,
       responsavel: row?.responsavel || '',
       observacao: row?.observacao || '',
+      lixo_buffet_g: row?.lixo_buffet_g ?? null,
       atualizado_em: row?.updated_at || row?.created_at || null,
     };
   });
@@ -2250,6 +2265,7 @@ function montarMensagemFechamentoDia(d) {
   msg += `🍳 Consumo do estoque: ${fmtBRL(d.consumo_estoque)}\n`;
   msg += `🗑️ Perdas do estoque: ${fmtBRL(d.perdas)}\n`;
   if (d.despesas > 0) msg += `💸 Despesas do caixa: ${fmtBRL(d.despesas)}\n`;
+  if (d.lixo_buffet_g != null && d.lixo_buffet_g > 0) msg += `🥡 Lixo final do buffet: ${d.lixo_buffet_g}g (anotação — não entra nas contas)\n`;
 
   if (d.pagamentos?.length) {
     msg += `\n💳 *Recebimentos:*\n`;
@@ -2325,6 +2341,11 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
     const observacao = sanitizeText(req.body?.observacao || '', 300);
     const pratosVendidos = parseNonNegativeInteger(req.body?.pratos_vendidos || 0);
     const relatorioTexto = sanitizeLongText(req.body?.relatorio_texto || '', 6000);
+    // Lixo do buffet: anotação em gramas (não soma em nada financeiro). Aceita 0..99999g.
+    const lixoRaw = req.body?.lixo_buffet_g;
+    const lixoBuffetG = (lixoRaw === null || lixoRaw === undefined || lixoRaw === '')
+      ? null
+      : Math.min(Math.max(parseNonNegativeInteger(lixoRaw) || 0, 0), 99999);
     if (vendas === null) return res.status(400).json({ erro: 'Informe o movimento do caixa com valor válido.' });
 
     const { error } = await supabase.from('fechamentos_diarios').upsert({
@@ -2336,6 +2357,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       cortes,
       despesas,
       relatorio_texto: relatorioTexto,
+      lixo_buffet_g: lixoBuffetG,
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
     }, { onConflict: 'data' });
