@@ -3318,6 +3318,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
         tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
         custo: custoUnit, valor: Number((custoUnit * item.qtd).toFixed(2)),
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
+        qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
       }).select('id').single();
       const custoAntes = Number(item.produto.custo || 0);
       await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
@@ -3389,6 +3390,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
     tipo: 'Entrada', qtd, unidade: prod.unidade,
     custo: custoUnit, valor: Number((custoUnit * qtd).toFixed(2)),
     motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
+    qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
   }).select('id').single();
   if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
 
@@ -3433,6 +3435,7 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
     valor: Number((custo * qtd).toFixed(2)), motivo: 'Compra',
     responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
+    qtd_antes: 0, qtd_depois: qtd, // produto criado agora: 0 → primeira entrada
   }).select('id').single();
   await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
   if (memorizar && pend.produto_cupom) {
@@ -4707,6 +4710,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
       produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
       custo: custoUnitW, valor: Number((custoUnitW*qtd).toFixed(2)),
       motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
+      qtd_antes: qtdAntesW, qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
     }).select('id').single();
     if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
     if (tipo === 'Entrada') await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id });
