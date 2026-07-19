@@ -3068,39 +3068,156 @@ app.get('/api/relatorio/:tipo', auth, async (req, res) => {
       html = paginaRelatorio('Movimentações', 'Últimos lançamentos agrupados por dia (até 400).', corpo || '<div class="cat"><div style="padding:24px;text-align:center;color:#64748b">Sem movimentações.</div></div>');
 
     } else if (tipo === 'fechamento') {
+      // FECHAMENTO MENSAL OFICIAL (v59) — documento com cara de planilha de fluxo de
+      // caixa: grade estilo Excel, cabeçalho escuro, zebra, linha de TOTAL, valores
+      // pt-BR, A4 paisagem, botão "Salvar em PDF" (imprime direto). Pedido do Rubens
+      // 19/07: "pdf oficial do mês, estilo planilha fluxo de caixa" (o CSV cru era
+      // horrível de ver). Também remove as colunas mortas Stone/PagBank (resto do v55).
       const planilha = await montarPlanilhaMensal(req.query?.mes);
       const t = planilha.totais;
-      const chips =
-        `<div class="chip" style="color:#16a34a">Vendas<b>${fmtBRL(t.vendas)}</b></div>` +
-        `<div class="chip">Pratos<b>${t.pratos_vendidos}</b></div>` +
-        `<div class="chip" style="color:#ea580c">Consumo<b>${fmtBRL(t.consumo_estoque)}</b></div>` +
-        `<div class="chip" style="color:#ef4444">Perdas<b>${fmtBRL(t.perdas)}</b></div>` +
-        `<div class="chip" style="color:#ef4444">Despesas<b>${fmtBRL(t.despesas)}</b></div>` +
-        `<div class="chip" style="color:${t.resultado_dia_estimado < 0 ? '#ef4444' : '#16a34a'}">Resultado<b>${fmtBRL(t.resultado_dia_estimado)}</b></div>`;
+      const brl = (v) => 'R$ ' + Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const neg = (v) => Number(v || 0) < 0 ? ' neg' : '';
+      const F_KEYS = [['dinheiro','Dinheiro'],['credito','Crédito'],['debito','Débito'],['voucher','Voucher'],['pix','Pix'],['cartao','Cartão (maq.)']];
+      // totais por tipo (a partir dos dias — mesmos baldes da Planilha)
+      const somaFormas = {};
+      for (const [k] of F_KEYS) somaFormas[k] = 0;
+      let somaIfoodOutros = 0;
+      for (const d of planilha.dias) {
+        for (const [k] of F_KEYS) somaFormas[k] += Number(d.formas?.[k]?.valor || 0);
+        somaIfoodOutros += Number(d.formas?.ifood?.valor || 0) + Number(d.formas?.outros?.valor || 0);
+      }
 
-      const formas = planilha.formas_pagamento.length
-        ? `<div class="cat"><div class="cat-h" style="background:#0f766e"><span>Recebimentos por forma</span><span>${fmtBRL(t.vendas)}</span></div><table><tr><th>Forma</th><th class="num">Qtd</th><th class="num">Valor</th><th class="num">% vendas</th></tr>` +
-          planilha.formas_pagamento.map(f => `<tr><td>${escHtml(f.forma)}</td><td class="num">${f.qtd || ''}</td><td class="num">${fmtBRL(f.valor)}</td><td class="num">${pct(f.valor, t.vendas)?.toFixed(2).replace('.', ',') || '0,00'}%</td></tr>`).join('') +
-          `</table></div>`
-        : '';
-
-      const linhas = planilha.dias.map(d => {
-        const statusLabel = d.status === 'fechado' ? 'Fechado' : d.status === 'caixa' ? 'Só caixa' : d.status === 'sem_caixa' ? 'Falta caixa' : 'Sem movimento';
-        const cor = d.status === 'fechado' ? '#16a34a' : d.status === 'sem_caixa' ? '#ef4444' : d.status === 'caixa' ? '#f59e0b' : '#94a3b8';
-        return `<tr><td>${escHtml(d.data_br)}</td><td>${escHtml(d.dia_semana)}</td>` +
-          `<td><span class="badge" style="background:${cor}22;color:${cor}">${statusLabel}</span></td>` +
-          `<td class="num">${d.pratos_vendidos || ''}</td><td class="num">${fmtBRL(d.vendas)}</td>` +
-          `<td class="num">${fmtBRL(d.formas?.dinheiro?.valor || 0)}</td><td class="num">${fmtBRL(d.formas?.stone?.valor || 0)}</td>` +
-          `<td class="num">${fmtBRL(d.formas?.pagbank?.valor || 0)}</td><td class="num">${fmtBRL(d.formas?.pix?.valor || 0)}</td>` +
-          `<td class="num">${fmtBRL(d.despesas)}</td><td class="num">${fmtBRL(d.consumo_estoque)}</td>` +
-          `<td class="num">${fmtBRL(d.perdas)}</td><td class="num">${fmtBRL(d.resultado_dia_estimado)}</td></tr>`;
+      const diasComMov = planilha.dias.filter(d => d.tem_movimento);
+      const linhasDia = diasComMov.map((d, i) => {
+        const fimSemana = /s[áa]b|dom/i.test(d.dia_semana || '');
+        return `<tr class="${i % 2 ? 'zebra' : ''}${fimSemana ? ' fds' : ''}">` +
+          `<td class="c">${escHtml(d.data_br)}</td><td class="c">${escHtml(d.dia_semana || '')}</td>` +
+          `<td class="num">${d.pratos_vendidos || '—'}</td><td class="num b">${brl(d.vendas)}</td>` +
+          F_KEYS.map(([k]) => `<td class="num">${Number(d.formas?.[k]?.valor || 0) > 0 ? brl(d.formas[k].valor) : '—'}</td>`).join('') +
+          `<td class="num">${Number(d.total_cortes) > 0 ? brl(d.total_cortes) : '—'}</td>` +
+          `<td class="num">${Number(d.despesas) > 0 ? brl(d.despesas) : '—'}</td>` +
+          `<td class="num">${Number(d.compras_estoque) > 0 ? brl(d.compras_estoque) : '—'}</td>` +
+          `<td class="num">${Number(d.consumo_estoque) > 0 ? brl(d.consumo_estoque) : '—'}</td>` +
+          `<td class="num">${Number(d.perdas) > 0 ? brl(d.perdas) : '—'}</td>` +
+          `<td class="num b${neg(d.resultado_dia_estimado)}">${brl(d.resultado_dia_estimado)}</td>` +
+          `<td class="num">${d.lixo_buffet_g != null && d.lixo_buffet_g > 0 ? d.lixo_buffet_g + 'g' : '—'}</td></tr>`;
       }).join('');
-      const tabela = `<div class="cat"><div class="cat-h" style="background:#334155"><span>Dias do mês</span><span>${t.dias_com_movimento}/${t.dias_mes} movimentados</span></div>` +
-        `<table><tr><th>Data</th><th>Dia</th><th>Status</th><th class="num">Pratos</th><th class="num">Vendas</th><th class="num">Dinheiro</th><th class="num">Stone</th><th class="num">PagBank</th><th class="num">Pix</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th></tr>${linhas}</table></div>`;
-      const pend = planilha.pendencias.sem_caixa.length
-        ? `<div class="cat"><div style="padding:16px;color:#ef4444;font-weight:700">Atenção: ${planilha.pendencias.sem_caixa.length} dia(s) têm movimentação de estoque, mas ainda não têm movimento do caixa lançado: ${planilha.pendencias.sem_caixa.map(dataBR).join(', ')}.</div></div>`
+
+      const linhaTotal = `<tr class="total"><td class="c" colspan="2">TOTAL DO MÊS</td>` +
+        `<td class="num">${t.pratos_vendidos}</td><td class="num">${brl(t.vendas)}</td>` +
+        F_KEYS.map(([k]) => `<td class="num">${brl(somaFormas[k])}</td>`).join('') +
+        `<td class="num">${brl(t.cortes)}</td><td class="num">${brl(t.despesas)}</td>` +
+        `<td class="num">${brl(t.compras_estoque)}</td><td class="num">${brl(t.consumo_estoque)}</td>` +
+        `<td class="num">${brl(t.perdas)}</td><td class="num${neg(t.resultado_dia_estimado)}">${brl(t.resultado_dia_estimado)}</td>` +
+        `<td class="num">${t.lixo_buffet_g > 0 ? (t.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + 'kg' : '—'}</td></tr>`;
+
+      const linhasFormas = planilha.formas_pagamento.map((f, i) =>
+        `<tr class="${i % 2 ? 'zebra' : ''}"><td>${escHtml(f.forma)}</td><td class="num">${brl(f.valor)}</td>` +
+        `<td class="num">${pct(f.valor, t.vendas) != null ? pct(f.valor, t.vendas).toFixed(1).replace('.', ',') + '%' : '—'}</td></tr>`).join('');
+
+      const pendHtml = planilha.pendencias.sem_caixa.length
+        ? `<div class="aviso">⚠️ ${planilha.pendencias.sem_caixa.length} dia(s) com estoque movimentado mas SEM caixa lançado: ${planilha.pendencias.sem_caixa.map(dataBR).join(', ')} — os totais acima não incluem as vendas desses dias.</div>`
         : '';
-      html = paginaRelatorio('Fechamento Mensal', `Planilha do mês ${planilha.mes_label}, no estilo fluxo de caixa.`, `<div class="barra">${chips}</div>${pend}${formas}${tabela}`);
+
+      const geradoEm = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+      html = `<!DOCTYPE html><html lang="pt-BR"><head><meta charset="utf-8">
+<title>Fechamento Mensal ${escHtml(planilha.mes_label)} — Toca do Coelho</title>
+<style>
+  @page { size: A4 landscape; margin: 10mm; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: 'Segoe UI', Arial, sans-serif; color: #1a202c; background: #eef1f5; }
+  .doc { max-width: 1180px; margin: 0 auto; background: #fff; padding: 26px 30px; }
+  .no-print { text-align: center; padding: 14px; }
+  .btn-pdf { background: #14532d; color: #fff; border: 0; border-radius: 8px; padding: 12px 26px; font-size: 15px; font-weight: 700; cursor: pointer; }
+  header.doc-h { display: flex; justify-content: space-between; align-items: flex-end; border-bottom: 4px solid #14532d; padding-bottom: 10px; margin-bottom: 14px; }
+  .doc-h h1 { margin: 0; font-size: 21px; color: #14532d; letter-spacing: .5px; }
+  .doc-h .sub { color: #64748b; font-size: 12px; margin-top: 3px; }
+  .doc-h .mes { text-align: right; }
+  .doc-h .mes b { display: block; font-size: 24px; color: #14532d; }
+  .doc-h .mes span { font-size: 11px; color: #64748b; }
+  .resumo { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; margin: 12px 0 16px; }
+  .kpi { border: 1px solid #d7dde5; border-radius: 6px; padding: 8px 10px; background: #f8fafc; }
+  .kpi .l { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: #64748b; }
+  .kpi .v { font-size: 14px; font-weight: 800; margin-top: 2px; white-space: nowrap; }
+  .kpi .v.green { color: #15803d; } .kpi .v.red { color: #b91c1c; } .kpi .v.orange { color: #c2410c; }
+  h2.sec { font-size: 13px; text-transform: uppercase; letter-spacing: .6px; color: #14532d; border-left: 4px solid #14532d; padding-left: 8px; margin: 20px 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-size: 11px; }
+  th { background: #14532d; color: #fff; padding: 6px 6px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; border: 1px solid #0e3a20; }
+  th.num, td.num { text-align: right; }
+  td { border: 1px solid #d7dde5; padding: 5px 6px; white-space: nowrap; }
+  td.c { text-align: center; }
+  td.b { font-weight: 700; }
+  td.neg, .neg { color: #b91c1c; }
+  tr.zebra td { background: #f4f7fa; }
+  tr.fds td { background: #fdf6e3; }
+  tr.total td { background: #14532d; color: #fff; font-weight: 800; border-color: #0e3a20; font-size: 11.5px; }
+  .duascol { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .aviso { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 6px; padding: 10px 12px; font-size: 12px; margin: 10px 0; font-weight: 600; }
+  .nota { font-size: 10px; color: #64748b; margin-top: 6px; }
+  footer.doc-f { margin-top: 26px; border-top: 1px solid #d7dde5; padding-top: 8px; display: flex; justify-content: space-between; font-size: 10px; color: #64748b; }
+  @media print { body { background: #fff; } .no-print { display: none; } .doc { padding: 0; max-width: none; } }
+</style></head><body>
+<div class="no-print"><button class="btn-pdf" onclick="window.print()">📄 Salvar em PDF / Imprimir</button>
+  <div style="font-size:12px;color:#64748b;margin-top:6px">Na janela de impressão escolha “Salvar como PDF” — o documento já sai em A4 deitado.</div></div>
+<div class="doc">
+  <header class="doc-h">
+    <div><h1>🐰 RESTAURANTE TOCA DO COELHO</h1><div class="sub">Fechamento Mensal — Fluxo de Caixa Operacional · São Gonçalo/RJ</div></div>
+    <div class="mes"><span>Mês de referência</span><b>${escHtml(planilha.mes_label)}</b><span>Gerado em ${escHtml(geradoEm)}</span></div>
+  </header>
+
+  <div class="resumo">
+    <div class="kpi"><div class="l">Vendas</div><div class="v green">${brl(t.vendas)}</div></div>
+    <div class="kpi"><div class="l">Pratos</div><div class="v">${t.pratos_vendidos}${t.ticket_medio ? ' · ' + brl(t.ticket_medio) : ''}</div></div>
+    <div class="kpi"><div class="l">Despesas caixa</div><div class="v red">${brl(t.despesas)}</div></div>
+    <div class="kpi"><div class="l">Compras estoque</div><div class="v orange">${brl(t.compras_estoque)}</div></div>
+    <div class="kpi"><div class="l">Consumo estoque</div><div class="v orange">${brl(t.consumo_estoque)}</div></div>
+    <div class="kpi"><div class="l">Perdas</div><div class="v red">${brl(t.perdas)}</div></div>
+    <div class="kpi"><div class="l">Resultado</div><div class="v ${t.resultado_dia_estimado < 0 ? 'red' : 'green'}">${brl(t.resultado_dia_estimado)}</div></div>
+  </div>
+  ${pendHtml}
+
+  <h2 class="sec">Movimento diário — ${escHtml(planilha.mes_label)}</h2>
+  <table>
+    <thead><tr>
+      <th class="c">Data</th><th class="c">Dia</th><th class="num">Pratos</th><th class="num">Vendas</th>
+      ${F_KEYS.map(([, lbl]) => `<th class="num">${lbl}</th>`).join('')}
+      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Compras</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Lixo</th>
+    </tr></thead>
+    <tbody>${linhasDia}${linhaTotal}</tbody>
+  </table>
+  <div class="nota">Resultado = vendas − consumo − perdas − despesas do caixa. Compras são investimento em estoque (não entram no resultado do dia). Lixo do buffet é anotação (não entra nas contas).${somaIfoodOutros > 0 ? ' Recebimentos em Ifood/Outros no mês: ' + brl(somaIfoodOutros) + '.' : ''}</div>
+
+  <div class="duascol">
+    <div>
+      <h2 class="sec">Recebimentos por tipo de pagamento</h2>
+      <table>
+        <thead><tr><th>Tipo</th><th class="num">Valor</th><th class="num">% das vendas</th></tr></thead>
+        <tbody>${linhasFormas}<tr class="total"><td>TOTAL</td><td class="num">${brl(t.total_pagamentos)}</td><td class="num">100%</td></tr></tbody>
+      </table>
+    </div>
+    <div>
+      <h2 class="sec">Indicadores do mês</h2>
+      <table>
+        <thead><tr><th>Indicador</th><th class="num">Valor</th></tr></thead>
+        <tbody>
+          <tr><td>Dias com caixa fechado</td><td class="num">${t.dias_com_caixa} de ${t.dias_mes}</td></tr>
+          <tr class="zebra"><td>Consumo sobre vendas</td><td class="num">${t.consumo_sobre_vendas_pct != null ? String(t.consumo_sobre_vendas_pct).replace('.', ',') + '%' : '—'}</td></tr>
+          <tr><td>Perdas sobre vendas</td><td class="num">${t.perdas_sobre_vendas_pct != null ? String(t.perdas_sobre_vendas_pct).replace('.', ',') + '%' : '—'}</td></tr>
+          <tr class="zebra"><td>Despesas sobre vendas</td><td class="num">${t.despesas_sobre_vendas_pct != null ? String(t.despesas_sobre_vendas_pct).replace('.', ',') + '%' : '—'}</td></tr>
+          <tr><td>Cortes (erro/tara/patrões/funcionário)</td><td class="num">${brl(t.cortes)}</td></tr>
+          <tr class="zebra"><td>🥡 Lixo do buffet no mês</td><td class="num">${t.lixo_buffet_g > 0 ? (t.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + ' kg em ' + t.dias_com_lixo + ' dia(s)' : 'sem anotações'}</td></tr>
+          <tr><td>Caixa do mês (vendas − despesas)</td><td class="num">${brl(t.fluxo_caixa)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <footer class="doc-f">
+    <span>Toca Estoque — documento gerado automaticamente a partir dos fechamentos diários e do estoque.</span>
+    <span>Página gerada em ${escHtml(geradoEm)}</span>
+  </footer>
+</div>
+</body></html>`;
 
     } else return res.status(400).send('Tipo inválido');
 
