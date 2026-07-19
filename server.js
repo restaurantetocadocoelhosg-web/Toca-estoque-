@@ -1895,6 +1895,22 @@ function movimentoVazioDia() {
   };
 }
 
+// Supabase/PostgREST corta QUALQUER select em 1000 linhas por request. Busca de
+// PERÍODO (planilha, relatórios, inventário, export, reconciliação) precisa paginar —
+// senão o mês "para no dia 11" (bug real 18/07: julho tinha 2.169 movimentações e a
+// Planilha só somava as 1.000 primeiras → compras/consumo zerados do dia 11 em diante).
+// buildQuery deve retornar a query JÁ com .order() estável (id) pra paginação determinística.
+async function fetchTodas(buildQuery, pageSize = 1000) {
+  const todas = [];
+  for (let from = 0; ; from += pageSize) {
+    const { data, error } = await buildQuery().range(from, from + pageSize - 1);
+    if (error) throw error;
+    todas.push(...(data || []));
+    if (!data || data.length < pageSize) break;
+  }
+  return todas;
+}
+
 async function montarPlanilhaMensal(mesParam) {
   const mes = validarMesISO(mesParam);
   const inicio = `${mes}-01`;
@@ -1903,11 +1919,11 @@ async function montarPlanilhaMensal(mesParam) {
   const movPorDia = Object.fromEntries(datas.map(d => [d, movimentoVazioDia()]));
   let configuracaoPendente = false;
 
-  const { data: movimentos, error: movErr } = await supabase.from('movimentacoes')
+  const movimentos = await fetchTodas(() => supabase.from('movimentacoes')
     .select('created_at, tipo, valor, obs')
     .gte('created_at', inicio + 'T00:00:00-03:00')
-    .lte('created_at', fim + 'T23:59:59-03:00');
-  if (movErr) throw movErr;
+    .lte('created_at', fim + 'T23:59:59-03:00')
+    .order('id', { ascending: true }));
 
   for (const m of (movimentos || [])) {
     const dia = dataISOFromTimestampSP(m.created_at);
@@ -2096,25 +2112,30 @@ async function montarRelatorioPeriodo(inicioParam, fimParam) {
     venda_lancada: false,
   }]));
 
-  const [movRes, fechRes, pagRes] = await Promise.all([
-    supabase.from('movimentacoes')
+  // movimentacoes e pagamentos paginados (período pode passar de 1000 linhas fácil);
+  // fechamentos são no máx. 1 por dia — sem risco de corte.
+  const [movTodas, fechRes, pagResData] = await Promise.all([
+    fetchTodas(() => supabase.from('movimentacoes')
       .select('tipo, valor, created_at')
       .gte('created_at', inicio + 'T00:00:00-03:00')
-      .lte('created_at', fim + 'T23:59:59-03:00'),
+      .lte('created_at', fim + 'T23:59:59-03:00')
+      .order('id', { ascending: true })),
     supabase.from('fechamentos_diarios')
       .select('data, vendas, pratos_vendidos, pagamentos, cortes, despesas')
       .gte('data', inicio)
       .lte('data', fim)
       .order('data', { ascending: true }),
-    supabase.from('pagamentos_comprovantes')
+    fetchTodas(() => supabase.from('pagamentos_comprovantes')
       .select('*')
       .gte('data', inicio)
       .lte('data', fim)
       .order('data', { ascending: false })
-      .order('id', { ascending: false }),
+      .order('id', { ascending: false }))
+      .then(data => ({ data, error: null }))
+      .catch(error => ({ data: null, error })),
   ]);
-
-  if (movRes.error) throw movRes.error;
+  const movRes = { data: movTodas, error: null };
+  const pagRes = pagResData;
   const configuracaoPendente = {
     fechamentos: false,
     pagamentos: false,
@@ -2847,7 +2868,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     });
     filename = 'estoque_toca_coelho.csv';
   } else if (tipo === 'movimentacoes') {
-    const { data } = await supabase.from('movimentacoes').select('*').order('id', { ascending: false });
+    const data = await fetchTodas(() => supabase.from('movimentacoes').select('*').order('id', { ascending: false }));
     headers = ['Data/Hora','Produto','Categoria','Tipo','Qtd','Unidade','Custo','Valor','Motivo','Responsável','Obs'];
     rows = (data || []).map(r => [r.created_at, r.produto_nome, r.categoria, r.tipo, r.qtd, r.unidade, r.custo, r.valor, r.motivo, r.responsavel, r.obs]);
     filename = 'movimentacoes_toca_coelho.csv';
@@ -4083,10 +4104,10 @@ app.get('/api/alertas/fantasmas', auth, async (req, res) => {
       .order('categoria').order('nome');
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ fantasmas: [] });
-    const { data: movs } = await supabase.from('movimentacoes')
+    const movs = await fetchTodas(() => supabase.from('movimentacoes')
       .select('produto_id, tipo, qtd, obs, created_at, responsavel')
       .in('produto_id', ids)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true }).order('id', { ascending: true }));
     // Reconstrói o saldo CRONOLOGICAMENTE: Entrada soma, Saída/Perda subtrai e
     // Ajuste DEFINE o saldo absoluto (coluna qtd = novo valor). Assim funciona
     // mesmo nos Ajustes antigos sem qtd_antes/qtd_depois (que eram null).
@@ -4149,9 +4170,9 @@ app.post('/api/alertas/fantasmas/reconciliar', auth, requireRole('admin', 'geren
     const { data: produtos } = await q;
     const ids = (produtos || []).map(p => p.id);
     if (!ids.length) return res.json({ reconciliados: 0 });
-    const { data: movs } = await supabase.from('movimentacoes')
+    const movs = await fetchTodas(() => supabase.from('movimentacoes')
       .select('produto_id, tipo, qtd, obs, created_at').in('produto_id', ids)
-      .order('created_at', { ascending: true });
+      .order('created_at', { ascending: true }).order('id', { ascending: true }));
     const agg = {};
     for (const m of (movs || [])) {
       if (!agg[m.produto_id]) agg[m.produto_id] = { entradas: 0, bal: 0 };
@@ -4502,9 +4523,11 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   const dataInicio = req.query?.data_inicio || dateAgoDias(30);
   const dataFim = req.query?.data_fim || dateSP();
   const categoria = sanitizeText(req.query?.categoria || '', 80);
-  let movQuery = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
-  if (categoria) movQuery = movQuery.eq('categoria', categoria);
-  const { data: allMovs } = await movQuery;
+  const allMovs = await fetchTodas(() => {
+    let q = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
+    if (categoria) q = q.eq('categoria', categoria);
+    return q.order('id', { ascending: true });
+  });
   const { data: produtos } = await supabase.from('produtos').select('id, nome, qtd, minimo');
   const prodPorId = {};
   for (const p of (produtos || [])) prodPorId[p.id] = p;
