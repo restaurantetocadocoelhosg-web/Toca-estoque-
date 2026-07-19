@@ -2885,7 +2885,9 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     filename = 'lista_compras_toca_coelho.csv';
   } else if (tipo === 'fechamentos') {
     const planilha = await montarPlanilhaMensal(req.query?.mes);
-    headers = ['Data','Dia','Status','Pratos','Vendas','Dinheiro','Stone','PagBank','Pix','Cartão','Ifood/Entrega','Outros','Cortes','Despesas','Compras Estoque','Consumo Estoque','Perdas','Resultado','Caixa','Mov. Estoque','Responsável','Observação'];
+    // v58: colunas por TIPO de pagamento (v55) — antes exportava Stone/PagBank, chaves
+    // que não existem mais (saíam 0,00). + Lixo do buffet (anotação em gramas).
+    headers = ['Data','Dia','Status','Pratos','Vendas','Dinheiro','Crédito','Débito','Voucher','Pix','Cartão (maq.)','Ifood/Entrega','Outros','Cortes','Despesas','Compras Estoque','Consumo Estoque','Perdas','Resultado','Caixa','Lixo Buffet (g)','Mov. Estoque','Responsável','Observação'];
     rows = planilha.dias.map(d => [
       d.data_br,
       d.dia_semana,
@@ -2893,8 +2895,9 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
       d.pratos_vendidos,
       d.vendas.toFixed(2),
       (d.formas?.dinheiro?.valor || 0).toFixed(2),
-      (d.formas?.stone?.valor || 0).toFixed(2),
-      (d.formas?.pagbank?.valor || 0).toFixed(2),
+      (d.formas?.credito?.valor || 0).toFixed(2),
+      (d.formas?.debito?.valor || 0).toFixed(2),
+      (d.formas?.voucher?.valor || 0).toFixed(2),
       (d.formas?.pix?.valor || 0).toFixed(2),
       (d.formas?.cartao?.valor || 0).toFixed(2),
       (d.formas?.ifood?.valor || 0).toFixed(2),
@@ -2906,6 +2909,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
       d.perdas.toFixed(2),
       d.resultado_dia_estimado.toFixed(2),
       d.fluxo_caixa.toFixed(2),
+      d.lixo_buffet_g != null ? d.lixo_buffet_g : '',
       d.movimentos_total,
       d.responsavel,
       d.observacao,
