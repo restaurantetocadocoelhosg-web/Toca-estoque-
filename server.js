@@ -12,6 +12,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
+// ==================== REDE DE SEGURANÇA GLOBAL ====================
+// Impede que UMA requisição com erro derrube o processo inteiro (Node 22 mata o
+// processo em unhandledRejection por padrão). Loga e mantém o servidor vivo.
+process.on('unhandledRejection', (err) => {
+  console.error('⚠️ unhandledRejection (servidor segue vivo):', err && err.stack || err);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ uncaughtException (servidor segue vivo):', err && err.stack || err);
+});
+
 // ==================== SUPABASE ====================
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -259,13 +269,14 @@ function requireRole(...roles) {
 
 async function permsDoRequest(req) {
   let permsCol = null;
-  if (req.user.role !== 'admin') {
+  if (req.user && req.user.role !== 'admin') {
     try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
   }
-  return permsEfetivas(req.user.role, permsCol);
+  return permsEfetivas(req.user ? req.user.role : null, permsCol);
 }
 
 async function usuarioTemPerm(req, key) {
+  if (!req.user) return false; // sem usuário logado nunca acessa .role (evita crash de req.user undefined)
   if (req.user.role === 'admin') return true;
   const perms = await permsDoRequest(req);
   return !!perms[key];
@@ -4898,7 +4909,9 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
   }
 
   if (acao === 'fechamento' || acao === 'realidade') {
-    if (!(await usuarioTemPerm(req, 'dia'))) {
+    // Webhook do WhatsApp já é autenticado pelo x-webhook-secret (não tem usuário logado).
+    // Só exige permissão de usuário quando a chamada vem da UI (req.user presente).
+    if (req.user && !(await usuarioTemPerm(req, 'dia'))) {
       return res.status(403).json({ erro: 'Acesso não liberado para este recurso. Fale com o administrador.' });
     }
     const realidade = await montarRealidadeDia(dateSP());
