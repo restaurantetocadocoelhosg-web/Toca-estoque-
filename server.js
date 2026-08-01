@@ -1140,6 +1140,35 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
   } catch (e) { console.error('taxa-auto:', e.message); return 0; }
 }
 
+// Despesa anotada no fechamento do dia (passagem, pão, sacolão, retirada) vivia só em
+// fechamentos_diarios.despesas: entrava no "Resultado do dia" da Planilha, mas ficava fora
+// de TODO grupo do plano de contas — logo, invisível nos Índices. Em julho/2026 foram
+// R$2.733,21 lançados com disciplina todo dia e que nenhum índice enxergava (R$1.359,80
+// só de passagem, que é Vale Transporte e devia estar no CMO).
+// Não gera dupla contagem: a Planilha soma fechamentos_diarios.despesas e os Índices somam
+// pagamentos_comprovantes — nenhum total mistura as duas fontes.
+async function lancarDespesasDoCaixaNasContas(dataDia, despesas, responsavel) {
+  try {
+    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'caixa-auto');
+    const linhas = [];
+    for (const d of (despesas || [])) {
+      const valor = Number(d.valor || 0);
+      if (valor <= 0) continue;
+      const conta = inferirContaPagamentoPorTexto(d.descricao) || acharContaPagamento('Outros');
+      if (!conta) continue;
+      linhas.push({
+        data: dataDia, grupo: conta.grupo, categoria: conta.categoria, forma: 'despesa_caixa',
+        valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+        descricao: sanitizeText(`Despesa do caixa: ${d.descricao}${d.obs ? ' — ' + d.obs : ''}`, 180),
+        origem: 'caixa-auto', responsavel: responsavel || 'caixa',
+        created_at: nowSP(), updated_at: nowSP(),
+      });
+    }
+    if (linhas.length) await supabase.from('pagamentos_comprovantes').insert(linhas);
+    return linhas.length;
+  } catch (e) { console.error('caixa-auto:', e.message); return 0; }
+}
+
 function somarResumoFormas(destino, origem) {
   for (const [key, row] of Object.entries(origem || {})) {
     if (!destino[key]) destino[key] = { key, forma: row.forma || key, qtd: 0, valor: 0 };
@@ -1300,6 +1329,11 @@ function inferirContaPagamentoPorTexto(texto) {
     [/congelado/, 'Estoque Congelado'],
     [/farinha|estoque seco|seco/, 'Estoque Seco (Farinha)'],
     [/hortifruti|verdura|legume|fruta|sacolao|sacolão/, 'Hortifruti'],
+    // Compra avulsa paga pelo caixa do dia (o Rubens anota assim no fechamento): é insumo,
+    // tem que cair no CMV e não no balde "Outros".
+    [/\bpao\b|\bpaes\b|padaria/, 'Estoque Seco (Farinha)'],
+    [/mercado|feira|quitanda|atacad/, 'Hortifruti'],
+    [/uva passa|uvas passa|fruta seca/, 'Estoque Seco (Farinha)'],
     [/descartavel|descartáveis|kit|embalagem descartavel/, 'Kit (descartáveis)'],
     [/leite|lacteo|lácteo|queijo|mussarela|manteiga/, 'Lácteos'],
     [/massa fresca|massa/, 'Massa Fresca'],
@@ -2628,7 +2662,9 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
 
     // Taxa da maquininha entra junto com o fechamento — sem isso a conta "Taxas de Cartão"
     // fica eternamente vazia e o custo total do mês sai menor do que é.
-    const taxasLancadas = await lancarTaxasDoDia(dataDia, resumoFormasPagamento(pagamentos), req.user.nome || req.user.username);
+    const quem = req.user.nome || req.user.username;
+    const taxasLancadas = await lancarTaxasDoDia(dataDia, resumoFormasPagamento(pagamentos), quem);
+    const despesasLancadas = await lancarDespesasDoCaixaNasContas(dataDia, despesas, quem);
 
     await audit('realidade_dia_salvar', {
       data: dataDia,
@@ -2638,6 +2674,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       cortes: cortes.length,
       despesas: despesas.length,
       taxas_lancadas: taxasLancadas,
+      despesas_lancadas: despesasLancadas,
     }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
@@ -2660,8 +2697,8 @@ app.delete('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       throw error;
     }
     // Apagou o fechamento → a taxa calculada em cima dele não faz mais sentido.
-    try { await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'taxa-auto'); }
-    catch (e) { console.error('taxa-auto delete:', e.message); }
+    try { await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'caixa-auto']); }
+    catch (e) { console.error('taxa/caixa-auto delete:', e.message); }
     await audit('realidade_dia_limpar', { data: dataDia }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
