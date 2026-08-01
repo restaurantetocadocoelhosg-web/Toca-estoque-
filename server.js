@@ -3766,21 +3766,33 @@ ${contasDisponiveis}
 RESPONDA SOMENTE com JSON válido, sem markdown:
 {"tipo":"conta","fornecedor":"Light","valor":5312.00,"vencimento":"2026-07-20","documento":null,"descricao":"Conta de luz de julho","grupo":"Contas Públicas","categoria":"Eletricidade"}
 
-═══ CASO ESPECIAL: CONTRACHEQUE / HOLERITE / FOLHA DE PAGAMENTO ═══
-Se o documento for folha, contracheque, holerite ou resumo de folha, use tipo "folha" e
-extraia SOMENTE OS TOTAIS POR RUBRICA. É proibido incluir nome de funcionário, CPF,
-matrícula, cargo ou salário individual — esses dados NÃO são usados pelo sistema e não
-devem sair no JSON de jeito nenhum.
+═══ CASO ESPECIAL: DOCUMENTOS DE FOLHA ═══
+Se for documento de folha, use tipo "folha". É PROIBIDO incluir nome de funcionário,
+CPF, matrícula, cargo ou salário individual no JSON — o sistema não usa esses dados.
 
-Rubricas possíveis (use exatamente estes rótulos): Salários, INSS, FGTS, IRRF,
-Vale Transporte, Vale Refeição, Férias, Décimo Terceiro Salário, Pró-labore,
-Gorjeta / Gratificação, Plano de Saúde, Freelance.
+Identifique QUAL dos documentos é e extraia SÓ o total indicado:
 
-Some a mesma rubrica se aparecer repetida. Ignore linhas de desconto que já estão
-embutidas no líquido — o que interessa é o CUSTO do empregador por rubrica.
+1) EXTRATO MENSAL / FOLHA DE PAGAMENTO (várias páginas, últimas com quadro de totais)
+   → rubrica "Salários" = valor de "Total Geral Proventos"
+   Esse é o custo bruto do pessoal. NÃO extraia INSS nem IRRF daqui: eles são DESCONTOS
+   que já estão dentro dos proventos, e lançá-los de novo contaria duas vezes.
+   Se o quadro trouxer "Valor do FGTS" e/ou "Valor FGTS Rescisório", some os dois numa
+   rubrica "FGTS".
+
+2) GUIA DO FGTS (GFD / FGTS Digital / GRF)
+   → rubrica "FGTS" = valor de "Valor a recolher" (ou "Total a recolher")
+
+3) DARF / GPS de INSS
+   → rubrica "INSS" = "Valor Total do Documento"
+   IMPORTANTE: olhe os códigos de receita. Se TODOS forem contribuição descontada do
+   segurado (ex: 1082, 1099, 1007) sem parte patronal, marque "so_segurado": true — esse
+   valor já saiu do bolso do funcionário e não é custo novo do empregador.
+
+4) CONTRACHEQUE INDIVIDUAL, folha de ponto, informativo ou previsão de férias
+   → responda {"tipo":"folha","ignorar":"<que documento é>"} sem rubricas.
 
 Formato:
-{"tipo":"folha","competencia":"2026-07","descricao":"Folha de julho","rubricas":[{"rubrica":"Salários","valor":19939.67},{"rubrica":"FGTS","valor":1595.17}]}
+{"tipo":"folha","competencia":"2026-07","descricao":"Folha de julho","so_segurado":false,"rubricas":[{"rubrica":"Salários","valor":30072.09}]}
 
 Se não conseguir ler: {"erro":"descrição do problema"}`;
   try {
@@ -3851,10 +3863,21 @@ app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
     // FOLHA: entra pelos TOTAIS por rubrica. Nome, CPF e salário individual não são
     // extraídos nem gravados — o financeiro só precisa do custo por conta, e guardar
     // dado pessoal de funcionário seria risco sem nenhum ganho.
+    if (r.tipo === 'folha' && r.ignorar) {
+      return res.json({ resposta: `ℹ️ Isso é *${sanitizeText(r.ignorar, 80)}* — não tem total pra lançar.\n\nDo pacote do contador, manda só três: a *folha de pagamento*, a *guia do FGTS* e o *DARF do INSS*.` });
+    }
+    // INSS que é só contribuição descontada do segurado já está dentro dos proventos —
+    // lançar de novo contaria o mesmo dinheiro duas vezes no CMO.
+    if (r.tipo === 'folha' && r.so_segurado) {
+      const v = parseNonNegativeMoney((r.rubricas || [])[0]?.valor) || 0;
+      return res.json({ resposta:
+        `ℹ️ DARF de INSS${v ? ' de ' + fmtBRL(v) : ''} — *não lancei de propósito*.\n\n` +
+        `Esse valor é a contribuição descontada dos funcionários, que já está dentro do total de proventos da folha. ` +
+        `Lançar de novo contaria o mesmo dinheiro duas vezes.\n\n_Se tiver parte patronal, me avisa que eu lanço._` });
+    }
     if (r.tipo === 'folha' && Array.isArray(r.rubricas) && r.rubricas.length) {
       const competencia = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
       const dataLanc = fimMesISO(competencia);
-      await supabase.from('pagamentos_comprovantes').delete().eq('origem', 'folha-whatsapp').eq('data', dataLanc);
       const linhas = [], ignoradas = [];
       for (const rb of r.rubricas) {
         const valor = parseNonNegativeMoney(rb.valor);
@@ -3868,6 +3891,12 @@ app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
         });
       }
       if (!linhas.length) return res.json({ resposta: '⚠️ Li a folha mas não reconheci nenhuma rubrica. Manda o resumo com os totais (salários, INSS, FGTS, VT).' });
+      // Idempotência POR RUBRICA, não pela competência inteira: a folha do mês chega em
+      // documentos separados (extrato, guia do FGTS, DARF). Apagar tudo da competência
+      // faria a guia do FGTS derrubar o lançamento de Salários que veio antes.
+      await supabase.from('pagamentos_comprovantes').delete()
+        .eq('origem', 'folha-whatsapp').eq('data', dataLanc)
+        .in('categoria', linhas.map(l => l.categoria));
       const { error } = await supabase.from('pagamentos_comprovantes').insert(linhas);
       if (error) return res.json({ resposta: '❌ Erro ao lançar a folha.' });
       await audit('ler_folha_whatsapp', { remetente, competencia, rubricas: linhas.length, total: linhas.reduce((s, l) => s + l.valor_bruto, 0) }, null, '');
