@@ -1085,6 +1085,61 @@ function resumoFormasPagamento(pagamentos) {
   return base;
 }
 
+// ── TAXAS DE CARTÃO / PIX ────────────────────────────────────────────────────
+// Taxas da maquininha informadas pelo Rubens (01/08/2026). Elas nunca eram lançadas:
+// a conta "Taxas de Cartão" existia no plano e ficava vazia, então o custo total do
+// restaurante saía menor do que é — num mês em que ~72% do recebimento vem de cartão,
+// isso some com uns 2% do faturamento.
+//
+// TABELA_TAXAS é a referência por bandeira (o que a operadora cobra de fato).
+// TAXA_POR_FORMA é o que dá pra APLICAR: o fechamento diário registra por TIPO
+// (crédito/débito/voucher/pix), não por bandeira, então usa-se a taxa da bandeira
+// dominante de cada tipo. Visa e Mastercard têm a mesma taxa, o que torna o padrão
+// seguro; quando o dia for majoritariamente Elo ou Amex, a taxa real é maior.
+const TABELA_TAXAS = [
+  { tipo: 'Crédito', bandeira: 'Voucher Master/Visa/Elo', taxa: 3.99 },
+  { tipo: 'Crédito', bandeira: 'Elo', taxa: 3.37 },
+  { tipo: 'Crédito', bandeira: 'American Express', taxa: 3.62 },
+  { tipo: 'Crédito', bandeira: 'Mastercard', taxa: 2.71 },
+  { tipo: 'Crédito', bandeira: 'Visa', taxa: 2.71 },
+  { tipo: 'Crédito', bandeira: 'Hipercard', taxa: 2.49 },
+  { tipo: 'Débito', bandeira: 'Elo', taxa: 2.13 },
+  { tipo: 'Débito', bandeira: 'Mastercard', taxa: 1.75 },
+  { tipo: 'Débito', bandeira: 'Visa', taxa: 1.75 },
+  { tipo: 'Pix', bandeira: 'Pix', taxa: 0.75 },
+];
+const TAXA_POR_FORMA = {
+  credito: { taxa: 2.71, conta: 'Taxas de Cartão', ref: 'Visa/Mastercard' },
+  debito:  { taxa: 1.75, conta: 'Taxas de Cartão', ref: 'Visa/Mastercard' },
+  voucher: { taxa: 3.99, conta: 'Taxas de Cartão', ref: 'Voucher Master/Visa/Elo' },
+  cartao:  { taxa: 2.71, conta: 'Taxas de Cartão', ref: 'Visa/Mastercard (balde legado)' },
+  pix:     { taxa: 0.75, conta: 'Taxa Pix',        ref: 'Pix' },
+};
+
+// Lança as taxas do dia em Despesas Financeiras. Idempotente: apaga as do mesmo dia
+// antes de gravar, então re-salvar o fechamento não duplica. Dinheiro não paga taxa.
+async function lancarTaxasDoDia(dataDia, formas, responsavel) {
+  try {
+    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'taxa-auto');
+    const linhas = [];
+    for (const [key, cfg] of Object.entries(TAXA_POR_FORMA)) {
+      const bruto = Number(formas?.[key]?.valor || 0);
+      if (bruto <= 0) continue;
+      const valor = Number((bruto * cfg.taxa / 100).toFixed(2));
+      if (valor <= 0) continue;
+      linhas.push({
+        data: dataDia, grupo: 'Despesas Financeiras', categoria: cfg.conta,
+        forma: 'taxa_operadora', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+        descricao: sanitizeText(`Taxa ${formas[key].forma} ${cfg.taxa}% sobre ${fmtBRL(bruto)} (${cfg.ref})`, 180),
+        origem: 'taxa-auto', responsavel: responsavel || 'sistema',
+        created_at: nowSP(), updated_at: nowSP(),
+      });
+    }
+    if (linhas.length) await supabase.from('pagamentos_comprovantes').insert(linhas);
+    return linhas.length;
+  } catch (e) { console.error('taxa-auto:', e.message); return 0; }
+}
+
 function somarResumoFormas(destino, origem) {
   for (const [key, row] of Object.entries(origem || {})) {
     if (!destino[key]) destino[key] = { key, forma: row.forma || key, qtd: 0, valor: 0 };
@@ -1143,6 +1198,12 @@ const MAPA_CONTA_COMPRA = {
   'Massa Fresca':     ['Despesas Variáveis - CMV', 'Massa Fresca'],
   'Outras Proteínas': ['Despesas Variáveis - CMV', 'Estoque Congelado'],
   'Descartáveis':     ['Despesas Variáveis - CMV', 'Kit (descartáveis)'],
+  'Congelados':       ['Despesas Variáveis - CMV', 'Estoque Congelado'],
+  // Estas duas NÃO são CMV: o plano de contas põe embalagem em Produção e caneta/etiqueta
+  // em Eventuais. Antes caíam em Descartáveis (CMV > Kit) e inchavam o CMV com item que
+  // não é insumo de prato.
+  'Embalagens':       ['Despesas de Produção', 'Embalagens (guardanapos, palito, sal, açúcar em sachê)'],
+  'Escritório':       ['Despesas Eventuais', 'Material de Escritório e Informática'],
   'Bebidas':          ['CMV Bebidas', 'Não Alcoólicos'], // refinado por contaBebida() — ver abaixo
   'Limpeza':          ['Despesas de Produção', 'Higiene, Limpeza'],
 };
@@ -2565,6 +2626,10 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       throw error;
     }
 
+    // Taxa da maquininha entra junto com o fechamento — sem isso a conta "Taxas de Cartão"
+    // fica eternamente vazia e o custo total do mês sai menor do que é.
+    const taxasLancadas = await lancarTaxasDoDia(dataDia, resumoFormasPagamento(pagamentos), req.user.nome || req.user.username);
+
     await audit('realidade_dia_salvar', {
       data: dataDia,
       vendas,
@@ -2572,6 +2637,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       pagamentos: pagamentos.length,
       cortes: cortes.length,
       despesas: despesas.length,
+      taxas_lancadas: taxasLancadas,
     }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
@@ -2593,6 +2659,9 @@ app.delete('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       }
       throw error;
     }
+    // Apagou o fechamento → a taxa calculada em cima dele não faz mais sentido.
+    try { await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'taxa-auto'); }
+    catch (e) { console.error('taxa-auto delete:', e.message); }
     await audit('realidade_dia_limpar', { data: dataDia }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
