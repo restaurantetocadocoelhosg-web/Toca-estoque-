@@ -3776,7 +3776,11 @@ Se não conseguir ler: {"erro":"descrição do problema"}`;
       body: JSON.stringify({
         model: 'claude-sonnet-4-6', max_tokens: 2048,
         messages: [{ role: 'user', content: [
-          ...listaImg.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
+          // Boleto quase sempre chega em PDF, não em foto — a API aceita os dois, mas o
+          // bloco é 'document' pra PDF e 'image' pro resto.
+          ...listaImg.map(b64 => (/pdf/i.test(mediaType || '')
+            ? { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: b64 } }
+            : { type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
           { type: 'text', text: prompt },
         ] }],
       }),
