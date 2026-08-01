@@ -1304,7 +1304,10 @@ function inferirContaPagamentoPorTexto(texto) {
     [/iptu/, 'IPTU'],
     [/condominio|condomínio/, 'Condomínio'],
     [/salario|salários|salarios|folha/, 'Salários'],
-    [/freela|freelance/, 'Freelance'],
+    // "Treinamento"/"diária"/"extra" no caixa é pagamento a freelance (Rubens, 01/08:
+    // "denis, leandro, pessoas em treinamento" são freelance). Vem antes de Retirada
+    // porque "RETIRADA ... TREINAMENTO" é pagamento, não distribuição.
+    [/freela|freelance|treinamento|diarista|\bdiaria\b|\bextra\b/, 'Freelance'],
     [/gratific|gorjeta|caixinha/, 'Gorjeta / Gratificação'],
     [/pro labore|pro-labore|pró-labore/, 'Pró-labore'],
     [/\binss\b/, 'INSS'],
@@ -2228,6 +2231,14 @@ async function montarPlanilhaMensal(mesParam) {
 // janela cheia, então o retorno diz quantos meses realmente têm dado.
 const MESES_JANELA = 3;
 
+// Retirada de sócio é distribuição de resultado, não despesa operacional (decisão do
+// Rubens, 01/08). Continua registrada — é dinheiro que saiu do caixa e precisa ser
+// rastreável — mas fica FORA do custo total e do resultado, senão o restaurante parece
+// gastar mais do que gasta. Em julho/2026 eram R$536 inflando o custo.
+const CONTAS_NAO_OPERACIONAIS = [{ grupo: 'Outras Despesas', categoria: 'Retirada' }];
+const ehNaoOperacional = (grupo, categoria) => CONTAS_NAO_OPERACIONAIS
+  .some(c => c.grupo === grupo && c.categoria === categoria);
+
 function mesesAnteriores(mes, n) {
   const [ano, m] = mes.split('-').map(Number);
   const lista = [];
@@ -2291,11 +2302,18 @@ async function montarIndices(mesParam) {
   const zero = () => ({ mes: 0, janela: 0, n_mes: 0, n_janela: 0 });
   const porGrupo = Object.fromEntries(CONTAS_PLANILHA_PAGAMENTOS.map(g => [g.grupo, zero()]));
   const dentroJanela = new Set(mesesJanela);
+  const naoOperacional = { mes: 0, janela: 0, n_mes: 0 };
   for (const p of pagamentos) {
     const g = p.grupo || 'Outras Despesas';
-    if (!porGrupo[g]) porGrupo[g] = zero();
     const v = Number(p.valor_bruto || 0);
-    if (dentroJanela.has(String(p.data || '').slice(0, 7))) { porGrupo[g].janela += v; porGrupo[g].n_janela++; }
+    const naJanela = dentroJanela.has(String(p.data || '').slice(0, 7));
+    if (ehNaoOperacional(g, p.categoria)) {   // retirada: registrada, fora do custo
+      if (naJanela) naoOperacional.janela += v;
+      if (noMes(p.data)) { naoOperacional.mes += v; naoOperacional.n_mes++; }
+      continue;
+    }
+    if (!porGrupo[g]) porGrupo[g] = zero();
+    if (naJanela) { porGrupo[g].janela += v; porGrupo[g].n_janela++; }
     if (noMes(p.data)) { porGrupo[g].mes += v; porGrupo[g].n_mes++; }
   }
 
@@ -2360,6 +2378,15 @@ async function montarIndices(mesParam) {
     sobra: {
       valor_mes: sobraMes, pct_mes: pct(sobraMes, vendasMes),
       valor_janela: sobraJanela, pct_janela: pct(sobraJanela, vendasJanela),
+    },
+    // Fora do custo, mostrado à parte: saiu do caixa mas é distribuição, não despesa.
+    nao_operacional: {
+      rotulo: 'Retiradas de sócio',
+      valor_mes: Number(naoOperacional.mes.toFixed(2)),
+      pct_mes: pct(naoOperacional.mes, vendasMes),
+      valor_janela: Number(naoOperacional.janela.toFixed(2)),
+      lancamentos_mes: naoOperacional.n_mes,
+      sobra_apos_retiradas: Number((sobraMes - naoOperacional.mes).toFixed(2)),
     },
     sem_dado: grupos.filter(g => g.status !== 'ok').map(g => ({ grupo: g.grupo, status: g.status })),
   };

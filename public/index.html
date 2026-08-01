@@ -1339,7 +1339,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v63</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v64</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4062,6 +4062,19 @@ function renderIndices(d) {
       ${totalLinha('Prime Cost', d.prime_cost || {}, 'row-total')}
       ${totalLinha('Custo total', d.custo_total || {}, 'row-total')}
       ${totalLinha('Sobra', d.sobra || {}, 'row-total')}
+      ${Number(d.nao_operacional?.valor_mes || 0) > 0 ? `
+      <tr class="row-muted">
+        <td><b>${escapeHtml(d.nao_operacional.rotulo)}</b><div class="sheet-muted">distribuição de resultado — fora do custo</div></td>
+        <td class="num">${fmtSheetMoney(d.nao_operacional.valor_mes)}</td>
+        <td class="num">${fmtPctInd(d.nao_operacional.pct_mes)}</td>
+        <td class="num">—</td><td class="num">—</td>
+        <td><span class="sheet-status vazio">não é custo</span></td>
+      </tr>
+      <tr class="row-muted">
+        <td><b>Sobra depois das retiradas</b></td>
+        <td class="num"><b>${fmtSheetMoney(d.nao_operacional.sobra_apos_retiradas)}</b></td>
+        <td class="num">—</td><td class="num">—</td><td class="num">—</td><td></td>
+      </tr>` : ''}
     </tbody>`;
 
   const faltando = d.sem_dado || [];
