@@ -3763,10 +3763,24 @@ Extraia:
 CONTAS DISPONÍVEIS:
 ${contasDisponiveis}
 
-Se a imagem for um CONTRACHEQUE, HOLERITE ou FOLHA DE PAGAMENTO, responda {"recusado":"documento de folha — não deve ser enviado neste grupo"}.
-
 RESPONDA SOMENTE com JSON válido, sem markdown:
-{"fornecedor":"Light","valor":5312.00,"vencimento":"2026-07-20","documento":null,"descricao":"Conta de luz de julho","grupo":"Contas Públicas","categoria":"Eletricidade"}
+{"tipo":"conta","fornecedor":"Light","valor":5312.00,"vencimento":"2026-07-20","documento":null,"descricao":"Conta de luz de julho","grupo":"Contas Públicas","categoria":"Eletricidade"}
+
+═══ CASO ESPECIAL: CONTRACHEQUE / HOLERITE / FOLHA DE PAGAMENTO ═══
+Se o documento for folha, contracheque, holerite ou resumo de folha, use tipo "folha" e
+extraia SOMENTE OS TOTAIS POR RUBRICA. É proibido incluir nome de funcionário, CPF,
+matrícula, cargo ou salário individual — esses dados NÃO são usados pelo sistema e não
+devem sair no JSON de jeito nenhum.
+
+Rubricas possíveis (use exatamente estes rótulos): Salários, INSS, FGTS, IRRF,
+Vale Transporte, Vale Refeição, Férias, Décimo Terceiro Salário, Pró-labore,
+Gorjeta / Gratificação, Plano de Saúde, Freelance.
+
+Some a mesma rubrica se aparecer repetida. Ignore linhas de desconto que já estão
+embutidas no líquido — o que interessa é o CUSTO do empregador por rubrica.
+
+Formato:
+{"tipo":"folha","competencia":"2026-07","descricao":"Folha de julho","rubricas":[{"rubrica":"Salários","valor":19939.67},{"rubrica":"FGTS","valor":1595.17}]}
 
 Se não conseguir ler: {"erro":"descrição do problema"}`;
   try {
@@ -3832,8 +3846,39 @@ app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
   if (!lista.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
   try {
     const r = await lerContaComIA(lista, mediaType, { nome: remetente });
-    if (r.recusado) return res.json({ resposta: `🚫 Isso parece folha de pagamento. Este grupo é só pra CONTA e BOLETO — documento de funcionário não deve circular aqui.` });
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler: ${r.erro}` });
+
+    // FOLHA: entra pelos TOTAIS por rubrica. Nome, CPF e salário individual não são
+    // extraídos nem gravados — o financeiro só precisa do custo por conta, e guardar
+    // dado pessoal de funcionário seria risco sem nenhum ganho.
+    if (r.tipo === 'folha' && Array.isArray(r.rubricas) && r.rubricas.length) {
+      const competencia = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
+      const dataLanc = fimMesISO(competencia);
+      await supabase.from('pagamentos_comprovantes').delete().eq('origem', 'folha-whatsapp').eq('data', dataLanc);
+      const linhas = [], ignoradas = [];
+      for (const rb of r.rubricas) {
+        const valor = parseNonNegativeMoney(rb.valor);
+        const conta = acharContaPagamento(sanitizeText(rb.rubrica || '', 120));
+        if (!valor || !conta) { ignoradas.push(rb.rubrica); continue; }
+        linhas.push({
+          data: dataLanc, grupo: conta.grupo, categoria: conta.categoria, forma: 'folha',
+          valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+          descricao: `Folha ${competencia.split('-').reverse().join('/')} — ${conta.categoria}`,
+          origem: 'folha-whatsapp', responsavel: remetente, created_at: nowSP(), updated_at: nowSP(),
+        });
+      }
+      if (!linhas.length) return res.json({ resposta: '⚠️ Li a folha mas não reconheci nenhuma rubrica. Manda o resumo com os totais (salários, INSS, FGTS, VT).' });
+      const { error } = await supabase.from('pagamentos_comprovantes').insert(linhas);
+      if (error) return res.json({ resposta: '❌ Erro ao lançar a folha.' });
+      await audit('ler_folha_whatsapp', { remetente, competencia, rubricas: linhas.length, total: linhas.reduce((s, l) => s + l.valor_bruto, 0) }, null, '');
+      const total = linhas.reduce((s, l) => s + l.valor_bruto, 0);
+      return res.json({ resposta:
+        `✅ *Folha ${competencia.split('-').reverse().join('/')}* lançada — ${fmtBRL(total)}\n\n` +
+        linhas.map(l => `• ${l.categoria}: ${fmtBRL(l.valor_bruto)}`).join('\n') +
+        (ignoradas.length ? `\n\n⚠️ Não reconheci: ${ignoradas.filter(Boolean).join(', ')}` : '') +
+        `\n\n_Só os totais foram guardados — nenhum nome ou salário individual._`,
+      });
+    }
     const valor = parseNonNegativeMoney(r.valor);
     if (!valor) return res.json({ resposta: '⚠️ Não achei o valor a pagar. Manda uma foto mais nítida e inteira.' });
 
