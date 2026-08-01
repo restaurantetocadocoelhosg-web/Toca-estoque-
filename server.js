@@ -1159,6 +1159,10 @@ async function lancarDespesasDoCaixaNasContas(dataDia, despesas, responsavel) {
       if (valor <= 0) continue;
       const conta = inferirContaPagamentoPorTexto(d.descricao) || acharContaPagamento('Outros');
       if (!conta) continue;
+      // Retirada de sócio nem chega nas Contas (Rubens, 01/08: "remove também as
+      // retiradas"). O registro continua no fechamento do dia, que é a fonte — aqui ele
+      // só não vira lançamento financeiro, porque distribuição de resultado não é despesa.
+      if (ehNaoOperacional(conta.grupo, conta.categoria)) continue;
       linhas.push({
         data: dataDia, grupo: conta.grupo, categoria: conta.categoria, forma: 'despesa_caixa',
         valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
@@ -1210,6 +1214,14 @@ const CONTAS_PLANILHA_PAGAMENTOS = [
   { grupo: 'Despesas Financeiras', contas: ['Alvará', 'Parcelamento', 'Renegociação de Dívida', 'Simples / MEI', 'Tarifa Bancária', 'Taxa de Antecipação', 'Empréstimo Bancário', 'Taxas de Cartão', 'Taxa Pix'] },
   { grupo: 'Outras Despesas', contas: ['Boleto / Conta avulsa', 'Retirada', 'Outros'] },
 ];
+
+// Retirada de sócio é distribuição de resultado, não despesa operacional (decisão do
+// Rubens, 01/08). Não vira lançamento nas Contas e fica fora do custo total e da sobra —
+// senão o restaurante parece gastar mais do que gasta. O registro continua no fechamento
+// do dia, que é a fonte. Em julho/2026 eram R$536 inflando o custo.
+const CONTAS_NAO_OPERACIONAIS = [{ grupo: 'Outras Despesas', categoria: 'Retirada' }];
+const ehNaoOperacional = (grupo, categoria) => CONTAS_NAO_OPERACIONAIS
+  .some(c => c.grupo === grupo && c.categoria === categoria);
 
 const CONTAS_PLANILHA_FLAT = CONTAS_PLANILHA_PAGAMENTOS.flatMap(g =>
   g.contas.map((conta, ordem) => ({ grupo: g.grupo, categoria: conta, ordem }))
@@ -2231,13 +2243,6 @@ async function montarPlanilhaMensal(mesParam) {
 // janela cheia, então o retorno diz quantos meses realmente têm dado.
 const MESES_JANELA = 3;
 
-// Retirada de sócio é distribuição de resultado, não despesa operacional (decisão do
-// Rubens, 01/08). Continua registrada — é dinheiro que saiu do caixa e precisa ser
-// rastreável — mas fica FORA do custo total e do resultado, senão o restaurante parece
-// gastar mais do que gasta. Em julho/2026 eram R$536 inflando o custo.
-const CONTAS_NAO_OPERACIONAIS = [{ grupo: 'Outras Despesas', categoria: 'Retirada' }];
-const ehNaoOperacional = (grupo, categoria) => CONTAS_NAO_OPERACIONAIS
-  .some(c => c.grupo === grupo && c.categoria === categoria);
 
 function mesesAnteriores(mes, n) {
   const [ano, m] = mes.split('-').map(Number);
