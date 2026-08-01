@@ -134,6 +134,23 @@ test("5. lançar Saída reflete no estoque (some do zerado se aplicável) e volt
 test("7. operador NÃO consegue burlar o alerta de quantidade suspeita (sem botão de confirmar)", async ({ page }) => {
   // Baseline semeado no banco (produto isolado): 5 saídas de 1un em 30 dias (média ~0,167/dia)
   // — qualquer saída ≥1un dispara o alerta de anomalia (3x a média) pro papel operador.
+  //
+  // ATENÇÃO — o baseline VENCE. A detecção (server.js: "Detecção de anomalia") só liga com
+  // hist.length >= 5 nos ÚLTIMOS 30 DIAS. Como as saídas semeadas têm data fixa, elas saem
+  // da janela e o teste passa a falhar sozinho, sem nenhuma mudança de código (aconteceu em
+  // 01/08/2026: sobraram 3 na janela e o alerta não disparou). Se este teste falhar, ANTES de
+  // caçar regressão rode:
+  //   select count(*) from movimentacoes where produto_id=328
+  //     and tipo in ('Saída','Perda') and created_at >= now() - interval '30 days';
+  // Se der < 5, é só re-semear (produto 328 é fictício e isolado; estoque volta pra 50):
+  //   delete from movimentacoes where produto_id=328;
+  //   insert into movimentacoes (produto_id, produto_nome, categoria, tipo, qtd, unidade,
+  //          custo, valor, motivo, responsavel, obs, created_at)
+  //   select 328,'ROBO TESTE ANOMALIA (nao usar)','QA Robo (teste)','Saída',1,'un',0,0,
+  //          'Consumo','seed-qa','baseline do teste 7',
+  //          (now() at time zone 'America/Sao_Paulo') - (d||' days')::interval
+  //   from unnest(array[3,8,13,18,23]) d;
+  //   update produtos set qtd=50 where id=328;
   await login(page, { user: USER_OPERADOR, password: PASSWORD_OPERADOR, badge: "Robo QA Operador" });
   await page.locator(".tipo-card", { hasText: "Saída" }).click();
   await selecionarProdutoAnomalia(page);
@@ -421,6 +438,26 @@ test("24. Planilha Mensal mostra os 4 percentuais (Compras/Consumo/Perdas/Despes
   await page.getByRole("button", { name: "Planilha" }).click();
   await expect(page.locator("#planilha-resumo")).toBeVisible({ timeout: 10_000 });
   await expect(page.locator("#planilha-resumo .loading")).toHaveCount(0, { timeout: 15_000 });
+
+  // Percentual só existe se houve venda no mês (pct() devolve null com total zero, e o card
+  // mostra "—"). No dia 1º, antes do primeiro caixa, o mês corrente está zerado e este teste
+  // falhava sem nenhuma regressão de código — foi o que aconteceu em 01/08/2026. Então: se o
+  // mês aberto ainda não tem venda, volta pro mês anterior, que é onde os percentuais existem.
+  const mesInput = page.locator("#planilha-mes");
+  const semVenda = async () => {
+    const vendas = page.locator(".real-kpi").filter({
+      has: page.locator(".real-label", { hasText: /^Vendas$/ }),
+    });
+    return /R\$\s*0,00/.test((await vendas.innerText()) || "");
+  };
+  if (await semVenda()) {
+    const [ano, mes] = ((await mesInput.inputValue()) || "").split("-").map(Number);
+    const d = new Date(Date.UTC(ano, mes - 2, 1));
+    const anterior = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+    await mesInput.fill(anterior);
+    await mesInput.dispatchEvent("change");
+    await expect(page.locator("#planilha-resumo .loading")).toHaveCount(0, { timeout: 15_000 });
+  }
 
   for (const label of ["Compras", "Consumo", "Perdas", "Despesas"]) {
     // Escopa pelo texto EXATO do ".real-label", não pelo card inteiro: o card "Resultado do
