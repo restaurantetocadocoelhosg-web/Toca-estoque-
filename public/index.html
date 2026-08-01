@@ -1180,6 +1180,15 @@ select.big-input { font-size: 14px; }
         <div id="pag-config" class="real-alert" style="display:none;margin-top:10px"></div>
       </div>
 
+      <!-- Contas que chegaram pelo grupo Toca Financeiro e esperam confirmação -->
+      <div class="real-card" id="conta-pend-card" style="display:none">
+        <div class="real-card-title">
+          <span>📄 Contas do WhatsApp — confirmar</span>
+          <span class="sheet-muted">confirme uma vez e ele aprende o fornecedor</span>
+        </div>
+        <div id="conta-pend-lista"></div>
+      </div>
+
       <div class="real-card" id="pag-form-card">
         <div class="real-card-title" id="pag-form-title">Lançar conta paga</div>
         <div id="pag-edit-alert" class="real-alert" style="display:none;margin-bottom:10px"></div>
@@ -1339,7 +1348,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v65</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v66</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4393,6 +4402,65 @@ function limparPagamentoForm() {
   if (file) file.value = '';
 }
 
+// ── Contas que chegaram pelo grupo "Toca Financeiro" ────────────────────────
+// A IA lê o boleto e sugere a conta; quem decide é você. Ao confirmar, o
+// fornecedor fica gravado e da próxima vez entra sozinho — mesmo mecanismo dos
+// apelidos de produto do estoque.
+let contaPendCache = [];
+
+async function loadContaPendencias() {
+  const card = document.getElementById('conta-pend-card');
+  const lista = document.getElementById('conta-pend-lista');
+  if (!card || !lista) return;
+  try {
+    const d = await api('/api/conta-pendencias');
+    contaPendCache = d.pendencias || [];
+    if (!contaPendCache.length) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    const opcoes = (sel) => (d.contas_modelo || []).map(g =>
+      `<optgroup label="${escapeHtml(g.grupo)}">` +
+      g.contas.map(c => `<option value="${escapeHtml(c)}"${c === sel ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('') +
+      `</optgroup>`).join('');
+    lista.innerHTML = contaPendCache.map(p => `
+      <div class="sheet-pendency-row" style="flex-direction:column;align-items:stretch;gap:8px">
+        <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+          <div>
+            <b>${escapeHtml(p.fornecedor || 'Conta sem fornecedor')}</b>
+            <div class="sheet-muted">${escapeHtml(p.descricao || '')}${p.vencimento ? ' · vence ' + dataBRClient(p.vencimento) : ''}</div>
+            <div class="sheet-muted">${p.confianca === 'texto' ? 'sugestão automática — confira' : 'não consegui identificar a conta'}</div>
+          </div>
+          <b>${fmtBRLMoney(p.valor)}</b>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+          <select class="small-input" id="cp-cat-${p.id}" style="flex:1;min-width:180px">
+            <option value="">— escolha a conta —</option>
+            ${opcoes(p.categoria_sugerida)}
+          </select>
+          <button class="btn-sm btn-success" onclick="confirmarContaPendencia(${p.id})">Lançar</button>
+          <button class="btn-sm" onclick="ignorarContaPendencia(${p.id})">Ignorar</button>
+        </div>
+      </div>`).join('');
+  } catch (e) { card.style.display = 'none'; }
+}
+
+async function confirmarContaPendencia(id) {
+  const sel = document.getElementById('cp-cat-' + id);
+  const categoria = sel ? sel.value : '';
+  if (!categoria) { toast('Escolha em qual conta lançar.', 'err'); return; }
+  try {
+    const r = await apiPost(`/api/conta-pendencias/${id}/confirmar`, { categoria });
+    toast(r.aprendido ? `Lançado em ${r.conta} — vou lembrar desse fornecedor.` : `Lançado em ${r.conta}.`);
+    loadPagamentos();
+  } catch (e) { handleApiError(e); }
+}
+
+async function ignorarContaPendencia(id) {
+  try {
+    await apiPost(`/api/conta-pendencias/${id}/ignorar`, {});
+    loadContaPendencias();
+  } catch (e) { handleApiError(e); }
+}
+
 async function loadPagamentos() {
   const mesEl = document.getElementById('pag-mes');
   if (!mesEl) return;
@@ -4409,6 +4477,7 @@ async function loadPagamentos() {
     const d = await api('/api/pagamentos?mes=' + encodeURIComponent(mesEl.value));
     pagamentosCache = d;
     renderPagamentos(d);
+    loadContaPendencias();
   } catch(e) {
     resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar pagamentos.</div></div>';
     listaEl.innerHTML = '';

@@ -3739,6 +3739,190 @@ function unidadeCompativel(uniCupom, uniProd) {
   return grupos.some(g => g.includes(a) && g.includes(b));
 }
 
+// ── GRUPO "TOCA FINANCEIRO" — conta/boleto vira lançamento ───────────────────
+// Mesma ideia do grupo de notas do estoque, mas pro financeiro (pedido do Rubens,
+// 01/08). Só CONTA e BOLETO — contracheque e folha NÃO passam por aqui, porque o
+// grupo teria dado pessoal de funcionário circulando no WhatsApp.
+// O problema que isso resolve: hoje a conta só existe se alguém lembrar de lançar,
+// e foi por isso que julho passou o mês inteiro sem água e luz.
+async function lerContaComIA(listaImg, mediaType, userLog) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) return { erro: 'ANTHROPIC_API_KEY não configurada no servidor.' };
+  const contasDisponiveis = CONTAS_PLANILHA_PAGAMENTOS
+    .map(g => `${g.grupo}: ${g.contas.join(' | ')}`).join('\n');
+  const prompt = `Você está lendo uma CONTA ou BOLETO de um restaurante brasileiro (conta de luz, água, internet, telefone, boleto de fornecedor, guia de imposto, tarifa).
+
+Extraia:
+- fornecedor: quem está cobrando (ex: "Light", "CEDAE", "Vivo", "Prefeitura"). Nome curto e limpo.
+- valor: o valor A PAGAR em reais, número com PONTO decimal. É o total do documento, não parcela avulsa nem juros isolados.
+- vencimento: data de vencimento no formato AAAA-MM-DD. Se não houver, null.
+- documento: número do documento/código de barras curto, se visível. Senão null.
+- descricao: uma linha curta descrevendo (ex: "Conta de luz referente a julho").
+- grupo e categoria: classifique NAS CONTAS ABAIXO, exatamente como escritas. Se não tiver certeza, use null nos dois.
+
+CONTAS DISPONÍVEIS:
+${contasDisponiveis}
+
+Se a imagem for um CONTRACHEQUE, HOLERITE ou FOLHA DE PAGAMENTO, responda {"recusado":"documento de folha — não deve ser enviado neste grupo"}.
+
+RESPONDA SOMENTE com JSON válido, sem markdown:
+{"fornecedor":"Light","valor":5312.00,"vencimento":"2026-07-20","documento":null,"descricao":"Conta de luz de julho","grupo":"Contas Públicas","categoria":"Eletricidade"}
+
+Se não conseguir ler: {"erro":"descrição do problema"}`;
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6', max_tokens: 2048,
+        messages: [{ role: 'user', content: [
+          ...listaImg.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
+          { type: 'text', text: prompt },
+        ] }],
+      }),
+    });
+    if (!response.ok) {
+      const errBody = (await response.text()).slice(0, 300);
+      console.error('Anthropic API error [ler-conta]:', response.status, errBody);
+      return { erro: `Erro na API (${response.status})` };
+    }
+    const data = await response.json();
+    const text = (data.content || []).map(b => b.text || '').join('');
+    const tenta = s => { try { return JSON.parse(s); } catch (e) { return null; } };
+    let parsed = tenta(text.replace(/```json|```/g, '').trim());
+    if (!parsed) { const i = text.indexOf('{'), f = text.lastIndexOf('}'); if (i >= 0 && f > i) parsed = tenta(text.slice(i, f + 1)); }
+    if (!parsed) {
+      await logErroAgenda('ler-conta parse', 'IA fora do formato: ' + text.slice(0, 150), userLog);
+      return { erro: 'Foto ilegível. Tente uma imagem mais nítida e inteira.' };
+    }
+    return parsed;
+  } catch (e) {
+    console.error('ler-conta:', e.message);
+    return { erro: e.message };
+  }
+}
+
+// Decide a conta com 3 níveis de confiança. A memória (fornecedor já visto e
+// confirmado) é a única que auto-lança — o resto vai pra confirmação, igual as
+// pendências de nota. Sem isso o financeiro entra errado e ninguém percebe.
+async function classificarConta({ fornecedor, grupo, categoria, descricao }) {
+  const termo = normalizeSearch(fornecedor || '');
+  if (termo) {
+    const { data: mem } = await supabase.from('conta_memoria').select('*').eq('termo', termo).maybeSingle();
+    if (mem) return { grupo: mem.grupo, categoria: mem.categoria, confianca: 'memoria' };
+  }
+  const daIA = grupo && categoria ? acharContaPagamento(categoria) : null;
+  if (daIA && daIA.grupo === grupo) return { ...daIA, confianca: 'texto' };
+  const porTexto = inferirContaPagamentoPorTexto([fornecedor, descricao].filter(Boolean).join(' '));
+  if (porTexto && porTexto.categoria !== 'Outros') return { ...porTexto, confianca: 'texto' };
+  return { grupo: null, categoria: null, confianca: 'nenhuma' };
+}
+
+app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
+  const secret = req.headers['x-webhook-secret'] || req.body?.secret;
+  if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
+  const { imagem, imagens, mediaType } = req.body;
+  const remetente = sanitizeText(req.body?.remetente, 60) || 'WhatsApp';
+  const lista = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 4);
+  if (!lista.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
+  try {
+    const r = await lerContaComIA(lista, mediaType, { nome: remetente });
+    if (r.recusado) return res.json({ resposta: `🚫 Isso parece folha de pagamento. Este grupo é só pra CONTA e BOLETO — documento de funcionário não deve circular aqui.` });
+    if (r.erro) return res.json({ resposta: `❌ Não consegui ler: ${r.erro}` });
+    const valor = parseNonNegativeMoney(r.valor);
+    if (!valor) return res.json({ resposta: '⚠️ Não achei o valor a pagar. Manda uma foto mais nítida e inteira.' });
+
+    const fornecedor = sanitizeText(r.fornecedor || '', 90);
+    const descricao = sanitizeText(r.descricao || fornecedor || 'Conta', 180);
+    const vencimento = isDataISO(r.vencimento) ? r.vencimento : null;
+    const conta = await classificarConta({ fornecedor, grupo: r.grupo, categoria: r.categoria, descricao });
+
+    // Só auto-lança o que a memória já confirmou antes. Primeira vez de um fornecedor
+    // sempre passa pela sua conferência — é assim que ele aprende sem errar sozinho.
+    if (conta.confianca === 'memoria') {
+      const { data: pag } = await supabase.from('pagamentos_comprovantes').insert({
+        data: vencimento || dateSP(), grupo: conta.grupo, categoria: conta.categoria,
+        forma: 'boleto', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+        descricao: `${descricao}${fornecedor ? ' — ' + fornecedor : ''}`,
+        origem: 'whatsapp-conta', responsavel: remetente, created_at: nowSP(), updated_at: nowSP(),
+      }).select('id').single();
+      const termoMem = normalizeSearch(fornecedor);
+      const { data: memAtual } = await supabase.from('conta_memoria').select('vezes').eq('termo', termoMem).maybeSingle();
+      await supabase.from('conta_memoria')
+        .update({ vezes: (memAtual?.vezes || 0) + 1, ultimo_valor: valor, atualizado_em: nowSP() })
+        .eq('termo', termoMem);
+      await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, conta: conta.categoria, auto: true }, null, '');
+      return res.json({ resposta: `✅ Lançado: *${conta.categoria}* — ${fmtBRL(valor)}\n${fornecedor}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\n_Já conhecia esse fornecedor._` });
+    }
+
+    const { data: pend } = await supabase.from('conta_pendencias').insert({
+      fornecedor, documento: sanitizeText(r.documento || '', 60) || null, valor,
+      vencimento, descricao, grupo_sugerido: conta.grupo, categoria_sugerida: conta.categoria,
+      confianca: conta.confianca, remetente, status: 'pendente', created_at: nowSP(),
+    }).select('id').single();
+    await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, sugestao: conta.categoria, auto: false }, null, '');
+    return res.json({
+      resposta: conta.categoria
+        ? `📄 Li: *${fornecedor || 'conta'}* — ${fmtBRL(valor)}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\nAcho que é *${conta.categoria}*. Confirma no app em Contas → Pendentes que eu já aprendo pra próxima.`
+        : `📄 Li: *${fornecedor || 'conta'}* — ${fmtBRL(valor)}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\nNão sei em qual conta lançar. Escolhe no app em Contas → Pendentes que eu guardo pra próxima.`,
+      pendencia_id: pend?.id,
+    });
+  } catch (e) {
+    console.error('Erro ler-conta webhook:', e.message);
+    await logErroAgenda('ler-conta-whatsapp', e, { nome: remetente });
+    return res.status(500).json({ resposta: '❌ Erro ao processar a conta.' });
+  }
+});
+
+// Pendências de conta: listar, confirmar (com aprendizado) e ignorar.
+app.get('/api/conta-pendencias', auth, requirePerm('contas'), async (req, res) => {
+  const { data } = await supabase.from('conta_pendencias')
+    .select('*').eq('status', 'pendente').order('id', { ascending: false }).limit(200);
+  res.json({ pendencias: data || [], contas_modelo: CONTAS_PLANILHA_PAGAMENTOS });
+});
+
+app.post('/api/conta-pendencias/:id/confirmar', auth, requirePerm('contas'), async (req, res) => {
+  const { data: p } = await supabase.from('conta_pendencias').select('*').eq('id', req.params.id).single();
+  if (!p || p.status !== 'pendente') return res.status(404).json({ erro: 'Pendência não encontrada.' });
+  const conta = acharContaPagamento(sanitizeText(req.body?.categoria || p.categoria_sugerida || '', 120));
+  if (!conta) return res.status(400).json({ erro: 'Escolha uma conta válida do plano.' });
+  const valor = parseNonNegativeMoney(req.body?.valor ?? p.valor);
+  if (!valor) return res.status(400).json({ erro: 'Valor inválido.' });
+
+  const { data: pag, error } = await supabase.from('pagamentos_comprovantes').insert({
+    data: p.vencimento || dateSP(), grupo: conta.grupo, categoria: conta.categoria,
+    forma: 'boleto', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+    descricao: `${p.descricao || 'Conta'}${p.fornecedor ? ' — ' + p.fornecedor : ''}`,
+    origem: 'whatsapp-conta', responsavel: req.user.nome, created_at: nowSP(), updated_at: nowSP(),
+  }).select('id').single();
+  if (error) return res.status(500).json({ erro: 'Erro ao lançar a conta.' });
+
+  // APRENDIZADO: da próxima vez que esse fornecedor aparecer, entra sozinho.
+  const termo = normalizeSearch(p.fornecedor || '');
+  if (termo) {
+    const { data: mem } = await supabase.from('conta_memoria').select('vezes').eq('termo', termo).maybeSingle();
+    await supabase.from('conta_memoria').upsert({
+      termo, grupo: conta.grupo, categoria: conta.categoria,
+      vezes: (mem?.vezes || 0) + 1, ultimo_valor: valor,
+      atualizado_em: nowSP(), criado_por: req.user.nome,
+    }, { onConflict: 'termo' });
+  }
+  await supabase.from('conta_pendencias').update({
+    status: 'resolvido', pagamento_id: pag.id, resolvido_em: nowSP(), resolvido_por: req.user.nome,
+  }).eq('id', p.id);
+  await audit('conta_pendencia_confirmar', { id: p.id, fornecedor: p.fornecedor, conta: conta.categoria, valor }, req.user, getClientIp(req));
+  res.json({ ok: true, aprendido: !!termo, conta: conta.categoria });
+});
+
+app.post('/api/conta-pendencias/:id/ignorar', auth, requirePerm('contas'), async (req, res) => {
+  const { data: p } = await supabase.from('conta_pendencias').select('id,status').eq('id', req.params.id).single();
+  if (!p) return res.status(404).json({ erro: 'Pendência não encontrada.' });
+  await supabase.from('conta_pendencias').update({ status: 'ignorado', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', p.id);
+  await audit('conta_pendencia_ignorar', { id: p.id }, req.user, getClientIp(req));
+  res.json({ ok: true });
+});
+
 app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
