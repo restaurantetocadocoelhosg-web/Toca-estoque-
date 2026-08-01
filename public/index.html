@@ -314,6 +314,10 @@ select.big-input { font-size: 14px; }
 .sheet-status.caixa { background: rgba(245,158,11,0.14); color: #9a6400; }
 .sheet-status.sem_caixa { background: rgba(239,68,68,0.1); color: var(--red); }
 .sheet-status.vazio { background: var(--s2); color: var(--muted); }
+/* Índices: grupo sem lançamento fica apagado (o número não é zero — é ausência de dado),
+   e as linhas de total ganham peso pra separar derivado de grupo. */
+.sheet-table tr.row-muted td { opacity: 0.55; }
+.sheet-table tr.row-total td { background: rgba(232,93,38,0.06); border-top: 2px solid var(--accent, #e85d26); font-weight: 700; }
 .sheet-pay-list, .sheet-pendency-list { display: flex; flex-direction: column; gap: 8px; }
 .sheet-pay-row, .sheet-pendency-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
 .sheet-pay-row b, .sheet-pendency-row b { color: var(--text); }
@@ -1080,6 +1084,41 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- ÍNDICES GERENCIAIS -->
+  <div id="p-indices" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">📐 Índices do restaurante</div>
+        <div class="sheet-head">
+          <input type="month" class="small-input" id="indices-mes" onchange="loadIndices()">
+          <button class="btn-sm" onclick="indicesMesAtual()">Este mês</button>
+          <button class="btn-sm" onclick="loadIndices()">↻</button>
+        </div>
+        <div id="indices-aviso" class="real-alert" style="display:none;margin-top:10px"></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Prime Cost</div>
+        <div id="indices-prime"><div class="loading">Carregando...</div></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>Custos por grupo</span>
+          <span class="sheet-muted">% sobre a venda</span>
+        </div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="indices-tabela"></table>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">O que falta lançar</div>
+        <div id="indices-faltando" class="sheet-pendency-list"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- RELATÓRIOS -->
   <div id="p-relatorios" class="page">
     <div class="sheet-section">
@@ -1300,7 +1339,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v59</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v61</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1516,6 +1555,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
+  <button class="nav-btn" id="nav-indices" onclick="goPage('indices', this)"><span class="icon">📐</span>Índices</button>
   <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
@@ -1824,6 +1864,7 @@ async function loadSession() {
   gate('nav-realidade', P.dia);
   gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
+  gate('nav-indices', P.planilha);
   gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
   // Auditoria/Exportar saíram do menu inferior e viraram atalhos dentro do Admin —
@@ -1836,7 +1877,7 @@ async function loadSession() {
   if (btnCupom) btnCupom.classList.toggle('hidden', !P.lancar);
   // Garantia extra: admin SEMPRE enxerga todas as abas (independente de qualquer falha acima)
   if (currentUser.role === 'admin') {
-    ['nav-admin','nav-chat','admin-link-auditoria','admin-link-exportar','nav-realidade','nav-cardapio','nav-planilha','nav-relatorios','nav-pagamentos'].forEach(id => {
+    ['nav-admin','nav-chat','admin-link-auditoria','admin-link-exportar','nav-realidade','nav-cardapio','nav-planilha','nav-indices','nav-relatorios','nav-pagamentos'].forEach(id => {
       const el = document.getElementById(id); if (el) el.style.display = 'flex';
     });
   }
@@ -1891,6 +1932,7 @@ function goPage(id, btn) {
   if (id === 'realidade') loadRealidade();
   if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
+  if (id === 'indices') loadIndices();
   if (id === 'relatorios') loadRelatorios();
   if (id === 'pagamentos') loadPagamentos();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
@@ -3923,6 +3965,117 @@ function renderPlanilhaMensal(d) {
   } else {
     pendEl.innerHTML = pendencias.join('');
   }
+}
+
+// ── ÍNDICES GERENCIAIS ──────────────────────────────────────────────
+// Mostra sempre MÊS e MÉDIA lado a lado. O mês serve pra conferir se o lançamento foi
+// feito; a média é a que serve pra decidir, porque item comprado em lote (gás, óleo,
+// descartável) faz o mês isolado mentir — num mês abastece 2x, no outro nenhuma.
+const PRIME_ALVO_MAX = 65; // referência do setor: 60–65% é a faixa saudável
+
+function indicesMesAtual() {
+  const el = document.getElementById('indices-mes');
+  if (el) { el.value = mesAtualClient(); loadIndices(); }
+}
+
+async function loadIndices() {
+  const mesEl = document.getElementById('indices-mes');
+  if (!mesEl) return;
+  if (!mesEl.value) mesEl.value = mesAtualClient();
+  const primeEl = document.getElementById('indices-prime');
+  primeEl.innerHTML = '<div class="loading">Carregando...</div>';
+  document.getElementById('indices-tabela').innerHTML = '';
+  document.getElementById('indices-faltando').innerHTML = '';
+  try {
+    renderIndices(await api('/api/indices?mes=' + encodeURIComponent(mesEl.value)));
+  } catch (e) {
+    primeEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar os índices.</div></div>';
+    handleApiError(e, true);
+  }
+}
+
+function fmtPctInd(v) { return (v === null || v === undefined) ? '—' : String(v).replace('.', ',') + '%'; }
+
+function renderIndices(d) {
+  const avisoEl = document.getElementById('indices-aviso');
+  if (d.janela?.aviso) { avisoEl.style.display = 'block'; avisoEl.textContent = '⚠️ ' + d.janela.aviso; }
+  else { avisoEl.style.display = 'none'; }
+
+  const p = d.prime_cost || {};
+  const pctPrime = Number(p.pct_janela ?? p.pct_mes ?? 0);
+  const cor = pctPrime > 70 ? 'red' : (pctPrime > PRIME_ALVO_MAX ? 'yellow' : 'green');
+  const larg = Math.min(pctPrime, 100);
+  document.getElementById('indices-prime').innerHTML = `
+    <div class="real-kpi big">
+      <div class="real-label">Prime Cost — CMV + bebidas + mão de obra</div>
+      <div class="real-val ${cor}">${fmtPctInd(p.pct_mes)}</div>
+      <div class="real-sub">${fmtBRLMoney(p.valor_mes)} no mês · alvo do setor: até ${PRIME_ALVO_MAX}%</div>
+    </div>
+    <div style="margin-top:12px">
+      <div style="position:relative;height:14px;background:var(--bg2,#eee);border-radius:3px;overflow:hidden">
+        <div style="position:absolute;inset:0 auto 0 0;width:${larg}%;background:${cor === 'red' ? '#dc2626' : cor === 'yellow' ? '#d97706' : '#16a34a'}"></div>
+        <div style="position:absolute;top:-3px;bottom:-3px;left:${PRIME_ALVO_MAX}%;width:2px;background:#111;opacity:.55"></div>
+      </div>
+      <div class="sheet-muted" style="display:flex;justify-content:space-between;margin-top:4px;font-size:11px">
+        <span>0%</span><span>alvo ${PRIME_ALVO_MAX}%</span><span>100%</span>
+      </div>
+    </div>
+    <div class="real-insight" style="margin-top:10px">
+      Venda do mês ${fmtBRLMoney(d.vendas_mes)}. Consumo real do estoque ${fmtBRLMoney(d.consumo_estoque?.valor_mes)}
+      (${fmtPctInd(d.consumo_estoque?.pct_mes)}) — se estiver bem acima do CMV por compras, o CMV verdadeiro é o de cima.
+    </div>`;
+
+  const selo = s => s === 'ok'
+    ? '<span class="sheet-status fechado">lançado</span>'
+    : (s === 'faltando_mes' ? '<span class="sheet-status sem_caixa">faltou no mês</span>'
+                            : '<span class="sheet-status vazio">nunca lançado</span>');
+
+  const linhas = (d.grupos || []).map(g => `
+    <tr class="${g.status === 'ok' ? '' : 'row-muted'}">
+      <td><b>${escapeHtml(g.grupo)}</b></td>
+      <td class="num">${g.valor_mes ? fmtSheetMoney(g.valor_mes) : '—'}</td>
+      <td class="num">${fmtPctInd(g.pct_mes)}</td>
+      <td class="num">${g.media_mensal ? fmtSheetMoney(g.media_mensal) : '—'}</td>
+      <td class="num">${fmtPctInd(g.pct_janela)}</td>
+      <td>${selo(g.status)}</td>
+    </tr>`).join('');
+
+  const totalLinha = (rot, o, cls) => `
+    <tr class="${cls}">
+      <td><b>${rot}</b></td>
+      <td class="num"><b>${fmtSheetMoney(o.valor_mes)}</b></td>
+      <td class="num"><b>${fmtPctInd(o.pct_mes)}</b></td>
+      <td class="num">${fmtSheetMoney(o.media_mensal ?? o.valor_janela)}</td>
+      <td class="num">${fmtPctInd(o.pct_janela)}</td>
+      <td></td>
+    </tr>`;
+
+  document.getElementById('indices-tabela').innerHTML = `
+    <thead><tr>
+      <th>Grupo</th>
+      <th class="num">Mês</th><th class="num">% venda</th>
+      <th class="num">Média/mês</th><th class="num">% média</th>
+      <th>Situação</th>
+    </tr></thead>
+    <tbody>
+      ${linhas}
+      ${totalLinha('Prime Cost', d.prime_cost || {}, 'row-total')}
+      ${totalLinha('Custo total', d.custo_total || {}, 'row-total')}
+      ${totalLinha('Sobra', d.sobra || {}, 'row-total')}
+    </tbody>`;
+
+  const faltando = d.sem_dado || [];
+  document.getElementById('indices-faltando').innerHTML = faltando.length
+    ? faltando.map(f => `
+      <div class="sheet-pendency-row">
+        <div><b>${escapeHtml(f.grupo)}</b>
+          <div class="sheet-muted">${f.status === 'faltando_mes'
+            ? 'você lança normalmente, mas neste mês não tem nenhum lançamento'
+            : 'nunca teve lançamento — enquanto ficar vazio, o custo total sai menor do que é'}</div>
+        </div>
+        <b class="${f.status === 'faltando_mes' ? 'yellow' : 'red'}">${f.status === 'faltando_mes' ? 'faltou' : 'vazio'}</b>
+      </div>`).join('')
+    : '<div class="sheet-pendency-row"><div><b>Todos os grupos com lançamento</b><div class="sheet-muted">Nenhuma categoria vazia neste mês.</div></div><b class="green">OK</b></div>';
 }
 
 function abrirDiaPlanilha(data) {

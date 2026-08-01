@@ -1143,9 +1143,28 @@ const MAPA_CONTA_COMPRA = {
   'Massa Fresca':     ['Despesas Variáveis - CMV', 'Massa Fresca'],
   'Outras Proteínas': ['Despesas Variáveis - CMV', 'Estoque Congelado'],
   'Descartáveis':     ['Despesas Variáveis - CMV', 'Kit (descartáveis)'],
-  'Bebidas':          ['CMV Bebidas', 'Não Alcoólicos'],
+  'Bebidas':          ['CMV Bebidas', 'Não Alcoólicos'], // refinado por contaBebida() — ver abaixo
   'Limpeza':          ['Despesas de Produção', 'Higiene, Limpeza'],
 };
+
+// Categoria "Bebidas" é grossa demais pro plano de contas, que separa CMV Bebidas em
+// Cerveja / Destilados / Vinho / Não Alcoólicos. Sem isto TODA bebida caía em "Não
+// Alcoólicos" e o Rubens nunca conseguia ver quanto o álcool representa (auditoria
+// 01/08: 3 meses de compras tinham R$566 de cerveja e R$266 de destilado/vinho
+// escondidos dentro de "Não Alcoólicos"). Classifica pelo nome do produto.
+function contaBebida(nome) {
+  const n = normalizeSearch(nome);
+  if (/cerveja|brahma|budweiser|corona|heineken|stella|imperio|antartica|skol|original|eisenbahn|chopp/.test(n)) return 'Cerveja';
+  if (/vinho/.test(n)) return 'Vinho';
+  if (/cachaca|vodka|whisky|uisque|gin|rum|sake|licor|tequila|conhaque|aperitivo/.test(n)) return 'Destilados';
+  return 'Não Alcoólicos';
+}
+
+// Categoria de produto sem mapa não pode inventar conta: 'Outros' NÃO existe no grupo
+// "Despesas Variáveis - CMV" e o lançamento virava uma linha órfã que nenhum índice
+// somava (bug real: o produto com categoria digitada 'Embutidosi' gerou CMV > Outros).
+// Estoque Congelado é a conta guarda-chuva legítima do grupo.
+const CONTA_COMPRA_FALLBACK = ['Despesas Variáveis - CMV', 'Estoque Congelado'];
 
 // Compra que entra no estoque vira lançamento automático na aba Contas — organiza o
 // financeiro por categoria sem depender de lançamento manual. Falha aqui NUNCA derruba
@@ -1157,7 +1176,8 @@ async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs
     if (!v || v <= 0) return;                          // sem preço real não polui as Contas
     const cat = produto.categoria || '';
     if (/^qa robo/i.test(cat)) return;                 // produtos de teste do robô ficam fora
-    const [grupo, conta] = MAPA_CONTA_COMPRA[cat] || ['Despesas Variáveis - CMV', 'Outros'];
+    let [grupo, conta] = MAPA_CONTA_COMPRA[cat] || CONTA_COMPRA_FALLBACK;
+    if (grupo === 'CMV Bebidas') conta = contaBebida(produto.nome);
     await supabase.from('pagamentos_comprovantes').insert({
       data: dateSP(), grupo, categoria: conta, forma: 'compra_estoque',
       valor_bruto: v, taxa: 0, valor_liquido: v, parcelas: 0,
@@ -2102,6 +2122,151 @@ async function montarPlanilhaMensal(mesParam) {
   };
 }
 
+// ÍNDICES GERENCIAIS (DRE de restaurante) — CMV, CMO, Prime Cost, custo total.
+// Mostra SEMPRE duas colunas: o mês e a média dos últimos 3 meses. Motivo (Rubens,
+// 01/08): item comprado em lote distorce o mês isolado — "tem mês que gasta muito com
+// gás porque abasteceu 2x, e no outro não precisa". O mês serve pra conferir lançamento;
+// a média de 3 meses é a que serve pra decidir. Percentual só fecha de verdade com a
+// janela cheia, então o retorno diz quantos meses realmente têm dado.
+const MESES_JANELA = 3;
+
+function mesesAnteriores(mes, n) {
+  const [ano, m] = mes.split('-').map(Number);
+  const lista = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(Date.UTC(ano, m - 1 - i, 1));
+    lista.push(`${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`);
+  }
+  return lista;
+}
+
+async function montarIndices(mesParam) {
+  const mes = validarMesISO(mesParam);
+  const meses = mesesAnteriores(mes, MESES_JANELA);
+  const inicioJanela = `${meses[0]}-01`;
+  const fimMes = fimMesISO(mes);
+
+  const [fechamentos, pagamentos, movimentos] = await Promise.all([
+    supabase.from('fechamentos_diarios').select('data, vendas')
+      .gte('data', inicioJanela).lte('data', fimMes)
+      .then(r => { if (r.error && !isTabelaFechamentoMissing(r.error)) throw r.error; return r.data || []; }),
+    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, grupo, categoria, valor_bruto')
+      .gte('data', inicioJanela).lte('data', fimMes).order('id', { ascending: true }))
+      .catch(e => { if (isTabelaPagamentosMissing(e)) return []; throw e; }),
+    fetchTodas(() => supabase.from('movimentacoes').select('created_at, tipo, valor')
+      .gte('created_at', inicioJanela + 'T00:00:00-03:00').lte('created_at', fimMes + 'T23:59:59-03:00')
+      .order('id', { ascending: true })),
+  ]);
+
+  const noMes = d => String(d || '').slice(0, 7) === mes;
+  const vendasPorMes = {};
+  for (const f of fechamentos) {
+    const m = String(f.data).slice(0, 7);
+    vendasPorMes[m] = (vendasPorMes[m] || 0) + Number(f.vendas || 0);
+  }
+  const vendasMes = Number((vendasPorMes[mes] || 0).toFixed(2));
+
+  // A janela é definida pelos meses com CUSTO lançado, não com venda. Sem isso o
+  // percentual médio vira ficção: dividir 1 mês de contas por 3 meses de venda deu
+  // "Prime Cost 21%" no primeiro teste (o certo era 72%). Hoje só julho/2026 tem contas
+  // — a aba Contas nasceu no v52 (14/07) e o backfill cobriu só julho.
+  const lancPorMes = {};
+  for (const p of pagamentos) {
+    const m = String(p.data || '').slice(0, 7);
+    lancPorMes[m] = (lancPorMes[m] || 0) + 1;
+  }
+  const mesesComCusto = meses.filter(m => (lancPorMes[m] || 0) > 0);
+  const mesesJanela = mesesComCusto.length ? mesesComCusto : [mes];
+  const vendasJanela = Number(mesesJanela.reduce((s, m) => s + (vendasPorMes[m] || 0), 0).toFixed(2));
+
+  // Consumo real do estoque: o CMV que de fato saiu pra cozinha. Serve de contraprova
+  // do CMV por compras — os dois deveriam convergir; enquanto não convergem, o CMV
+  // verdadeiro está do lado do consumo.
+  let consumoMes = 0, consumoJanela = 0;
+  for (const mv of movimentos) {
+    if (mv.tipo !== 'Saída') continue;
+    const v = Number(mv.valor || 0);
+    consumoJanela += v;
+    if (dataISOFromTimestampSP(mv.created_at).slice(0, 7) === mes) consumoMes += v;
+  }
+
+  const zero = () => ({ mes: 0, janela: 0, n_mes: 0, n_janela: 0 });
+  const porGrupo = Object.fromEntries(CONTAS_PLANILHA_PAGAMENTOS.map(g => [g.grupo, zero()]));
+  const dentroJanela = new Set(mesesJanela);
+  for (const p of pagamentos) {
+    const g = p.grupo || 'Outras Despesas';
+    if (!porGrupo[g]) porGrupo[g] = zero();
+    const v = Number(p.valor_bruto || 0);
+    if (dentroJanela.has(String(p.data || '').slice(0, 7))) { porGrupo[g].janela += v; porGrupo[g].n_janela++; }
+    if (noMes(p.data)) { porGrupo[g].mes += v; porGrupo[g].n_mes++; }
+  }
+
+  const nMeses = mesesJanela.length;
+  const grupos = CONTAS_PLANILHA_PAGAMENTOS.map(g => {
+    const d = porGrupo[g.grupo] || zero();
+    // "Nunca lançado" x "esqueceu este mês" são problemas diferentes e pedem ação diferente.
+    const status = d.n_mes > 0 ? 'ok' : (d.n_janela > 0 ? 'faltando_mes' : 'nunca');
+    return {
+      grupo: g.grupo,
+      valor_mes: Number(d.mes.toFixed(2)),
+      pct_mes: pct(d.mes, vendasMes),
+      valor_janela: Number(d.janela.toFixed(2)),
+      media_mensal: Number((d.janela / nMeses).toFixed(2)),
+      pct_janela: pct(d.janela, vendasJanela),
+      lancamentos_mes: d.n_mes,
+      lancamentos_janela: d.n_janela,
+      status,
+    };
+  });
+
+  const somaDe = (nomes, campo) => Number(grupos.filter(g => nomes.includes(g.grupo))
+    .reduce((s, g) => s + g[campo], 0).toFixed(2));
+  const GRUPOS_PRIME = ['Despesas Variáveis - CMV', 'CMV Bebidas', 'Despesas Fixas / CMO'];
+  const todosGrupos = grupos.map(g => g.grupo);
+
+  const derivado = (nomes, rotulo) => {
+    const vMes = somaDe(nomes, 'valor_mes');
+    const vJanela = somaDe(nomes, 'valor_janela');
+    return {
+      rotulo,
+      valor_mes: vMes, pct_mes: pct(vMes, vendasMes),
+      valor_janela: vJanela, pct_janela: pct(vJanela, vendasJanela),
+      media_mensal: Number((vJanela / nMeses).toFixed(2)),
+    };
+  };
+  const primeCost = derivado(GRUPOS_PRIME, 'Prime Cost');
+  const custoTotal = derivado(todosGrupos, 'Custo total');
+  const sobraMes = Number((vendasMes - custoTotal.valor_mes).toFixed(2));
+  const sobraJanela = Number((vendasJanela - custoTotal.valor_janela).toFixed(2));
+
+  return {
+    mes,
+    mes_label: mes.split('-').reverse().join('/'),
+    janela: {
+      meses,
+      meses_com_custo: mesesJanela,
+      n_meses: nMeses,
+      completa: mesesComCusto.length >= MESES_JANELA,
+      aviso: mesesComCusto.length >= MESES_JANELA ? null
+        : `A média cobre ${nMeses} ${nMeses === 1 ? 'mês' : 'meses'} de contas lançadas, não ${MESES_JANELA}. Item comprado em lote (gás, óleo, descartável) distorce mês isolado — o percentual só estabiliza com a janela cheia.`,
+    },
+    vendas_mes: vendasMes,
+    vendas_janela: vendasJanela,
+    consumo_estoque: {
+      valor_mes: Number(consumoMes.toFixed(2)), pct_mes: pct(consumoMes, vendasMes),
+      valor_janela: Number(consumoJanela.toFixed(2)), pct_janela: pct(consumoJanela, vendasJanela),
+    },
+    grupos,
+    prime_cost: primeCost,
+    custo_total: custoTotal,
+    sobra: {
+      valor_mes: sobraMes, pct_mes: pct(sobraMes, vendasMes),
+      valor_janela: sobraJanela, pct_janela: pct(sobraJanela, vendasJanela),
+    },
+    sem_dado: grupos.filter(g => g.status !== 'ok').map(g => ({ grupo: g.grupo, status: g.status })),
+  };
+}
+
 async function montarRelatorioPeriodo(inicioParam, fimParam) {
   let inicio = validarDataISO(inicioParam || dateAgoDias(6));
   let fim = validarDataISO(fimParam || dateSP());
@@ -2488,6 +2653,15 @@ app.get('/api/planilha-mensal', auth, requirePerm('planilha'), async (req, res) 
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar planilha mensal.' });
+  }
+});
+
+app.get('/api/indices', auth, requirePerm('planilha'), async (req, res) => {
+  try {
+    res.json(await montarIndices(req.query?.mes));
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao calcular os índices.' });
   }
 });
 
