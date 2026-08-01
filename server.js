@@ -2264,7 +2264,7 @@ async function montarIndices(mesParam) {
     supabase.from('fechamentos_diarios').select('data, vendas')
       .gte('data', inicioJanela).lte('data', fimMes)
       .then(r => { if (r.error && !isTabelaFechamentoMissing(r.error)) throw r.error; return r.data || []; }),
-    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, grupo, categoria, valor_bruto')
+    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, grupo, categoria, valor_bruto, quitacao, competencia')
       .gte('data', inicioJanela).lte('data', fimMes).order('id', { ascending: true }))
       .catch(e => { if (isTabelaPagamentosMissing(e)) return []; throw e; }),
     fetchTodas(() => supabase.from('movimentacoes').select('created_at, tipo, valor')
@@ -2308,10 +2308,17 @@ async function montarIndices(mesParam) {
   const porGrupo = Object.fromEntries(CONTAS_PLANILHA_PAGAMENTOS.map(g => [g.grupo, zero()]));
   const dentroJanela = new Set(mesesJanela);
   const naoOperacional = { mes: 0, janela: 0, n_mes: 0 };
+  const quitacoes = { mes: 0, n_mes: 0 };
   for (const p of pagamentos) {
     const g = p.grupo || 'Outras Despesas';
     const v = Number(p.valor_bruto || 0);
     const naJanela = dentroJanela.has(String(p.data || '').slice(0, 7));
+    // Quitação (comprovante de pagamento da folha): o dinheiro saiu, mas o custo já foi
+    // reconhecido pela folha na competência. Contar de novo dobraria o CMO.
+    if (p.quitacao) {
+      if (noMes(p.data)) { quitacoes.mes += v; quitacoes.n_mes++; }
+      continue;
+    }
     if (ehNaoOperacional(g, p.categoria)) {   // retirada: registrada, fora do custo
       if (naJanela) naoOperacional.janela += v;
       if (noMes(p.data)) { naoOperacional.mes += v; naoOperacional.n_mes++; }
@@ -2384,6 +2391,18 @@ async function montarIndices(mesParam) {
       valor_mes: sobraMes, pct_mes: pct(sobraMes, vendasMes),
       valor_janela: sobraJanela, pct_janela: pct(sobraJanela, vendasJanela),
     },
+    // Confronto folha x pagamento: a folha diz quanto CUSTOU (competência), os
+    // comprovantes dizem quanto já SAIU. A diferença é o que ainda falta pagar.
+    folha: (() => {
+      const custo = grupos.find(g => g.grupo === 'Despesas Fixas / CMO')?.valor_mes || 0;
+      const pago = Number(quitacoes.mes.toFixed(2));
+      return {
+        custo_mes: custo,
+        pago_mes: pago,
+        em_aberto: Number((custo - pago).toFixed(2)),
+        comprovantes: quitacoes.n_mes,
+      };
+    })(),
     // Fora do custo, mostrado à parte: saiu do caixa mas é distribuição, não despesa.
     nao_operacional: {
       rotulo: 'Retiradas de sócio',
@@ -3791,6 +3810,13 @@ Identifique QUAL dos documentos é e extraia SÓ o total indicado:
 4) CONTRACHEQUE INDIVIDUAL, folha de ponto, informativo ou previsão de férias
    → responda {"tipo":"folha","ignorar":"<que documento é>"} sem rubricas.
 
+5) COMPROVANTE DE PAGAMENTO de salário (Pix/TED para funcionário, recibo de salário)
+   → tipo "quitacao". É a QUITAÇÃO da folha, não um custo novo: o custo já foi
+   reconhecido quando a folha do mês entrou. Extraia só o valor e a competência
+   (se não disser a competência, use o mês da data do pagamento).
+   NÃO inclua o nome de quem recebeu.
+   {"tipo":"quitacao","competencia":"2026-07","valor":1850.00,"descricao":"Pagamento de salário"}
+
 Formato:
 {"tipo":"folha","competencia":"2026-07","descricao":"Folha de julho","so_segurado":false,"rubricas":[{"rubrica":"Salários","valor":30072.09}]}
 
@@ -3863,6 +3889,33 @@ app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
     // FOLHA: entra pelos TOTAIS por rubrica. Nome, CPF e salário individual não são
     // extraídos nem gravados — o financeiro só precisa do custo por conta, e guardar
     // dado pessoal de funcionário seria risco sem nenhum ganho.
+    // Comprovante de pagamento de salário: registra a saída, mas NÃO soma no custo —
+    // a folha da competência já respondeu "quanto custou". Aqui é "quanto já saiu".
+    if (r.tipo === 'quitacao') {
+      const valor = parseNonNegativeMoney(r.valor);
+      if (!valor) return res.json({ resposta: '⚠️ Não achei o valor do comprovante.' });
+      const comp = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
+      await supabase.from('pagamentos_comprovantes').insert({
+        data: dateSP(), grupo: 'Despesas Fixas / CMO', categoria: 'Salários', forma: 'quitacao',
+        valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+        descricao: sanitizeText(r.descricao || 'Pagamento de salário', 180),
+        origem: 'quitacao-whatsapp', responsavel: remetente, quitacao: true, competencia: comp,
+        created_at: nowSP(), updated_at: nowSP(),
+      });
+      const { data: pagos } = await supabase.from('pagamentos_comprovantes')
+        .select('valor_bruto').eq('quitacao', true).eq('competencia', comp);
+      const totalPago = (pagos || []).reduce((s, p) => s + Number(p.valor_bruto || 0), 0);
+      const { data: folha } = await supabase.from('pagamentos_comprovantes')
+        .select('valor_bruto').eq('origem', 'folha-whatsapp').eq('data', fimMesISO(comp));
+      const custoFolha = (folha || []).reduce((s, p) => s + Number(p.valor_bruto || 0), 0);
+      await audit('quitacao_folha', { remetente, competencia: comp, valor }, null, '');
+      return res.json({ resposta:
+        `✅ Pagamento de ${fmtBRL(valor)} registrado (competência ${comp.split('-').reverse().join('/')}).\n\n` +
+        (custoFolha > 0
+          ? `Folha do mês: ${fmtBRL(custoFolha)}\nJá pago: ${fmtBRL(totalPago)}\nEm aberto: ${fmtBRL(custoFolha - totalPago)}`
+          : `Já pago nessa competência: ${fmtBRL(totalPago)}\n_A folha desse mês ainda não foi lançada — manda que eu fecho a conta._`) +
+        `\n\n_Não somei no custo: quem diz o custo é a folha._` });
+    }
     if (r.tipo === 'folha' && r.ignorar) {
       return res.json({ resposta: `ℹ️ Isso é *${sanitizeText(r.ignorar, 80)}* — não tem total pra lançar.\n\nDo pacote do contador, manda só três: a *folha de pagamento*, a *guia do FGTS* e o *DARF do INSS*.` });
     }

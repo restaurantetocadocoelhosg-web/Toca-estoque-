@@ -1348,7 +1348,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v69</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v70</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4071,6 +4071,13 @@ function renderIndices(d) {
       ${totalLinha('Prime Cost', d.prime_cost || {}, 'row-total')}
       ${totalLinha('Custo total', d.custo_total || {}, 'row-total')}
       ${totalLinha('Sobra', d.sobra || {}, 'row-total')}
+      ${Number(d.folha?.pago_mes || 0) > 0 ? `
+      <tr class="row-muted">
+        <td><b>Folha — já pago no mês</b><div class="sheet-muted">${d.folha.comprovantes} comprovante(s) · quitação, não é custo novo</div></td>
+        <td class="num">${fmtSheetMoney(d.folha.pago_mes)}</td>
+        <td class="num">—</td><td class="num">—</td><td class="num">—</td>
+        <td><span class="sheet-status ${d.folha.em_aberto > 0.5 ? 'sem_caixa' : 'fechado'}">${d.folha.em_aberto > 0.5 ? 'falta ' + fmtBRLMoney(d.folha.em_aberto) : 'quitada'}</span></td>
+      </tr>` : ''}
       ${Number(d.nao_operacional?.valor_mes || 0) > 0 ? `
       <tr class="row-muted">
         <td><b>${escapeHtml(d.nao_operacional.rotulo)}</b><div class="sheet-muted">distribuição de resultado — fora do custo</div></td>
