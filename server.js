@@ -1120,7 +1120,9 @@ const TAXA_POR_FORMA = {
 // antes de gravar, então re-salvar o fechamento não duplica. Dinheiro não paga taxa.
 async function lancarTaxasDoDia(dataDia, formas, responsavel) {
   try {
-    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'taxa-auto');
+    // Limpa também a origem do backfill: sem isso, re-salvar um dia de julho deixaria a
+    // linha do backfill E criaria a nova = custo duplicado naquele dia.
+    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'taxa-backfill']);
     const linhas = [];
     for (const [key, cfg] of Object.entries(TAXA_POR_FORMA)) {
       const bruto = Number(formas?.[key]?.valor || 0);
@@ -1149,7 +1151,8 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
 // pagamentos_comprovantes — nenhum total mistura as duas fontes.
 async function lancarDespesasDoCaixaNasContas(dataDia, despesas, responsavel) {
   try {
-    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).eq('origem', 'caixa-auto');
+    // Idem taxas: limpa a origem do backfill junto, senão re-salvar o dia duplica a despesa.
+    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['caixa-auto', 'caixa-backfill']);
     const linhas = [];
     for (const d of (despesas || [])) {
       const valor = Number(d.valor || 0);
@@ -2697,8 +2700,10 @@ app.delete('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       throw error;
     }
     // Apagou o fechamento → a taxa calculada em cima dele não faz mais sentido.
-    try { await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'caixa-auto']); }
-    catch (e) { console.error('taxa/caixa-auto delete:', e.message); }
+    try {
+      await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia)
+        .in('origem', ['taxa-auto', 'taxa-backfill', 'caixa-auto', 'caixa-backfill']);
+    } catch (e) { console.error('taxa/caixa-auto delete:', e.message); }
     await audit('realidade_dia_limpar', { data: dataDia }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
     res.json(resumo);
