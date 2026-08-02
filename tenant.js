@@ -20,10 +20,15 @@ const TABELAS_POR_TENANT = new Set([
   'produtos', 'categorias', 'movimentacoes', 'fechamentos_diarios',
   'pagamentos_comprovantes', 'conta_pendencias', 'conta_memoria',
   'nota_pendencias', 'sinonimos', 'inventarios', 'inventario_itens', 'audit_logs',
+  // Encontradas por varredura em 02/08 — todas são dado de restaurante e estavam
+  // passando sem filtro: backup do estoque, cardápio, pratos, agenda da IA e
+  // snapshots. Sem isso, o cardápio de um cliente apareceria pro outro.
+  'backups_estoque', 'cardapios_salvos', 'ia_agenda', 'pratos_cardapio', 'snapshots_diarios',
 ]);
 
 // Tabelas globais da plataforma — não têm dono e NÃO devem receber filtro.
-const TABELAS_GLOBAIS = new Set(['tenants', 'users', 'produtos_modelo']);
+// `sessions` é global de propósito: a sessão aponta pro usuário, que já tem dono.
+const TABELAS_GLOBAIS = new Set(['tenants', 'users', 'produtos_modelo', 'sessions']);
 
 class TenantError extends Error {
   constructor(msg) { super(msg); this.name = 'TenantError'; }
