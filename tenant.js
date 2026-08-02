@@ -106,9 +106,10 @@ function middlewareTenant(req, res, next) {
   if (!u) return res.status(401).json({ erro: 'Sessão expirada.' });
 
   if (u.role === 'superadmin') {
-    const escolhido = Number(req.headers['x-tenant-id'] || req.query?.tenant_id || 0);
-    if (!escolhido) return res.status(400).json({ erro: 'Superadmin precisa escolher o restaurante.' });
-    req.tenantId = escolhido;
+    // Sem restaurante escolhido ele ainda opera a plataforma (abrir conta, listar,
+    // suspender). Só não consegue tocar em dado de restaurante — quem barra isso é o
+    // próprio cliente do banco, que recusa consulta sem contexto.
+    req.tenantId = Number(req.headers['x-tenant-id'] || req.query?.tenant_id || 0) || null;
     req.superadmin = true;
     return next();
   }
@@ -117,7 +118,59 @@ function middlewareTenant(req, res, next) {
   return next();
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// CLIENTE GLOBAL COM TENANT AUTOMÁTICO
+//
+// O app tem ~200 chamadas `supabase.from(...)` espalhadas. Reescrever uma por uma
+// seria demorado e — pior — deixaria a porta aberta para alguém esquecer uma.
+// Em vez disso, o tenant viaja no contexto da requisição (AsyncLocalStorage) e o
+// próprio cliente aplica o filtro. Toda consulta fica isolada de uma vez, e
+// consulta nova nasce isolada sem ninguém precisar lembrar.
+// ─────────────────────────────────────────────────────────────────────────────
+const { AsyncLocalStorage } = require('async_hooks');
+const contexto = new AsyncLocalStorage();
+
+const tenantAtual = () => (contexto.getStore() || {}).tenantId || null;
+
+/** Roda um trecho preso a um restaurante (usado pelo middleware e por jobs). */
+function comContexto(tenantId, fn) {
+  return contexto.run({ tenantId }, fn);
+}
+
+/**
+ * Envolve o cliente supabase-js: tabela de dado ganha o tenant do contexto,
+ * tabela global passa direto. Sem contexto, tabela de dado é recusada — assim um
+ * job que rodar fora de requisição falha alto em vez de vazar dado entre lojas.
+ */
+function clienteMultiTenant(supabase) {
+  return new Proxy(supabase, {
+    get(alvo, prop) {
+      if (prop !== 'from') {
+        const v = alvo[prop];
+        return typeof v === 'function' ? v.bind(alvo) : v;
+      }
+      return (tabela) => {
+        if (!TABELAS_POR_TENANT.has(tabela)) return alvo.from(tabela); // global: sem filtro
+        const id = tenantAtual();
+        if (!id) throw new TenantError(`Consulta a "${tabela}" fora do contexto de um restaurante.`);
+        return criarAcesso(alvo, id).from(tabela);
+      };
+    },
+  });
+}
+
+/** Middleware: prende a requisição ao restaurante do usuário logado. */
+function middlewareContexto(req, res, next) {
+  middlewareTenant(req, res, () => {
+    // Superadmin pode não ter restaurante escolhido — segue sem contexto e só as rotas
+    // de plataforma funcionam. Rota de dado falha no cliente, com mensagem clara.
+    if (!req.tenantId) return next();
+    return comContexto(req.tenantId, next);
+  });
+}
+
 module.exports = {
   TABELAS_POR_TENANT, TABELAS_GLOBAIS, TenantError,
   criarAcesso, middlewareTenant,
+  clienteMultiTenant, comContexto, middlewareContexto, tenantAtual,
 };

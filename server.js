@@ -29,7 +29,16 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios!');
   process.exit(1);
 }
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// MULTI-TENANT (em desenvolvimento): com SUPABASE_SCHEMA=mt o app roda no ambiente
+// isolado e cada consulta a tabela de dado passa a exigir um restaurante no contexto.
+// Sem a variável, nada muda — é exatamente o app de hoje, apontando pro schema public.
+const { clienteMultiTenant, comContexto, middlewareContexto } = require('./tenant');
+const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
+// Restaurante de referência: de onde saem as categorias ao abrir um novo.
+const TENANT_MODELO = Number(process.env.TENANT_MODELO || 3);
+const MULTI_TENANT = SCHEMA !== 'public';
+const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, MULTI_TENANT ? { db: { schema: SCHEMA } } : undefined);
+const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || true }));
 app.use(express.json({ limit: '15mb' }));
@@ -247,7 +256,8 @@ async function auth(req, res, next) {
   }
 
   const { data: user } = await supabase
-    .from('users').select('id, username, nome, role, active').eq('id', session.user_id).single();
+    .from('users').select(MULTI_TENANT ? 'id, username, nome, role, active, tenant_id' : 'id, username, nome, role, active')
+    .eq('id', session.user_id).single();
   if (!user || !user.active) {
     await deleteSession(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
@@ -256,6 +266,9 @@ async function auth(req, res, next) {
   await touchSession(token);
   req.user = user;
   req.token = token;
+  // No modo multi-restaurante, tudo daqui pra frente roda preso ao restaurante do
+  // usuário — inclusive as consultas que as rotas fazem sem saber que ele existe.
+  if (MULTI_TENANT) return middlewareContexto(req, res, next);
   next();
 }
 
@@ -367,7 +380,13 @@ app.post('/api/login', loginLimiter, async (req, res) => {
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
 
   const token = await createSession(user);
-  await audit('login', { username: user.username }, user, getClientIp(req));
+  // O login acontece ANTES de existir contexto de restaurante (é ele que descobre qual é).
+  // Então a auditoria roda explicitamente presa ao restaurante do usuário que acabou de entrar.
+  if (MULTI_TENANT && user.tenant_id) {
+    await comContexto(Number(user.tenant_id), () => audit('login', { username: user.username }, user, getClientIp(req)));
+  } else if (!MULTI_TENANT) {
+    await audit('login', { username: user.username }, user, getClientIp(req));
+  }
   res.json({ token, user: { id: user.id, username: user.username, nome: user.nome, role: user.role } });
 });
 
@@ -2815,6 +2834,183 @@ app.get('/api/planilha-mensal', auth, requirePerm('planilha'), async (req, res) 
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar planilha mensal.' });
+  }
+});
+
+// ── ABRIR UM RESTAURANTE NOVO NA PLATAFORMA ─────────────────────────────────
+// O restaurante nasce PRONTO PRA USAR, não vazio (Rubens, 01/08: "deveria já vir
+// completo, a pessoa se encaixa no perfil do aplicativo"). Deixar o estoque vazio
+// joga a maior fricção no cliente logo no primeiro dia — cadastrar centenas de
+// produtos é onde ele desiste. O catálogo-modelo (produtos_modelo) vem dos produtos
+// reais do Toca, sem preço e sem quantidade: o dono revisa e ajusta em vez de digitar.
+function requireSuperadmin(req, res, next) {
+  if (req.user?.role !== 'superadmin') return res.status(403).json({ erro: 'Só a administração da plataforma pode fazer isso.' });
+  next();
+}
+
+async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuario, admin_senha, admin_nome, importar_catalogo = true }) {
+  const raw = supabaseRaw;   // criação acontece FORA do contexto de tenant (o tenant ainda não existe)
+  const { data: tenant, error: errT } = await raw.from('tenants').insert({
+    nome: sanitizeText(nome, 120), slug: sanitizeText(slug, 60).toLowerCase(),
+    cnpj: sanitizeText(cnpj || '', 20) || null, telefone: sanitizeText(telefone || '', 20) || null,
+    plano: ['financeiro', 'estoque', 'completo'].includes(plano) ? plano : 'financeiro',
+  }).select('*').single();
+  if (errT) throw new Error(errT.message.includes('duplicate') ? 'Já existe restaurante com esse identificador.' : errT.message);
+
+  const resumo = { tenant, categorias: 0, produtos: 0, usuario: null };
+
+  // 1) Categorias: são a ponte produto → conta contábil. Sem elas o CMV não classifica.
+  const { data: cats } = await raw.from('categorias').select('nome').eq('tenant_id', TENANT_MODELO);
+  const nomesCat = [...new Set((cats || []).map(c => c.nome))].filter(n => !/^qa robo/i.test(n));
+  if (nomesCat.length) {
+    await raw.from('categorias').insert(nomesCat.map(nome => ({ nome, tenant_id: tenant.id })));
+    resumo.categorias = nomesCat.length;
+  }
+
+  // 2) Catálogo: zerado e sem preço — é sugestão de cadastro, não estoque de mentira.
+  if (importar_catalogo) {
+    const { data: modelo } = await raw.from('produtos_modelo').select('nome, categoria, unidade');
+    const linhas = (modelo || []).map(p => ({
+      nome: p.nome, nome_search: normalizeSearch(p.nome), categoria: p.categoria, unidade: p.unidade,
+      qtd: 0, custo: 0, minimo: 1, ativo: 1, tenant_id: tenant.id, updated_at: nowSP(),
+    }));
+    for (let i = 0; i < linhas.length; i += 500) {
+      const { error } = await raw.from('produtos').insert(linhas.slice(i, i + 500));
+      if (error) throw new Error('Erro ao importar o catálogo: ' + error.message);
+    }
+    resumo.produtos = linhas.length;
+  }
+
+  // 3) O dono, que administra os usuários dele daqui pra frente.
+  // O nome de usuário é único na PLATAFORMA, não no restaurante: o login recebe só
+  // usuário e senha, então dois "admin" em restaurantes diferentes deixariam o sistema
+  // sem saber quem é quem — e o login falharia com "senha inválida", que manda o dono
+  // procurar o problema no lugar errado. Melhor barrar aqui, com a mensagem certa.
+  const usuario = sanitizeText(admin_usuario, 40).toLowerCase();
+  const { data: jaExiste } = await raw.from('users').select('id').ilike('username', usuario).maybeSingle();
+  if (jaExiste) {
+    await raw.from('tenants').delete().eq('id', tenant.id);   // desfaz: não deixa restaurante órfão
+    throw new Error(`O usuário "${usuario}" já existe na plataforma. Escolha outro (ex: ${slug}.admin).`);
+  }
+  const { data: u, error: errU } = await raw.from('users').insert({
+    tenant_id: tenant.id, username: usuario, password_hash: hashPassword(String(admin_senha)),
+    nome: sanitizeText(admin_nome || nome, 80), role: 'admin', active: 1,
+  }).select('id, username, nome, role').single();
+  if (errU) throw new Error('Restaurante criado, mas falhou ao criar o usuário: ' + errU.message);
+  resumo.usuario = u;
+  return resumo;
+}
+
+app.post('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    for (const campo of ['nome', 'slug', 'admin_usuario', 'admin_senha']) {
+      if (!b[campo]) return res.status(400).json({ erro: `Campo obrigatório: ${campo}.` });
+    }
+    if (String(b.admin_senha).length < 6) return res.status(400).json({ erro: 'A senha do administrador precisa de ao menos 6 caracteres.' });
+    const r = await abrirRestaurante(b);
+    res.json({
+      ok: true, restaurante: { id: r.tenant.id, nome: r.tenant.nome, slug: r.tenant.slug, plano: r.tenant.plano },
+      preparado: { categorias: r.categorias, produtos: r.produtos }, admin: r.usuario,
+    });
+  } catch (e) {
+    console.error('abrir restaurante:', e.message);
+    res.status(400).json({ erro: e.message });
+  }
+});
+
+app.get('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
+  const { data } = await supabaseRaw.from('tenants').select('*').order('id');
+  res.json({ restaurantes: data || [] });
+});
+
+// COMPARADOR DE PERÍODOS — a aba Relatórios deixa de repetir o que a Planilha já mostra
+// (Rubens, 01/08: "não é uma duplicidade de informação?"). Era: os mesmos números com
+// período flexível. Agora responde a pergunta que nenhuma outra tela responde:
+// "este período foi melhor ou pior que o anterior, e em quê?".
+function variacao(atual, anterior) {
+  const a = Number(atual || 0), b = Number(anterior || 0);
+  if (!b) return { abs: Number(a.toFixed(2)), pct: null };  // sem base, % não significa nada
+  return { abs: Number((a - b).toFixed(2)), pct: Number((((a - b) / Math.abs(b)) * 100).toFixed(1)) };
+}
+
+// Período anterior do mesmo tamanho, imediatamente antes — é a comparação que faz sentido
+// por padrão (7 dias contra os 7 anteriores, um mês contra o mês anterior).
+function periodoAnterior(inicio, fim) {
+  const d1 = new Date(inicio + 'T12:00:00Z'), d2 = new Date(fim + 'T12:00:00Z');
+  const dias = Math.round((d2 - d1) / 86400000) + 1;
+  const fimAnt = new Date(d1.getTime() - 86400000);
+  const iniAnt = new Date(fimAnt.getTime() - (dias - 1) * 86400000);
+  const iso = d => d.toISOString().slice(0, 10);
+  return { inicio: iso(iniAnt), fim: iso(fimAnt) };
+}
+
+app.get('/api/comparar', auth, requirePerm('planilha'), async (req, res) => {
+  try {
+    const aIni = validarDataISO(req.query?.inicio || dateAgoDias(6));
+    const aFim = validarDataISO(req.query?.fim || dateSP());
+    const ant = periodoAnterior(aIni, aFim);
+    const bIni = validarDataISO(req.query?.base_inicio || ant.inicio);
+    const bFim = validarDataISO(req.query?.base_fim || ant.fim);
+
+    const [a, b] = await Promise.all([
+      montarRelatorioPeriodo(aIni, aFim),
+      montarRelatorioPeriodo(bIni, bFim),
+    ]);
+
+    // Em cada linha: se "subir" é bom ou ruim. Sem isso a tela pinta de verde um
+    // consumo que disparou — que é justamente o que o dono precisa enxergar.
+    const LINHAS = [
+      { chave: 'vendas', rotulo: 'Vendas', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'pratos_vendidos', rotulo: 'Pratos vendidos', tipo: 'numero', subir: 'bom' },
+      { chave: 'ticket_medio', rotulo: 'Ticket médio', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'consumo_estoque', rotulo: 'Consumo de estoque', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'perdas', rotulo: 'Perdas', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'despesas_caixa', rotulo: 'Despesas do caixa', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'compras_estoque', rotulo: 'Compras de estoque', tipo: 'dinheiro', subir: 'neutro' },
+      { chave: 'contas_pagas', rotulo: 'Contas pagas', tipo: 'dinheiro', subir: 'neutro' },
+      { chave: 'cortes', rotulo: 'Cortes', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'resultado_operacional', rotulo: 'Resultado operacional', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'dias_com_caixa', rotulo: 'Dias com caixa lançado', tipo: 'numero', subir: 'bom' },
+    ];
+
+    const linhas = LINHAS.map(l => {
+      const atual = a.totais[l.chave], anterior = b.totais[l.chave];
+      const v = variacao(atual, anterior);
+      const melhorou = l.subir === 'neutro' || v.abs === 0 ? null
+        : (l.subir === 'bom' ? v.abs > 0 : v.abs < 0);
+      return { ...l, atual: atual ?? null, anterior: anterior ?? null, ...v, melhorou };
+    });
+
+    // Consumo sobre vendas é o índice que mais denuncia problema: se a venda caiu e o
+    // consumo não, alguma coisa está saindo sem ser vendida.
+    const pctA = pct(a.totais.consumo_estoque, a.totais.vendas);
+    const pctB = pct(b.totais.consumo_estoque, b.totais.vendas);
+    linhas.push({
+      chave: 'consumo_sobre_vendas', rotulo: 'Consumo sobre vendas', tipo: 'pct', subir: 'ruim',
+      atual: pctA, anterior: pctB,
+      abs: (pctA !== null && pctB !== null) ? Number((pctA - pctB).toFixed(1)) : null,
+      pct: null, melhorou: (pctA !== null && pctB !== null) ? pctA < pctB : null,
+    });
+
+    res.json({
+      atual: { inicio: aIni, fim: aFim, dias: a.totais.dias_periodo, label: `${dataBR(aIni)} a ${dataBR(aFim)}` },
+      base: { inicio: bIni, fim: bFim, dias: b.totais.dias_periodo, label: `${dataBR(bIni)} a ${dataBR(bFim)}` },
+      linhas,
+      alerta: (() => {
+        const vend = linhas.find(l => l.chave === 'vendas');
+        const cons = linhas.find(l => l.chave === 'consumo_estoque');
+        if (vend?.pct !== null && cons?.pct !== null && vend?.pct < -5 && cons?.pct > 5)
+          return 'A venda caiu e o consumo de estoque subiu no mesmo período. Vale conferir perda, desperdício ou saída sem venda.';
+        const cs = linhas.find(l => l.chave === 'consumo_sobre_vendas');
+        if (cs?.abs !== null && cs?.abs > 5)
+          return `O consumo passou de ${cs.anterior}% para ${cs.atual}% das vendas. Cada ponto aí sai direto do seu resultado.`;
+        return null;
+      })(),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao comparar os períodos.' });
   }
 });
 
@@ -5775,7 +5971,11 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 
 // ==================== START ====================
-seed().then(async () => {
+// No modo multi-restaurante o seed não se aplica: produtos e usuários pertencem a um
+// restaurante, e cada um nasce com os seus (ou importa o catálogo-modelo). O erro que
+// isso dava no boot era o isolamento funcionando — consulta a tabela de dado sem
+// restaurante definido é recusada de propósito.
+(MULTI_TENANT ? Promise.resolve() : seed()).then(async () => {
   await initSessionsBackend();
   app.listen(PORT, () => {
     console.log(`🐰 Toca do Coelho — Estoque (Supabase) rodando em http://localhost:${PORT}`);

@@ -1123,41 +1123,29 @@ select.big-input { font-size: 14px; }
   <div id="p-relatorios" class="page">
     <div class="sheet-section">
       <div class="real-card">
-        <div class="real-card-title">📊 Relatórios</div>
+        <div class="real-card-title">
+          <span>⚖️ Comparar períodos</span>
+          <span class="sheet-muted">este período contra outro</span>
+        </div>
         <div class="sheet-head">
-          <input type="date" class="small-input" id="rel-data-inicio" onchange="loadRelatorios()">
-          <input type="date" class="small-input" id="rel-data-fim" onchange="loadRelatorios()">
-          <button class="btn-sm" onclick="loadRelatorios()">↻</button>
+          <input type="date" class="small-input" id="cmp-inicio" onchange="loadComparar()">
+          <input type="date" class="small-input" id="cmp-fim" onchange="loadComparar()">
+          <button class="btn-sm" onclick="loadComparar()">↻</button>
         </div>
         <div class="sheet-actions" style="margin-top:10px">
-          <button class="btn-sm" onclick="relatorioPreset('hoje')">Hoje</button>
-          <button class="btn-sm" onclick="relatorioPreset('7')">7 dias</button>
-          <button class="btn-sm" onclick="relatorioPreset('30')">30 dias</button>
-          <button class="btn-sm" onclick="relatorioPreset('mes')">Mês atual</button>
-          <button class="btn-sm" onclick="relatorioPreset('mes-anterior')">Mês anterior</button>
+          <button class="btn-sm" onclick="cmpPreset('7')">Últimos 7 dias</button>
+          <button class="btn-sm" onclick="cmpPreset('30')">Últimos 30 dias</button>
+          <button class="btn-sm" onclick="cmpPreset('mes')">Mês atual</button>
+          <button class="btn-sm" onclick="cmpPreset('mes-anterior')">Mês anterior</button>
         </div>
+        <div class="sheet-muted" id="cmp-periodos" style="margin-top:10px"></div>
+        <div id="cmp-alerta" class="real-alert" style="display:none;margin-top:10px"></div>
       </div>
 
       <div class="real-card">
-        <div class="real-card-title">Resumo do período</div>
-        <div class="real-grid" id="rel-resumo"><div class="loading">Carregando...</div></div>
-        <div class="real-insight" id="rel-insight" style="margin-top:10px"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Recebimentos</div>
-        <div id="rel-formas" class="sheet-pay-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Contas pagas</div>
-        <div id="rel-contas" class="sheet-pay-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Dias do período</div>
+        <div class="real-card-title">O que mudou</div>
         <div class="sheet-scroll">
-          <table class="sheet-table" id="rel-dias"></table>
+          <table class="sheet-table" id="cmp-tabela"><tbody><tr><td class="loading">Carregando...</td></tr></tbody></table>
         </div>
       </div>
     </div>
@@ -1565,7 +1553,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-indices" onclick="goPage('indices', this)"><span class="icon">📐</span>Índices</button>
-  <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
+  <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">⚖️</span>Comparar</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
@@ -1942,7 +1930,7 @@ function goPage(id, btn) {
   if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
   if (id === 'indices') loadIndices();
-  if (id === 'relatorios') loadRelatorios();
+  if (id === 'relatorios') loadComparar();
   if (id === 'pagamentos') loadPagamentos();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
   if (id === 'audit') initAuditoria();
@@ -3976,6 +3964,77 @@ function renderPlanilhaMensal(d) {
   }
 }
 
+// ── COMPARAR PERÍODOS ───────────────────────────────────────────────
+// Substituiu a antiga aba Relatórios, que repetia os números da Planilha com
+// período flexível. Aqui a pergunta é outra: melhorou ou piorou, e em quê.
+function cmpPreset(tipo) {
+  const hoje = new Date();
+  const iso = d => d.toISOString().slice(0, 10);
+  let ini, fim = new Date(hoje);
+  if (tipo === '7') { ini = new Date(hoje); ini.setDate(ini.getDate() - 6); }
+  else if (tipo === '30') { ini = new Date(hoje); ini.setDate(ini.getDate() - 29); }
+  else if (tipo === 'mes') { ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1); }
+  else if (tipo === 'mes-anterior') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  }
+  document.getElementById('cmp-inicio').value = iso(ini);
+  document.getElementById('cmp-fim').value = iso(fim);
+  loadComparar();
+}
+
+async function loadComparar() {
+  const iniEl = document.getElementById('cmp-inicio'), fimEl = document.getElementById('cmp-fim');
+  if (!iniEl || !fimEl) return;
+  if (!iniEl.value || !fimEl.value) { cmpPreset('7'); return; }
+  const tabela = document.getElementById('cmp-tabela');
+  tabela.innerHTML = '<tbody><tr><td class="loading">Carregando...</td></tr></tbody>';
+  try {
+    renderComparar(await api(`/api/comparar?inicio=${iniEl.value}&fim=${fimEl.value}`));
+  } catch (e) {
+    tabela.innerHTML = '<tbody><tr><td class="empty-text">Erro ao comparar.</td></tr></tbody>';
+    handleApiError(e);
+  }
+}
+
+function renderComparar(d) {
+  document.getElementById('cmp-periodos').innerHTML =
+    `<b>${escapeHtml(d.atual.label)}</b> (${d.atual.dias} dias) &nbsp;comparado com&nbsp; <b>${escapeHtml(d.base.label)}</b>`;
+
+  const al = document.getElementById('cmp-alerta');
+  if (d.alerta) { al.style.display = 'block'; al.textContent = '⚠️ ' + d.alerta; }
+  else al.style.display = 'none';
+
+  const fmtVal = (v, tipo) => v === null || v === undefined ? '—'
+    : tipo === 'dinheiro' ? fmtBRLMoney(v)
+    : tipo === 'pct' ? String(v).replace('.', ',') + '%'
+    : String(v);
+
+  // Cor pela MELHORA, não pelo sinal: consumo subindo é vermelho mesmo sendo "+".
+  const seta = l => {
+    if (l.abs === null || l.abs === 0) return '<span class="sheet-muted">sem mudança</span>';
+    const cor = l.melhorou === null ? '' : (l.melhorou ? 'green' : 'red');
+    const sinal = l.abs > 0 ? '▲' : '▼';
+    const pct = l.pct === null ? '' : ` (${l.pct > 0 ? '+' : ''}${String(l.pct).replace('.', ',')}%)`;
+    return `<b class="${cor}">${sinal} ${fmtVal(Math.abs(l.abs), l.tipo)}${pct}</b>`;
+  };
+
+  document.getElementById('cmp-tabela').innerHTML = `
+    <thead><tr>
+      <th>Indicador</th>
+      <th class="num">${escapeHtml(d.atual.label)}</th>
+      <th class="num">${escapeHtml(d.base.label)}</th>
+      <th class="num">Variação</th>
+    </tr></thead>
+    <tbody>${d.linhas.map(l => `
+      <tr${l.chave === 'resultado_operacional' ? ' class="row-total"' : ''}>
+        <td><b>${escapeHtml(l.rotulo)}</b></td>
+        <td class="num">${fmtVal(l.atual, l.tipo)}</td>
+        <td class="num">${fmtVal(l.anterior, l.tipo)}</td>
+        <td class="num">${seta(l)}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
 // ── ÍNDICES GERENCIAIS ──────────────────────────────────────────────
 // Mostra sempre MÊS e MÉDIA lado a lado. O mês serve pra conferir se o lançamento foi
 // feito; a média é a que serve pra decidir, porque item comprado em lote (gás, óleo,
@@ -4153,148 +4212,11 @@ function fimMesClient(mes) {
   return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
 }
 
-function relatorioPreset(tipo) {
-  const hoje = hojeSPClient();
-  const ini = document.getElementById('rel-data-inicio');
-  const fim = document.getElementById('rel-data-fim');
-  if (!ini || !fim) return;
-  if (tipo === 'hoje') {
-    ini.value = hoje;
-    fim.value = hoje;
-  } else if (tipo === '7') {
-    ini.value = addDiasClient(hoje, -6);
-    fim.value = hoje;
-  } else if (tipo === '30') {
-    ini.value = addDiasClient(hoje, -29);
-    fim.value = hoje;
-  } else if (tipo === 'mes') {
-    const mes = mesAtualClient();
-    ini.value = `${mes}-01`;
-    fim.value = fimMesClient(mes);
-  } else if (tipo === 'mes-anterior') {
-    const [y, m] = mesAtualClient().split('-').map(Number);
-    const mesAnt = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
-    ini.value = `${mesAnt}-01`;
-    fim.value = fimMesClient(mesAnt);
-  }
-  loadRelatorios();
-}
 
-async function loadRelatorios() {
-  const ini = document.getElementById('rel-data-inicio');
-  const fim = document.getElementById('rel-data-fim');
-  if (!ini || !fim) return;
-  if (!ini.value || !fim.value) {
-    const hoje = hojeSPClient();
-    ini.value = addDiasClient(hoje, -6);
-    fim.value = hoje;
-  }
-  const resumoEl = document.getElementById('rel-resumo');
-  const formasEl = document.getElementById('rel-formas');
-  const contasEl = document.getElementById('rel-contas');
-  const diasEl = document.getElementById('rel-dias');
-  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
-  formasEl.innerHTML = '';
-  contasEl.innerHTML = '';
-  diasEl.innerHTML = '';
-  try {
-    const qs = new URLSearchParams({ data_inicio: ini.value, data_fim: fim.value });
-    const d = await api('/api/relatorios/periodo?' + qs.toString());
-    relatoriosCache = d;
-    renderRelatorios(d);
-  } catch(e) {
-    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar relatório.</div></div>';
-    handleApiError(e, true);
-  }
-}
 
-function renderRelatorios(d) {
-  const t = d.totais || {};
-  const resumoEl = document.getElementById('rel-resumo');
-  const insightEl = document.getElementById('rel-insight');
-  const formasEl = document.getElementById('rel-formas');
-  const contasEl = document.getElementById('rel-contas');
-  const diasEl = document.getElementById('rel-dias');
 
-  resumoEl.innerHTML = `
-    <div class="real-kpi big">
-      <div class="real-label">Vendas</div>
-      <div class="real-val green">${fmtBRLMoney(t.vendas)}</div>
-      <div class="real-sub">${t.pratos_vendidos || 0} pratos · ticket ${fmtBRLMoney(t.ticket_medio)}</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Resultado operacional</div>
-      <div class="real-val ${Number(t.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_operacional)}</div>
-      <div class="real-sub">vendas - consumo - perdas - despesas caixa</div>
-    </div>
-    <div class="real-kpi warn">
-      <div class="real-label">Compras estoque</div>
-      <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
-      <div class="real-sub">investimento separado</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Consumo estoque</div>
-      <div class="real-val">${fmtBRLMoney(t.consumo_estoque)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.consumo_estoque / t.vendas) * 100 : null)} das vendas</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Perdas</div>
-      <div class="real-val red">${fmtBRLMoney(t.perdas)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.perdas / t.vendas) * 100 : null)} das vendas</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Despesas caixa</div>
-      <div class="real-val red">${fmtBRLMoney(t.despesas_caixa)}</div>
-      <div class="real-sub">despesas digitadas no movimento</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Contas pagas</div>
-      <div class="real-val red">${fmtBRLMoney(t.contas_pagas)}</div>
-      <div class="real-sub">${t.lancamentos_contas || 0} lançamento(s)</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Dias fechados</div>
-      <div class="real-val">${t.dias_com_caixa || 0}/${t.dias_periodo || 0}</div>
-      <div class="real-sub">${escapeHtml(d.inicio_br || '')} até ${escapeHtml(d.fim_br || '')}</div>
-    </div>`;
 
-  insightEl.textContent = 'Compras de estoque aparecem separadas do resultado. Contas pagas também ficam separadas das despesas lançadas no caixa do dia.';
 
-  formasEl.innerHTML = d.formas_pagamento?.length
-    ? d.formas_pagamento.map(f => `
-      <div class="sheet-pay-row">
-        <div><b>${escapeHtml(f.forma)}</b><div class="sheet-muted">${f.qtd ? f.qtd + ' lançamento(s)' : 'sem quantidade'}</div></div>
-        <b>${fmtBRLMoney(f.valor)}</b>
-      </div>`).join('')
-    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum recebimento no período.</div></div>';
-
-  const contas = d.contas?.por_categoria || [];
-  contasEl.innerHTML = contas.length
-    ? contas.slice(0, 20).map(c => `
-      <div class="sheet-pay-row">
-        <div><b>${escapeHtml(c.categoria)}</b><div class="sheet-muted">${escapeHtml(c.grupo)} · ${c.qtd} lançamento(s)</div></div>
-        <b>${fmtBRLMoney(c.valor_bruto)}</b>
-      </div>`).join('')
-    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhuma conta paga no período.</div></div>';
-
-  diasEl.innerHTML = `
-    <thead><tr>
-      <th>Data</th><th class="num">Vendas</th><th class="num">Pratos</th><th class="num">Contas</th>
-      <th class="num">Compras</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Desp. caixa</th><th class="num">Resultado</th>
-    </tr></thead>
-    <tbody>${(d.dias || []).map(row => `
-      <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
-        <td><b>${escapeHtml(row.data_br)}</b></td>
-        <td class="num">${fmtSheetMoney(row.vendas)}</td>
-        <td class="num">${row.pratos_vendidos || '—'}</td>
-        <td class="num">${fmtSheetMoney(row.contas_pagas)}</td>
-        <td class="num">${fmtSheetMoney(row.compras_estoque)}</td>
-        <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
-        <td class="num">${fmtSheetMoney(row.perdas)}</td>
-        <td class="num">${fmtSheetMoney(row.despesas)}</td>
-        <td class="num"><b class="${Number(row.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_operacional)}</b></td>
-      </tr>`).join('')}</tbody>`;
-}
 
 function grupoDaContaPagamento(categoria) {
   const alvo = norm(categoria);
