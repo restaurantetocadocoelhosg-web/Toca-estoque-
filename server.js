@@ -136,6 +136,13 @@ function permsPorRole(role) {
   if (role === 'gerente') return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true };
   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
+
+// No multi-restaurante, o que era único no sistema passa a ser único POR RESTAURANTE.
+// Todo upsert precisa refletir isso na chave de conflito, senão o Postgres reclama
+// ("no unique constraint matching the ON CONFLICT specification") ou — pior — dois
+// restaurantes disputariam a mesma linha.
+const chaveConflito = (cols) => MULTI_TENANT ? 'tenant_id,' + cols : cols;
+
 function permsEfetivas(role, permissoes) {
   // superadmin administra a PLATAFORMA, não o restaurante. Sem isso ele caía no
   // fallback de operador e recebia acesso ao app do cliente sem ter escolhido nenhum.
@@ -535,7 +542,21 @@ app.get('/api/categorias', auth, async (req, res) => {
 });
 
 // ==================== GESTÃO DE CATEGORIAS (Admin) ====================
-app.post('/api/categorias', auth, requireRole('admin', 'gerente'), async (req, res) => {
+// CATEGORIA é ESTRUTURA, não dado do cliente: é ela que liga produto → conta do
+// plano de contas (MAPA_CONTA_COMPRA). Se o dono do restaurante criar 'Carnes XYZ' ou
+// renomear 'Hortifruti', a compra dele para de classificar e o CMV/Prime Cost quebram
+// em silêncio. Por isso, no modo plataforma, só a administração mexe nisso — foi o que
+// o Rubens pediu: 'ele não poderia mudar coisas que interferem no relatório'.
+function requireEstrutura(...roles) {
+  return (req, res, next) => {
+    if (MULTI_TENANT && req.user?.role !== 'superadmin') {
+      return res.status(403).json({ erro: 'As categorias fazem parte da estrutura do relatório e são definidas pela plataforma. Fale com a administração se precisar de uma nova.' });
+    }
+    return requireRole(...roles)(req, res, next);
+  };
+}
+
+app.post('/api/categorias', auth, requireEstrutura('admin', 'gerente'), async (req, res) => {
   const nome = sanitizeText(req.body?.nome, 80);
   if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome de categoria inválido.' });
   const { error } = await supabase.from('categorias').insert({ nome });
@@ -547,19 +568,19 @@ app.post('/api/categorias', auth, requireRole('admin', 'gerente'), async (req, r
   res.json({ ok: true, nome });
 });
 
-app.put('/api/categorias/renomear', auth, requireRole('admin'), async (req, res) => {
+app.put('/api/categorias/renomear', auth, requireEstrutura('admin'), async (req, res) => {
   const de = sanitizeText(req.body?.de, 80);
   const para = sanitizeText(req.body?.para, 80);
   if (!de || !para || de === para) return res.status(400).json({ erro: 'Informe a categoria atual e o novo nome.' });
   const { data: afetados } = await supabase.from('produtos').select('id').eq('categoria', de);
   await supabase.from('produtos').update({ categoria: para }).eq('categoria', de);
   await supabase.from('categorias').delete().eq('nome', de);
-  await supabase.from('categorias').upsert({ nome: para }, { onConflict: 'nome' });
+  await supabase.from('categorias').upsert({ nome: para }, { onConflict: chaveConflito('nome') });
   await audit('renomear_categoria', { de, para, produtos_afetados: (afetados || []).length }, req.user, getClientIp(req));
   res.json({ ok: true, produtos_afetados: (afetados || []).length });
 });
 
-app.delete('/api/categorias/:nome', auth, requireRole('admin'), async (req, res) => {
+app.delete('/api/categorias/:nome', auth, requireEstrutura('admin'), async (req, res) => {
   const nome = sanitizeText(req.params.nome, 80);
   const { count } = await supabase.from('produtos').select('id', { count: 'exact', head: true }).eq('categoria', nome).or('ativo.eq.1,ativo.is.null');
   if (count > 0) return res.status(400).json({ erro: `Categoria em uso por ${count} produto(s). Mova-os antes de excluir.` });
@@ -910,7 +931,7 @@ async function ensureSnapshotDiario() {
       qtd: p.qtd, unidade: p.unidade, data: hoje,
     }));
     await supabase.from('snapshots_diarios').upsert(rows,
-      { onConflict: 'produto_id,data', ignoreDuplicates: true });
+      { onConflict: chaveConflito('produto_id,data'), ignoreDuplicates: true });
   } catch(e) { console.error('Snapshot diario erro:', e.message); }
 }
 
@@ -1161,15 +1182,29 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
     // linha do backfill E criaria a nova = custo duplicado naquele dia.
     await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'taxa-backfill']);
     const linhas = [];
+    // Cada restaurante negocia a taxa dele com a maquininha — usar a taxa de outro
+    // faria o custo sair errado todo mês. A config do restaurante manda; a constante
+    // do código é só o padrão de quem ainda não configurou.
+    let taxasDoRestaurante = null;
+    if (MULTI_TENANT) {
+      try {
+        const id = require('./tenant').tenantAtual();
+        if (id) {
+          const { data: t } = await supabaseRaw.from('tenants').select('config').eq('id', id).maybeSingle();
+          taxasDoRestaurante = t?.config?.taxas || null;
+        }
+      } catch (e) { /* sem config: cai no padrão */ }
+    }
     for (const [key, cfg] of Object.entries(TAXA_POR_FORMA)) {
       const bruto = Number(formas?.[key]?.valor || 0);
       if (bruto <= 0) continue;
-      const valor = Number((bruto * cfg.taxa / 100).toFixed(2));
+      const pctTaxa = Number(taxasDoRestaurante?.[key] ?? cfg.taxa);
+      const valor = Number((bruto * pctTaxa / 100).toFixed(2));
       if (valor <= 0) continue;
       linhas.push({
         data: dataDia, grupo: 'Despesas Financeiras', categoria: cfg.conta,
         forma: 'taxa_operadora', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
-        descricao: sanitizeText(`Taxa ${formas[key].forma} ${cfg.taxa}% sobre ${fmtBRL(bruto)} (${cfg.ref})`, 180),
+        descricao: sanitizeText(`Taxa ${formas[key].forma} ${pctTaxa}% sobre ${fmtBRL(bruto)} (${cfg.ref})`, 180),
         origem: 'taxa-auto', responsavel: responsavel || 'sistema',
         created_at: nowSP(), updated_at: nowSP(),
       });
@@ -2743,7 +2778,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       lixo_buffet_g: lixoBuffetG,
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
-    }, { onConflict: 'data' });
+    }, { onConflict: chaveConflito('data') });
     if (error) {
       if (isTabelaFechamentoMissing(error)) {
         return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
@@ -2934,6 +2969,58 @@ app.post('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, re
   } catch (e) {
     console.error('abrir restaurante:', e.message);
     res.status(400).json({ erro: e.message });
+  }
+});
+
+// ── O QUE O DONO DO RESTAURANTE PODE CONFIGURAR ─────────────────────────────
+// Parâmetro é diferente de estrutura. Taxa de maquininha e dados da empresa são
+// DELE — cada restaurante negocia a taxa que consegue, e usar a taxa de outro faria
+// o custo sair errado. O que ele não mexe é o que muda a forma de medir: plano de
+// contas, categorias e as regras dos índices continuam iguais pra todo mundo, que é
+// justamente o que permite comparar um restaurante com outro.
+app.get('/api/restaurante', auth, async (req, res) => {
+  if (!MULTI_TENANT) return res.json({ multi_tenant: false });
+  const { data } = await supabaseRaw.from('tenants').select('id, nome, slug, cnpj, telefone, endereco, plano, config').eq('id', req.tenantId).maybeSingle();
+  if (!data) return res.status(404).json({ erro: 'Restaurante não encontrado.' });
+  res.json({ multi_tenant: true, restaurante: data, pode_editar: ['admin', 'superadmin'].includes(req.user.role) });
+});
+
+app.put('/api/restaurante', auth, requireRole('admin', 'superadmin'), async (req, res) => {
+  if (!MULTI_TENANT) return res.status(400).json({ erro: 'Indisponível.' });
+  try {
+    const b = req.body || {};
+    const { data: atual } = await supabaseRaw.from('tenants').select('config').eq('id', req.tenantId).maybeSingle();
+    const cfg = { ...(atual?.config || {}) };
+
+    if (b.taxas && typeof b.taxas === 'object') {
+      const taxas = { ...(cfg.taxas || {}) };
+      for (const k of ['credito', 'debito', 'voucher', 'pix', 'cartao']) {
+        if (b.taxas[k] === undefined || b.taxas[k] === '') continue;
+        const v = Number(String(b.taxas[k]).replace(',', '.'));
+        // Taxa fora de 0–20% é digitação errada, não negociação — barra antes de virar
+        // custo errado em todo fechamento do mês.
+        if (!Number.isFinite(v) || v < 0 || v > 20) {
+          return res.status(400).json({ erro: `Taxa de ${k} inválida: use um número entre 0 e 20.` });
+        }
+        taxas[k] = Number(v.toFixed(2));
+      }
+      cfg.taxas = taxas;
+    }
+    if (b.alerta_caixa && typeof b.alerta_caixa === 'object') {
+      cfg.alerta_caixa = { ...(cfg.alerta_caixa || {}), ...b.alerta_caixa };
+    }
+
+    const patch = { config: cfg };
+    for (const campo of ['nome', 'cnpj', 'telefone', 'endereco']) {
+      if (typeof b[campo] === 'string') patch[campo] = sanitizeText(b[campo], 120);
+    }
+    const { error } = await supabaseRaw.from('tenants').update(patch).eq('id', req.tenantId);
+    if (error) throw error;
+    await audit('restaurante_config', { campos: Object.keys(patch) }, req.user, getClientIp(req));
+    res.json({ ok: true, config: cfg });
+  } catch (e) {
+    console.error('config restaurante:', e.message);
+    res.status(500).json({ erro: 'Erro ao salvar as configurações.' });
   }
 });
 
@@ -4295,7 +4382,7 @@ app.post('/api/conta-pendencias/:id/confirmar', auth, requirePerm('contas'), asy
       termo, grupo: conta.grupo, categoria: conta.categoria,
       vezes: (mem?.vezes || 0) + 1, ultimo_valor: valor,
       atualizado_em: nowSP(), criado_por: req.user.nome,
-    }, { onConflict: 'termo' });
+    }, { onConflict: chaveConflito('termo') });
   }
   await supabase.from('conta_pendencias').update({
     status: 'resolvido', pagamento_id: pag.id, resolvido_em: nowSP(), resolvido_por: req.user.nome,
@@ -4439,7 +4526,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
 
   // "Memorizar": salva o apelido (nome da nota → produto), pra próxima lançar sozinho.
   if (memorizar && pend.produto_cupom) {
-    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: 'termo' }); } catch (e) {}
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
   await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
@@ -4482,7 +4569,7 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   }).select('id').single();
   await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
   if (memorizar && pend.produto_cupom) {
-    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: 'termo' }); } catch (e) {}
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
   await audit('pendencia_criar_produto', { pendencia_id: pend.id, produto: novo.nome, qtd, categoria, unidade }, req.user, getClientIp(req));
@@ -5508,7 +5595,7 @@ app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), async (req, re
   const { prod, opcoes } = await acharProdutoUnico(produto_nome);
   if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
-  const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: 'termo' });
+  const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') });
   if (error) return res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
   res.json({ ok: true });
 });
@@ -5522,7 +5609,7 @@ app.post('/api/sinonimos/importar', auth, requireRole('admin'), async (req, res)
       const termo = normalizeSearch(String(s.termo || ''));
       const { prod } = await acharProdutoUnico(String(s.produto_nome || ''));
       if (!termo || !prod) { erros.push(s.termo); continue; }
-      await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: 'termo' });
+      await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: chaveConflito('termo') });
       ok++;
     } catch(e) { erros.push(s.termo); }
   }

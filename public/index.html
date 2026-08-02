@@ -1453,13 +1453,44 @@ select.big-input { font-size: 14px; }
         <div id="sin-list"></div>
       </div>
 
+      <!-- MEU RESTAURANTE — parâmetros que são do cliente (não mexem no relatório) -->
+      <div class="admin-card" id="card-meu-restaurante" style="display:none">
+        <div class="admin-card-title">🏪 Meu restaurante</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Dados da empresa e as taxas que <b>você</b> negociou com a maquininha. A taxa entra
+          sozinha no fechamento do dia — se estiver errada aqui, seu custo sai errado no mês.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <input class="small-input" id="rest-nome" placeholder="Nome do restaurante">
+          <input class="small-input" id="rest-cnpj" placeholder="CNPJ">
+          <input class="small-input" id="rest-telefone" placeholder="Telefone">
+          <div style="font-size:12px;color:var(--muted);margin-top:6px"><b>Taxas da maquininha (%)</b></div>
+          <div class="form-row" style="gap:6px;flex-wrap:wrap">
+            <label class="sheet-muted" style="flex:1;min-width:92px">Crédito<input class="small-input" id="tx-credito" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Débito<input class="small-input" id="tx-debito" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Voucher<input class="small-input" id="tx-voucher" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Pix<input class="small-input" id="tx-pix" inputmode="decimal"></label>
+          </div>
+          <button class="btn-export btn-success" onclick="salvarMeuRestaurante()">Salvar</button>
+          <div id="rest-msg" class="real-alert" style="display:none"></div>
+        </div>
+      </div>
+
       <!-- GESTÃO DE CATEGORIAS -->
       <div class="admin-card">
         <div class="admin-card-title">🗂️ Categorias <button class="btn-sm" onclick="loadCatsAdmin()">↻</button></div>
+        <div id="cat-aviso-plataforma" class="real-alert" style="display:none;margin-bottom:10px">
+          🔒 As categorias fazem parte da estrutura do relatório: são elas que ligam cada produto
+          à conta certa do CMV. Por isso são iguais para todos os restaurantes e definidas pela
+          plataforma — é o que permite comparar seu CMV com o de outros. Precisa de uma nova?
+          Fale com a administração.
+        </div>
+        <div id="cat-edicao">
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Crie, renomeie ou exclua categorias. Renomear move todos os produtos junto.</div>
         <div class="form-row" style="margin-bottom:10px">
           <input class="small-input" id="cat-nova" placeholder="Nova categoria (ex: Padaria)">
           <button class="btn-export btn-success" style="padding:11px" onclick="criarCategoria()">➕ Criar categoria</button>
+        </div>
         </div>
         <div id="cats-admin-list"></div>
       </div>
@@ -1989,7 +2020,7 @@ function goPage(id, btn) {
   if (id === 'plataforma') loadPlataforma();
   if (id === 'relatorios') loadComparar();
   if (id === 'pagamentos') loadPagamentos();
-  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
+  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); loadMeuRestaurante(); }
   if (id === 'audit') initAuditoria();
   if (id === 'inventario') loadInventario();
   if (id === 'chat') iniciarChatBoot();
@@ -4018,6 +4049,50 @@ function renderPlanilhaMensal(d) {
     pendEl.innerHTML = '<div class="sheet-pendency-row"><div><b>Tudo certo no cruzamento principal</b><div class="sheet-muted">Nenhum dia com estoque movimentado sem caixa lançado.</div></div><b class="green">OK</b></div>';
   } else {
     pendEl.innerHTML = pendencias.join('');
+  }
+}
+
+// ── MEU RESTAURANTE (área do cliente) ───────────────────────────────
+// O dono configura o que é DELE: dados da empresa e as taxas que ele negociou.
+// O que muda a forma de MEDIR (categorias, plano de contas, regras dos índices)
+// continua igual pra todos — é isso que deixa comparar um restaurante com outro.
+async function loadMeuRestaurante() {
+  try {
+    const d = await api('/api/restaurante');
+    if (!d.multi_tenant) return;                       // app de um restaurante só: nada a fazer
+    const card = document.getElementById('card-meu-restaurante');
+    if (!card) return;
+    card.style.display = d.pode_editar ? 'block' : 'none';
+    const r = d.restaurante || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+    set('rest-nome', r.nome); set('rest-cnpj', r.cnpj); set('rest-telefone', r.telefone);
+    const t = (r.config && r.config.taxas) || {};
+    set('tx-credito', t.credito); set('tx-debito', t.debito);
+    set('tx-voucher', t.voucher); set('tx-pix', t.pix);
+
+    // Categoria é estrutura: cliente vê, entende o porquê, mas não edita.
+    const ehPlataforma = (currentUser?.role !== 'superadmin');
+    const aviso = document.getElementById('cat-aviso-plataforma');
+    const edicao = document.getElementById('cat-edicao');
+    if (aviso) aviso.style.display = ehPlataforma ? 'block' : 'none';
+    if (edicao) edicao.style.display = ehPlataforma ? 'none' : 'block';
+  } catch (e) { /* app sem plataforma: segue como sempre foi */ }
+}
+
+async function salvarMeuRestaurante() {
+  const msg = document.getElementById('rest-msg');
+  const val = id => document.getElementById(id).value.trim();
+  try {
+    await apiPost('/api/restaurante', {
+      nome: val('rest-nome'), cnpj: val('rest-cnpj'), telefone: val('rest-telefone'),
+      taxas: { credito: val('tx-credito'), debito: val('tx-debito'), voucher: val('tx-voucher'), pix: val('tx-pix') },
+    }, 'PUT');
+    msg.style.display = 'block';
+    msg.textContent = '✅ Salvo. As próximas taxas do fechamento já usam esses valores.';
+    toast('Configurações salvas.');
+  } catch (e) {
+    msg.style.display = 'block';
+    msg.textContent = '❌ ' + (e.message || 'Erro ao salvar.');
   }
 }
 
