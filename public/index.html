@@ -1084,6 +1084,57 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- PLATAFORMA — área do administrador da plataforma (não aparece para o cliente) -->
+  <div id="p-plataforma" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>🏢 Restaurantes na plataforma</span>
+          <span class="sheet-muted">área da administração — o cliente não vê isto</span>
+        </div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button class="btn-export btn-success" onclick="abrirFormRestaurante()">＋ Abrir restaurante</button>
+          <button class="btn-sm" onclick="loadPlataforma()">↻</button>
+        </div>
+      </div>
+
+      <div class="real-card" id="pf-form-card" style="display:none">
+        <div class="real-card-title">Novo restaurante</div>
+        <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
+          <input class="small-input" id="pf-nome" placeholder="Nome do restaurante" oninput="sugerirSlug()">
+          <input class="small-input" id="pf-slug" placeholder="identificador (ex: cantina-da-esquina)">
+          <input class="small-input" id="pf-cnpj" placeholder="CNPJ (opcional)">
+          <select class="small-input" id="pf-plano">
+            <option value="financeiro">Plano Financeiro — contas e índices</option>
+            <option value="estoque">Plano Estoque — inclui CMV real</option>
+            <option value="completo" selected>Completo</option>
+          </select>
+          <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
+          <input class="small-input" id="pf-user" placeholder="usuário do dono (ex: cantina.admin)">
+          <input class="small-input" id="pf-senha" type="text" placeholder="senha inicial (mín. 6)">
+          <label class="sheet-muted" style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" id="pf-catalogo" checked> já criar com o catálogo de produtos sugerido
+          </label>
+          <div class="sheet-actions">
+            <button class="btn-export btn-success" onclick="criarRestaurante()">Criar</button>
+            <button class="btn-sm" onclick="document.getElementById('pf-form-card').style.display='none'">Cancelar</button>
+          </div>
+          <div id="pf-form-msg" class="real-alert" style="display:none"></div>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>Saúde dos clientes</span>
+          <span class="sheet-muted">quem parou de lançar cancela em ~2 meses</span>
+        </div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="pf-tabela"></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ÍNDICES GERENCIAIS -->
   <div id="p-indices" class="page">
     <div class="sheet-section">
@@ -1553,6 +1604,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-indices" onclick="goPage('indices', this)"><span class="icon">📐</span>Índices</button>
+  <button class="nav-btn" id="nav-plataforma" onclick="goPage('plataforma', this)" style="display:none"><span class="icon">🏢</span>Plataforma</button>
   <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">⚖️</span>Comparar</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
@@ -1850,6 +1902,9 @@ async function loadSession() {
     gerente:  { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true },
     operador: { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }
   };
+  // superadmin opera a PLATAFORMA, não o restaurante: sem permissões do app do cliente
+  // enquanto não escolher um restaurante para dar suporte.
+  ROLE_DEF.superadmin = { lancar:false, dia:false, planilha:false, contas:false, exportar:false, ia:false, auditoria:false, alertas:false, agenda:false, pendencias:false, admin:false, cardapio:false };
   const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
   const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
   const P = {};
@@ -1862,6 +1917,7 @@ async function loadSession() {
   gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
   gate('nav-indices', P.planilha);
+  gate('nav-plataforma', currentUser.role === 'superadmin');
   gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
   // Auditoria/Exportar saíram do menu inferior e viraram atalhos dentro do Admin —
@@ -1930,6 +1986,7 @@ function goPage(id, btn) {
   if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
   if (id === 'indices') loadIndices();
+  if (id === 'plataforma') loadPlataforma();
   if (id === 'relatorios') loadComparar();
   if (id === 'pagamentos') loadPagamentos();
   if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
@@ -3962,6 +4019,88 @@ function renderPlanilhaMensal(d) {
   } else {
     pendEl.innerHTML = pendencias.join('');
   }
+}
+
+// ── PLATAFORMA (só administração) ───────────────────────────────────
+// Área separada do app do cliente: aqui se abre restaurante e se acompanha a
+// saúde de cada um. Nenhuma tela daqui aparece pro dono de restaurante.
+function abrirFormRestaurante() {
+  const c = document.getElementById('pf-form-card');
+  c.style.display = c.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('pf-form-msg').style.display = 'none';
+}
+
+function sugerirSlug() {
+  const nome = document.getElementById('pf-nome').value || '';
+  const slug = nome.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  document.getElementById('pf-slug').value = slug;
+  if (slug && !document.getElementById('pf-user').value) {
+    document.getElementById('pf-user').value = slug.split('-')[0] + '.admin';
+  }
+}
+
+async function criarRestaurante() {
+  const msg = document.getElementById('pf-form-msg');
+  const corpo = {
+    nome: document.getElementById('pf-nome').value.trim(),
+    slug: document.getElementById('pf-slug').value.trim(),
+    cnpj: document.getElementById('pf-cnpj').value.trim(),
+    plano: document.getElementById('pf-plano').value,
+    admin_usuario: document.getElementById('pf-user').value.trim(),
+    admin_senha: document.getElementById('pf-senha').value,
+    importar_catalogo: document.getElementById('pf-catalogo').checked,
+  };
+  try {
+    const r = await apiPost('/api/plataforma/restaurantes', corpo);
+    msg.style.display = 'block';
+    msg.innerHTML = `✅ <b>${escapeHtml(r.restaurante.nome)}</b> criado.<br>` +
+      `Veio com ${r.preparado.categorias} categorias e ${r.preparado.produtos} produtos.<br>` +
+      `O dono entra com <b>${escapeHtml(r.admin.username)}</b> e a senha que você definiu.`;
+    ['pf-nome', 'pf-slug', 'pf-cnpj', 'pf-user', 'pf-senha'].forEach(id => document.getElementById(id).value = '');
+    loadPlataforma();
+  } catch (e) {
+    msg.style.display = 'block';
+    msg.textContent = '❌ ' + (e.message || 'Erro ao criar.');
+  }
+}
+
+async function loadPlataforma() {
+  const tab = document.getElementById('pf-tabela');
+  if (!tab) return;
+  tab.innerHTML = '<tbody><tr><td class="loading">Carregando...</td></tr></tbody>';
+  try {
+    const d = await api('/api/plataforma/restaurantes');
+    const selo = r => r.saude === 'ok' ? '<span class="sheet-status fechado">em dia</span>'
+      : r.saude === 'atencao' ? '<span class="sheet-status caixa">atenção</span>'
+      : '<span class="sheet-status sem_caixa">em risco</span>';
+    tab.innerHTML = `
+      <thead><tr>
+        <th>Restaurante</th><th>Plano</th>
+        <th class="num">Lançou</th><th class="num">Aderência</th>
+        <th class="num">Usuários</th><th class="num">Produtos</th>
+        <th>Situação</th><th></th>
+      </tr></thead>
+      <tbody>${(d.restaurantes || []).map(r => `
+        <tr${r.ativo ? '' : ' class="row-muted"'}>
+          <td><b>${escapeHtml(r.nome)}</b><div class="sheet-muted">${escapeHtml(r.slug)}</div></td>
+          <td>${escapeHtml(r.plano)}</td>
+          <td class="num">${r.dias_lancados}/${r.dias_do_mes} dias</td>
+          <td class="num">${r.aderencia}%</td>
+          <td class="num">${r.usuarios}</td>
+          <td class="num">${r.produtos}</td>
+          <td>${r.ativo ? selo(r) : '<span class="sheet-status vazio">suspenso</span>'}</td>
+          <td><button class="btn-sm" onclick="alternarRestaurante(${r.id}, ${!r.ativo})">${r.ativo ? 'Suspender' : 'Reativar'}</button></td>
+        </tr>`).join('')}</tbody>`;
+  } catch (e) {
+    tab.innerHTML = '<tbody><tr><td class="empty-text">Erro ao carregar.</td></tr></tbody>';
+    handleApiError(e);
+  }
+}
+
+async function alternarRestaurante(id, ativo) {
+  try { await apiPost(`/api/plataforma/restaurantes/${id}/status`, { ativo }); loadPlataforma(); }
+  catch (e) { handleApiError(e); }
 }
 
 // ── COMPARAR PERÍODOS ───────────────────────────────────────────────

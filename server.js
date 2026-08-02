@@ -29,15 +29,21 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios!');
   process.exit(1);
 }
-// MULTI-TENANT (em desenvolvimento): com SUPABASE_SCHEMA=mt o app roda no ambiente
-// isolado e cada consulta a tabela de dado passa a exigir um restaurante no contexto.
-// Sem a variável, nada muda — é exatamente o app de hoje, apontando pro schema public.
+// ── MULTI-RESTAURANTE ────────────────────────────────────────────────────────
+// Duas variáveis INDEPENDENTES, e isso é proposital:
+//   SUPABASE_SCHEMA  onde estão as tabelas   (public em produção, mt no ambiente isolado)
+//   MULTI_TENANT     liga o isolamento       (on/off)
+//
+// Elas precisam ser separadas porque na implantação real o schema continua sendo
+// `public` COM o multi-tenant ligado. E porque é isso que dá o rollback: se algo
+// der errado depois do deploy, MULTI_TENANT=off devolve o comportamento de hoje na
+// hora — as colunas tenant_id ficam no banco, apenas ignoradas.
 const { clienteMultiTenant, comContexto, middlewareContexto } = require('./tenant');
 const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
 // Restaurante de referência: de onde saem as categorias ao abrir um novo.
-const TENANT_MODELO = Number(process.env.TENANT_MODELO || 3);
-const MULTI_TENANT = SCHEMA !== 'public';
-const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, MULTI_TENANT ? { db: { schema: SCHEMA } } : undefined);
+const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
+const MULTI_TENANT = /^(1|on|true|sim)$/i.test(String(process.env.MULTI_TENANT || ''));
+const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, SCHEMA !== 'public' ? { db: { schema: SCHEMA } } : undefined);
 const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || true }));
@@ -131,6 +137,9 @@ function permsPorRole(role) {
   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
 function permsEfetivas(role, permissoes) {
+  // superadmin administra a PLATAFORMA, não o restaurante. Sem isso ele caía no
+  // fallback de operador e recebia acesso ao app do cliente sem ter escolhido nenhum.
+  if (role === 'superadmin') return Object.fromEntries(PERM_KEYS.map(k => [k, false]));
   const base = permsPorRole(role);
   if (permissoes && typeof permissoes === 'object') {
     for (const k of PERM_KEYS) if (typeof permissoes[k] === 'boolean') base[k] = permissoes[k];
@@ -378,6 +387,15 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   const { data: user } = await supabase.from('users').select('*').ilike('username', username).eq('active', 1).single();
   if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
+
+  // Restaurante suspenso (inadimplência, encerramento) não entra — e a mensagem diz o
+  // motivo real em vez de "senha inválida", que faria o cliente achar que é problema dele.
+  if (MULTI_TENANT && user.tenant_id) {
+    const { data: t } = await supabaseRaw.from('tenants').select('ativo, nome').eq('id', user.tenant_id).maybeSingle();
+    if (t && t.ativo === false) {
+      return res.status(403).json({ erro: 'Acesso suspenso. Fale com a administração da plataforma para reativar.' });
+    }
+  }
 
   const token = await createSession(user);
   // O login acontece ANTES de existir contexto de restaurante (é ele que descobre qual é).
@@ -2919,9 +2937,53 @@ app.post('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, re
   }
 });
 
+// Painel da plataforma — só o superadmin enxerga. Mostra a SAÚDE de cada cliente,
+// não o financeiro dele: o que importa pra operar a plataforma é saber quem está
+// lançando e quem parou. Cliente que deixa de lançar cancela em dois meses, e isso
+// dá pra ver antes de acontecer.
 app.get('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
-  const { data } = await supabaseRaw.from('tenants').select('*').order('id');
-  res.json({ restaurantes: data || [] });
+  try {
+    const { data: tenants } = await supabaseRaw.from('tenants').select('*').order('id');
+    const mes = dateSP().slice(0, 7);
+    const inicioMes = `${mes}-01`;
+    const hoje = dateSP();
+    const diaDoMes = Number(hoje.slice(8, 10));
+
+    const lista = [];
+    for (const t of (tenants || [])) {
+      const [fech, usuarios, prods] = await Promise.all([
+        supabaseRaw.from('fechamentos_diarios').select('data').eq('tenant_id', t.id).gte('data', inicioMes).lte('data', hoje),
+        supabaseRaw.from('users').select('id', { count: 'exact', head: true }).eq('tenant_id', t.id).eq('active', 1),
+        supabaseRaw.from('produtos').select('id', { count: 'exact', head: true }).eq('tenant_id', t.id).eq('ativo', 1),
+      ]);
+      const diasLancados = (fech.data || []).length;
+      // A métrica que antecipa cancelamento: abaixo de 80% dos dias, o cliente está
+      // perdendo o hábito — e sem lançamento o sistema mostra número errado e ele culpa a ferramenta.
+      const aderencia = diaDoMes > 0 ? Math.round((diasLancados / diaDoMes) * 100) : 0;
+      lista.push({
+        id: t.id, nome: t.nome, slug: t.slug, plano: t.plano, ativo: t.ativo,
+        criado_em: t.criado_em,
+        usuarios: usuarios.count || 0,
+        produtos: prods.count || 0,
+        dias_lancados: diasLancados,
+        dias_do_mes: diaDoMes,
+        aderencia,
+        saude: aderencia >= 80 ? 'ok' : (aderencia >= 50 ? 'atencao' : 'risco'),
+      });
+    }
+    res.json({ restaurantes: lista, mes });
+  } catch (e) {
+    console.error('painel plataforma:', e.message);
+    res.status(500).json({ erro: 'Erro ao carregar os restaurantes.' });
+  }
+});
+
+app.post('/api/plataforma/restaurantes/:id/status', auth, requireSuperadmin, async (req, res) => {
+  const ativo = req.body?.ativo !== false;
+  const { error } = await supabaseRaw.from('tenants')
+    .update({ ativo, suspenso_em: ativo ? null : nowSP() }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ erro: 'Erro ao mudar o status.' });
+  res.json({ ok: true, ativo });
 });
 
 // COMPARADOR DE PERÍODOS — a aba Relatórios deixa de repetir o que a Planilha já mostra
