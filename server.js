@@ -2901,6 +2901,66 @@ function requireSuperadmin(req, res, next) {
   next();
 }
 
+// ── VALIDAÇÃO DO CADASTRO ────────────────────────────────────────────────────
+// Cadastro é a maior alavanca de retenção de um SaaS (pesquisa 01/08: onboarding
+// responde por 30–50% da variação de churn). Mas aqui ele tem um segundo papel:
+// impedir que um cadastro torto entre e quebre o fluxo depois — do cliente ou nosso.
+// Tudo é validado no SERVIDOR; o formulário só antecipa a mensagem.
+
+// Mod-11 da Receita. Confirma que o número é ESTRUTURALMENTE plausível — não confirma
+// que a empresa existe nem que está ativa. Por isso o CNPJ é opcional: barrar cadastro
+// por causa dele criaria atrito sem entregar a garantia que o cliente imagina.
+function cnpjValido(valor) {
+  const n = String(valor || '').replace(/\D/g, '');
+  if (n.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(n)) return false;               // 00000000000000 e afins passam no mod-11
+  const dv = (base, pesos) => {
+    const soma = base.split('').reduce((s, d, i) => s + Number(d) * pesos[i], 0);
+    const r = soma % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  const d1 = dv(n.slice(0, 12), [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  const d2 = dv(n.slice(0, 13), [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return d1 === Number(n[12]) && d2 === Number(n[13]);
+}
+
+const RESERVADOS = new Set(['admin', 'api', 'app', 'root', 'sistema', 'plataforma', 'suporte', 'null', 'undefined', 'teste', 'test', 'www']);
+
+function validarCadastroRestaurante(b) {
+  const erros = [];
+  const nome = sanitizeText(b.nome || '', 120);
+  if (nome.length < 3) erros.push({ campo: 'nome', erro: 'O nome do restaurante precisa de ao menos 3 letras.' });
+
+  const slug = sanitizeText(b.slug || '', 60).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(slug)) {
+    erros.push({ campo: 'slug', erro: 'O identificador deve ter de 3 a 40 caracteres, só letras minúsculas, números e hífen.' });
+  } else if (RESERVADOS.has(slug)) {
+    erros.push({ campo: 'slug', erro: `"${slug}" é reservado pelo sistema. Escolha outro.` });
+  }
+
+  const usuario = sanitizeText(b.admin_usuario || '', 40).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(usuario)) {
+    erros.push({ campo: 'admin_usuario', erro: 'O usuário deve ter de 3 a 40 caracteres, só letras minúsculas, números, ponto, hífen ou sublinhado.' });
+  } else if (RESERVADOS.has(usuario)) {
+    erros.push({ campo: 'admin_usuario', erro: `"${usuario}" é reservado pelo sistema. Escolha outro.` });
+  }
+
+  const senha = String(b.admin_senha || '');
+  if (senha.length < 8) erros.push({ campo: 'admin_senha', erro: 'A senha precisa de ao menos 8 caracteres.' });
+  else if (!/[a-zA-Z]/.test(senha) || !/\d/.test(senha)) erros.push({ campo: 'admin_senha', erro: 'A senha precisa misturar letras e números.' });
+  else if (senha.toLowerCase().includes(usuario) || /^(12345678|senha123|password)/i.test(senha)) {
+    erros.push({ campo: 'admin_senha', erro: 'Essa senha é fácil de adivinhar. Escolha outra.' });
+  }
+
+  const cnpj = String(b.cnpj || '').replace(/\D/g, '');
+  if (cnpj && !cnpjValido(cnpj)) erros.push({ campo: 'cnpj', erro: 'CNPJ inválido — confira os números.' });
+
+  if (b.plano && !['financeiro', 'estoque', 'completo'].includes(b.plano)) {
+    erros.push({ campo: 'plano', erro: 'Plano inválido.' });
+  }
+  return { erros, limpos: { nome, slug, usuario, senha, cnpj, plano: b.plano || 'financeiro' } };
+}
+
 async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuario, admin_senha, admin_nome, importar_catalogo = true }) {
   const raw = supabaseRaw;   // criação acontece FORA do contexto de tenant (o tenant ainda não existe)
   const { data: tenant, error: errT } = await raw.from('tenants').insert({
@@ -2912,6 +2972,19 @@ async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuar
 
   const resumo = { tenant, categorias: 0, produtos: 0, usuario: null };
 
+  // Criar restaurante são vários passos e o Postgrest não dá transação entre eles.
+  // Se qualquer um falhar, DESFAZ tudo: restaurante criado pela metade é pior que
+  // restaurante nenhum — o cliente entra, encontra o app quebrado e a confiança acaba
+  // no primeiro dia. O cascade das FKs limpa categorias, produtos e usuários juntos.
+  try {
+    return await montarRestaurante(raw, tenant, resumo, { importar_catalogo, admin_usuario, admin_senha, admin_nome, nome, slug });
+  } catch (e) {
+    try { await raw.from('tenants').delete().eq('id', tenant.id); } catch (_) {}
+    throw e;
+  }
+}
+
+async function montarRestaurante(raw, tenant, resumo, { importar_catalogo, admin_usuario, admin_senha, admin_nome, nome, slug }) {
   // 1) Categorias: são a ponte produto → conta contábil. Sem elas o CMV não classifica.
   const { data: cats } = await raw.from('categorias').select('nome').eq('tenant_id', TENANT_MODELO);
   const nomesCat = [...new Set((cats || []).map(c => c.nome))].filter(n => !/^qa robo/i.test(n));
@@ -2942,7 +3015,7 @@ async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuar
   const usuario = sanitizeText(admin_usuario, 40).toLowerCase();
   const { data: jaExiste } = await raw.from('users').select('id').ilike('username', usuario).maybeSingle();
   if (jaExiste) {
-    await raw.from('tenants').delete().eq('id', tenant.id);   // desfaz: não deixa restaurante órfão
+    // o rollback fica por conta do catch em abrirRestaurante — um lugar só, sem duplicar
     throw new Error(`O usuário "${usuario}" já existe na plataforma. Escolha outro (ex: ${slug}.admin).`);
   }
   const { data: u, error: errU } = await raw.from('users').insert({
@@ -2954,14 +3027,35 @@ async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuar
   return resumo;
 }
 
+// Confere disponibilidade ANTES de o cadastro ser enviado — evita o cliente preencher
+// tudo e só então descobrir que o identificador já existe.
+app.get('/api/plataforma/disponivel', auth, requireSuperadmin, async (req, res) => {
+  const slug = sanitizeText(req.query?.slug || '', 60).toLowerCase();
+  const usuario = sanitizeText(req.query?.usuario || '', 40).toLowerCase();
+  const out = {};
+  if (slug) {
+    const { data } = await supabaseRaw.from('tenants').select('id').eq('slug', slug).maybeSingle();
+    out.slug = { livre: !data && !RESERVADOS.has(slug) };
+  }
+  if (usuario) {
+    const { data } = await supabaseRaw.from('users').select('id').ilike('username', usuario).maybeSingle();
+    out.usuario = { livre: !data && !RESERVADOS.has(usuario) };
+  }
+  res.json(out);
+});
+
 app.post('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
   try {
     const b = req.body || {};
-    for (const campo of ['nome', 'slug', 'admin_usuario', 'admin_senha']) {
-      if (!b[campo]) return res.status(400).json({ erro: `Campo obrigatório: ${campo}.` });
-    }
-    if (String(b.admin_senha).length < 6) return res.status(400).json({ erro: 'A senha do administrador precisa de ao menos 6 caracteres.' });
-    const r = await abrirRestaurante(b);
+    const { erros, limpos } = validarCadastroRestaurante(b);
+    if (erros.length) return res.status(400).json({ erro: erros[0].erro, erros });
+    // Passa os valores JÁ NORMALIZADOS adiante. Sem isso, valido um valor ("Cantina"
+    // vira "cantina" na checagem) e gravo outro caminho de normalização — divergência
+    // silenciosa que só apareceria quando dois cadastros colidissem.
+    const r = await abrirRestaurante({
+      ...b, nome: limpos.nome, slug: limpos.slug, cnpj: limpos.cnpj || null,
+      plano: limpos.plano, admin_usuario: limpos.usuario, admin_senha: limpos.senha,
+    });
     res.json({
       ok: true, restaurante: { id: r.tenant.id, nome: r.tenant.nome, slug: r.tenant.slug, plano: r.tenant.plano },
       preparado: { categorias: r.categorias, produtos: r.produtos }, admin: r.usuario,

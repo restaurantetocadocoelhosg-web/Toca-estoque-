@@ -318,6 +318,9 @@ select.big-input { font-size: 14px; }
    e as linhas de total ganham peso pra separar derivado de grupo. */
 .sheet-table tr.row-muted td { opacity: 0.55; }
 .sheet-table tr.row-total td { background: rgba(232,93,38,0.06); border-top: 2px solid var(--accent, #e85d26); font-weight: 700; }
+.pf-dica { font-size:11px; color:var(--muted); margin-top:3px; min-height:14px; }
+.pf-dica.bom { color:var(--green); }
+.pf-dica.ruim { color:var(--red); }
 .sheet-pay-list, .sheet-pendency-list { display: flex; flex-direction: column; gap: 8px; }
 .sheet-pay-row, .sheet-pendency-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
 .sheet-pay-row b, .sheet-pendency-row b { color: var(--text); }
@@ -1100,23 +1103,48 @@ select.big-input { font-size: 14px; }
 
       <div class="real-card" id="pf-form-card" style="display:none">
         <div class="real-card-title">Novo restaurante</div>
-        <div style="display:flex;flex-direction:column;gap:8px;margin-top:8px">
-          <input class="small-input" id="pf-nome" placeholder="Nome do restaurante" oninput="sugerirSlug()">
-          <input class="small-input" id="pf-slug" placeholder="identificador (ex: cantina-da-esquina)">
-          <input class="small-input" id="pf-cnpj" placeholder="CNPJ (opcional)">
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:8px">
+
+          <div>
+            <input class="small-input" id="pf-nome" placeholder="Nome do restaurante" oninput="sugerirSlug()" onblur="validarCampo('nome')">
+            <div class="pf-dica" id="dica-nome"></div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-slug" placeholder="identificador (ex: cantina-da-esquina)" oninput="validarCampo('slug')">
+            <div class="pf-dica" id="dica-slug">só minúsculas, números e hífen — é o apelido do restaurante no sistema</div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-cnpj" placeholder="CNPJ (opcional)" oninput="mascaraCNPJ(this); validarCampo('cnpj')">
+            <div class="pf-dica" id="dica-cnpj">confere só o formato do número — não consulta a Receita</div>
+          </div>
+
           <select class="small-input" id="pf-plano">
             <option value="financeiro">Plano Financeiro — contas e índices</option>
             <option value="estoque">Plano Estoque — inclui CMV real</option>
             <option value="completo" selected>Completo</option>
           </select>
-          <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
-          <input class="small-input" id="pf-user" placeholder="usuário do dono (ex: cantina.admin)">
-          <input class="small-input" id="pf-senha" type="text" placeholder="senha inicial (mín. 6)">
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:2px 0">
+          <div class="sheet-muted"><b>Acesso do dono</b></div>
+
+          <div>
+            <input class="small-input" id="pf-user" placeholder="usuário do dono (ex: cantina.admin)" oninput="validarCampo('usuario')">
+            <div class="pf-dica" id="dica-usuario">precisa ser único na plataforma inteira</div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-senha" type="text" placeholder="senha inicial" oninput="validarCampo('senha')">
+            <div class="pf-dica" id="dica-senha">mínimo 8 caracteres, misturando letras e números</div>
+          </div>
+
           <label class="sheet-muted" style="display:flex;gap:6px;align-items:center">
             <input type="checkbox" id="pf-catalogo" checked> já criar com o catálogo de produtos sugerido
           </label>
+
           <div class="sheet-actions">
-            <button class="btn-export btn-success" onclick="criarRestaurante()">Criar</button>
+            <button class="btn-export btn-success" id="pf-btn-criar" onclick="criarRestaurante()">Criar restaurante</button>
             <button class="btn-sm" onclick="document.getElementById('pf-form-card').style.display='none'">Cancelar</button>
           </div>
           <div id="pf-form-msg" class="real-alert" style="display:none"></div>
@@ -4115,6 +4143,61 @@ function sugerirSlug() {
   }
 }
 
+// Validação no formulário é só antecipação da mensagem — quem decide é o servidor.
+// O objetivo aqui é o cadastro não entrar torto e quebrar o cliente depois.
+const PF_REGRAS = {
+  nome:    v => v.length >= 3 || 'nome muito curto',
+  slug:    v => /^[a-z0-9][a-z0-9-]{2,39}$/.test(v) || 'de 3 a 40: minúsculas, números e hífen',
+  usuario: v => /^[a-z0-9][a-z0-9._-]{2,39}$/.test(v) || 'de 3 a 40: minúsculas, números, ponto, hífen',
+  senha:   v => v.length < 8 ? 'mínimo 8 caracteres'
+                : (!/[a-zA-Z]/.test(v) || !/\d/.test(v)) ? 'misture letras e números' : true,
+  cnpj:    v => !v ? true : (cnpjValidoClient(v) || 'CNPJ inválido — confira os números'),
+};
+
+function cnpjValidoClient(valor) {
+  const n = String(valor || '').replace(/\D/g, '');
+  if (n.length !== 14 || /^(\d)\1{13}$/.test(n)) return false;
+  const dv = (base, pesos) => {
+    const s = base.split('').reduce((a, d, i) => a + Number(d) * pesos[i], 0);
+    const r = s % 11; return r < 2 ? 0 : 11 - r;
+  };
+  return dv(n.slice(0, 12), [5,4,3,2,9,8,7,6,5,4,3,2]) === Number(n[12])
+      && dv(n.slice(0, 13), [6,5,4,3,2,9,8,7,6,5,4,3,2]) === Number(n[13]);
+}
+
+function mascaraCNPJ(el) {
+  const n = el.value.replace(/\D/g, '').slice(0, 14);
+  el.value = n.replace(/^(\d{2})(\d)/, '$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+              .replace(/\.(\d{3})(\d)/, '.$1/$2').replace(/(\d{4})(\d)/, '$1-$2');
+}
+
+let pfTimer = null;
+function validarCampo(campo) {
+  const mapa = { nome: 'pf-nome', slug: 'pf-slug', usuario: 'pf-user', senha: 'pf-senha', cnpj: 'pf-cnpj' };
+  const el = document.getElementById(mapa[campo]);
+  const dica = document.getElementById('dica-' + campo);
+  if (!el || !dica) return;
+  const v = el.value.trim();
+  if (!v && campo !== 'senha') { dica.className = 'pf-dica'; return; }
+  const r = PF_REGRAS[campo] ? PF_REGRAS[campo](v) : true;
+  if (r !== true) { dica.className = 'pf-dica ruim'; dica.textContent = '✕ ' + r; return; }
+  dica.className = 'pf-dica bom'; dica.textContent = '✓ ok';
+
+  // slug e usuário precisam ser únicos: pergunta ao servidor, sem travar a digitação
+  if (campo === 'slug' || campo === 'usuario') {
+    clearTimeout(pfTimer);
+    pfTimer = setTimeout(async () => {
+      try {
+        const q = campo === 'slug' ? 'slug=' + encodeURIComponent(v) : 'usuario=' + encodeURIComponent(v);
+        const d = await api('/api/plataforma/disponivel?' + q);
+        const livre = campo === 'slug' ? d.slug?.livre : d.usuario?.livre;
+        dica.className = 'pf-dica ' + (livre ? 'bom' : 'ruim');
+        dica.textContent = livre ? '✓ disponível' : '✕ já está em uso — escolha outro';
+      } catch (e) { /* sem conexão: o servidor barra na hora de criar */ }
+    }, 400);
+  }
+}
+
 async function criarRestaurante() {
   const msg = document.getElementById('pf-form-msg');
   const corpo = {
@@ -4126,17 +4209,33 @@ async function criarRestaurante() {
     admin_senha: document.getElementById('pf-senha').value,
     importar_catalogo: document.getElementById('pf-catalogo').checked,
   };
+  // Trava o botão enquanto cria: clique duplo criaria dois restaurantes.
+  const btn = document.getElementById('pf-btn-criar');
+  btn.disabled = true; btn.textContent = 'Criando...';
   try {
     const r = await apiPost('/api/plataforma/restaurantes', corpo);
     msg.style.display = 'block';
+    // O que vem depois de criar importa tanto quanto criar: o dono precisa saber os
+    // primeiros passos até o app mostrar valor, senão a conta fica parada e ele cancela.
     msg.innerHTML = `✅ <b>${escapeHtml(r.restaurante.nome)}</b> criado.<br>` +
-      `Veio com ${r.preparado.categorias} categorias e ${r.preparado.produtos} produtos.<br>` +
-      `O dono entra com <b>${escapeHtml(r.admin.username)}</b> e a senha que você definiu.`;
+      `Já tem ${r.preparado.categorias} categorias e ${r.preparado.produtos} produtos cadastrados.<br>` +
+      `Acesso do dono: <b>${escapeHtml(r.admin.username)}</b><br><br>` +
+      `<b>Primeiros passos para passar pra ele:</b><br>` +
+      `1. Revisar o catálogo e desativar o que não usa<br>` +
+      `2. Lançar o caixa do dia na aba Dia<br>` +
+      `3. Mandar as contas do mês (luz, água, aluguel)<br>` +
+      `4. Conferir as taxas da maquininha dele em Admin → Meu restaurante<br>` +
+      `<i>Depois disso a aba Índices já mostra o resultado dele.</i>`;
     ['pf-nome', 'pf-slug', 'pf-cnpj', 'pf-user', 'pf-senha'].forEach(id => document.getElementById(id).value = '');
+    ['nome', 'slug', 'cnpj', 'usuario', 'senha'].forEach(c => {
+      const d = document.getElementById('dica-' + c); if (d) { d.className = 'pf-dica'; d.textContent = ''; }
+    });
     loadPlataforma();
   } catch (e) {
     msg.style.display = 'block';
     msg.textContent = '❌ ' + (e.message || 'Erro ao criar.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Criar restaurante';
   }
 }
 

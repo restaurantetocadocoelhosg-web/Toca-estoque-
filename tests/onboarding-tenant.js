@@ -24,8 +24,8 @@ const ok = (n, c, extra = '') => { if (!c) falhas++; console.log((c ? 'ok     ' 
   ok('superadmin entra', !!sup.token);
 
   const criado = await post(sup.token, '/api/plataforma/restaurantes', {
-    nome: 'Pizzaria do Teste', slug, cnpj: '11.222.333/0001-44', plano: 'completo',
-    admin_usuario: 'dono.' + slug, admin_senha: 'pizza123', admin_nome: 'Dono da Pizzaria',
+    nome: 'Pizzaria do Teste', slug, cnpj: '11.222.333/0001-81', plano: 'completo',
+    admin_usuario: 'dono.' + slug, admin_senha: 'pizza12345', admin_nome: 'Dono da Pizzaria',
   });
   ok('restaurante criado', criado.status === 200, criado.body?.erro || '');
   if (criado.status !== 200) process.exit(1);
@@ -37,7 +37,7 @@ const ok = (n, c, extra = '') => { if (!c) falhas++; console.log((c ? 'ok     ' 
   ok('usuário do dono criado', admin?.role === 'admin');
 
   console.log('\n=== 2. O dono entra e vê o que tem ===');
-  const dono = (await post(null, '/api/login', { username: 'dono.' + slug, password: 'pizza123' })).body;
+  const dono = (await post(null, '/api/login', { username: 'dono.' + slug, password: 'pizza12345' })).body;
   ok('dono entra com a senha dele', !!dono.token);
 
   const est = await get(dono.token, '/api/produtos');
