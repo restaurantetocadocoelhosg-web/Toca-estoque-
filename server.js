@@ -3669,7 +3669,12 @@ async function lerNotaComIA(listaImg, mediaType, userLog) {
         model: 'claude-sonnet-4-6', max_tokens: 16384,
         messages: [{ role: 'user', content: [
           ...listaImg.map(b64 => ({ type: 'image', source: { type: 'base64', media_type: mediaType || 'image/jpeg', data: b64 } })),
-          { type: 'text', text: avisoFatias + `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade, unidade e VALOR TOTAL da linha.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. Para BEBIDA/LÍQUIDO em garrafa/lata/pote fechado, o volume no nome (350ML, 500ML, 2L) NÃO é a quantidade — conte as UNIDADES. MAS para SACO/CAIXA/FARDO de hortifruti, legume, tubérculo ou grão vendido por peso, o PESO no nome (25KG, 20KG) É a quantidade em kg.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nVALOR TOTAL da linha (campo valor_total): o número da coluna Vl Total do item, em reais, número com PONTO decimal (ex: 42.00). É o valor que você já usa na conferência Total ÷ Unit. Se houver desconto na linha, use o valor final pago. Se não conseguir ler o valor daquela linha, use null — NUNCA invente.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\",\"valor_total\":42.00}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN', valor_total:42.00}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN, valor_total:28.80\n'FILE FRANGO CX 20KG 22,90 458,00' -> qtd:20, KG, valor_total:458.00\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
+          { type: 'text', text: avisoFatias + `Você está lendo um CUPOM FISCAL / NOTA FISCAL (NFC-e) de compras de um restaurante brasileiro.\nExtraia TODOS os itens com nome, quantidade, unidade e VALOR TOTAL da linha.\n\nESTRUTURA DA NOTA: cada item tem colunas — Descrição, QUANTIDADE (Qtd/Qtde/Quant), Unidade (UN/KG/CX/PCT), Valor Unitário (Vl Unit) e Valor Total (Vl Total). A QUANTIDADE é a coluna que importa — NUNCA o volume/peso que aparece no nome.\n\nCOMO ACERTAR A QUANTIDADE (regra de ouro):\n1. Pegue o número da COLUNA de quantidade (Qtd) da linha do item.\n2. CONFIRA dividindo: Valor Total ÷ Valor Unitário = quantidade. Use isso para corrigir leituras erradas. Ex: total 42,00 e unit 3,50 -> qtd 12.\n3. Para BEBIDA/LÍQUIDO em garrafa/lata/pote fechado, o volume no nome (350ML, 500ML, 2L) NÃO é a quantidade — conte as UNIDADES. MAS para SACO/CAIXA/FARDO de hortifruti, legume, tubérculo ou grão vendido por peso, o PESO no nome (25KG, 20KG) É a quantidade em kg.\n4. Multiplicador 'N x' ou 'x N' ou 'NX' ou 'A x B': a quantidade é o NÚMERO DE UNIDADES. Ex: 'COCA 350ML 12X' -> 12 | 'AGUA 500ML X 24' -> 24 | '350x12' -> 12 | 'REFRI 2L X 6' -> 6.\n5. IMPORTANTE: itens de compra de restaurante quase NUNCA têm quantidade 1. Se você leu 1, RELEIA a coluna de quantidade e o valor total — quase sempre a quantidade é maior.
+
+6. EMBALAGEM FECHADA (o erro mais caro): a nota costuma vender por CAIXA/FARDO, mas o estoque conta UNIDADES. Quando a linha indicar quantas unidades vêm na embalagem, devolva esse número no campo "embalagem". Exemplos: "COCA LATA CX C/24" -> embalagem 24 | "AGUA 500ML FD 12" -> embalagem 12 | "CERVEJA PACK 6" -> embalagem 6 | "BROCOLIS CAIXA C/18" -> embalagem 18. Se a linha não indicar embalagem, devolva embalagem 1.
+   NÃO multiplique a quantidade você mesmo — só informe a embalagem e a quantidade como está na nota. Quem converte é o sistema.
+   Sinal de que existe embalagem: o valor unitário parece alto demais para uma lata/garrafa (ex: R$47,88 "por lata" é preço de caixa de 24).\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nVALOR TOTAL da linha (campo valor_total): o número da coluna Vl Total do item, em reais, número com PONTO decimal (ex: 42.00). É o valor que você já usa na conferência Total ÷ Unit. Se houver desconto na linha, use o valor final pago. Se não conseguir ler o valor daquela linha, use null — NUNCA invente.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\",\"valor_total\":42.00,\"embalagem\":1}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN', valor_total:42.00}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN, valor_total:28.80\n'FILE FRANGO CX 20KG 22,90 458,00' -> qtd:20, KG, valor_total:458.00\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)
+'COCA LATA CX C/24  2  47,88  95,76' -> {nome:'Coca Lata', qtd:2, unidade:'UN', valor_total:95.76, embalagem:24}  (2 caixas de 24 = 48 latas; quem multiplica e o sistema)\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
         ]}]
       })
     });
@@ -3743,14 +3748,30 @@ async function lerNotaComIA(listaImg, mediaType, userLog) {
       const confiavel = via === 'apelido' || via === 'nome_exato' || via === 'forte';
       // Preço da nota: valor_total da linha ÷ qtd (já normalizada p/ unidade do produto,
       // ex. saco 25kg → qtd 25) = custo unitário REAL da compra. Mantém preço vivo.
-      const qtdItem = Number(item.qtd) || 1;
+      let qtdItem = Number(item.qtd) || 1;
       const vt = Number(item.valor_total);
       const valorTotal = Number.isFinite(vt) && vt > 0 ? Number(vt.toFixed(2)) : null;
+
+      // EMBALAGEM FECHADA: a nota vende por CAIXA/FARDO, o estoque conta UNIDADE.
+      // Sem converter, "2 caixas de 24 a R$47,88" entrava como 2 latas a R$47,88 —
+      // e era esse o erro que inflou R$3.262 em compras entre 14/07 e 03/08 (Coca,
+      // Guaraná, H2O, Fanta, água com gás, brócolis...). O leitor agora só INFORMA
+      // quantas unidades vêm na embalagem; quem multiplica é aqui, uma vez só.
+      const emb = Number(item.embalagem) || 1;
+      const produtoEmUnidade = candidatos[0] && /^(un|und|unid)/i.test(String(candidatos[0].unidade || ''));
+      let convertido = null;
+      if (emb > 1 && produtoEmUnidade) {
+        convertido = { de: qtdItem, embalagem: emb, para: Number((qtdItem * emb).toFixed(3)) };
+        qtdItem = convertido.para;
+      }
+
       itens.push({
         nome_cupom: item.nome,
         qtd: qtdItem,
         unidade_cupom: item.unidade || 'UN',
         valor_total: valorTotal,
+        embalagem: emb,
+        convertido,   // aparece na resposta do grupo pra ficar claro o que o sistema fez
         custo_unit: valorTotal ? Number((valorTotal / qtdItem).toFixed(4)) : null,
         candidatos,
         produto: confiavel ? (candidatos[0] || null) : null,
@@ -4147,6 +4168,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
       const custoAntes = Number(item.produto.custo || 0);
       await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
+        convertido: item.convertido,   // "2 cx de 24 → 48 un" fica visível na resposta
         custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
     }
     // Salva os itens em dúvida como pendências (resolver no app, aba Histórico → Pendentes).
@@ -4155,7 +4177,9 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
     if (lancados.length) {
-      msg += `✅ *Lançados (${lancados.length}):*\n` + lancados.map(l => `• ${l.nome}: +${l.qtd} ${l.unidade} (estoque: ${l.estoque})` + (l.custo_novo !== null && l.custo_novo !== undefined ? `\n   💲 custo R$${l.custo_antes.toFixed(2)} → R$${l.custo_novo.toFixed(2)}` : '')).join('\n') + '\n';
+      msg += `✅ *Lançados (${lancados.length}):*\n` + lancados.map(l => `• ${l.nome}: +${l.qtd} ${l.unidade} (estoque: ${l.estoque})`
+        + (l.convertido ? `\n   📦 ${l.convertido.de} × ${l.convertido.embalagem} un = ${l.convertido.para} ${l.unidade}` : '')
+        + (l.custo_novo !== null && l.custo_novo !== undefined ? `\n   💲 custo R$${l.custo_antes.toFixed(2)} → R$${l.custo_novo.toFixed(2)}` : '')).join('\n') + '\n';
     }
     if (confirmar.length) msg += `\n⚠️ *Confira no app (${confirmar.length}) — não lancei no chute:*\n` + confirmar.map(c => `• "${c.nome_cupom}" (${c.qtd}) → seria ${c.sugestao}?`).join('\n') + '\n';
     if (naoachados.length) msg += `\n❓ *Não achei no estoque:*\n` + naoachados.map(n => `• ${n}`).join('\n') + '\n';
