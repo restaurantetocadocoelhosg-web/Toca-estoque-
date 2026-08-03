@@ -121,6 +121,26 @@ function permsPorRole(role) {
   if (role === 'gerente') return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true };
   return { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }; // operador (padrão = acesso que já tinha; admin libera IA/auditoria/pendencias por pessoa)
 }
+// Preço que muda demais de uma vez quase nunca é reajuste — é unidade trocada.
+// Caso real (31/07 → 02/08): uma nota trouxe Coca a R$ 47,88, que é o preço do FARDO,
+// para um produto vendido por LATA (~R$ 3,40). O custo cadastrado foi atualizado em
+// silêncio e, dois dias depois, uma entrada de 24 latas virou R$ 1.149,12 de compra
+// que não existiu — e o consumo do dia junto. O estoque estava certo o tempo todo;
+// quem mentiu foi o dinheiro.
+// Aqui o custo antigo é PRESERVADO e o caso vira aviso, em vez de contaminar o mês.
+const FATOR_CUSTO_SUSPEITO = 5;
+function custoSuspeito(custoAtual, custoNovo) {
+  const a = Number(custoAtual || 0), b = Number(custoNovo || 0);
+  if (a <= 0 || b <= 0) return null;                       // sem base de comparação
+  const fator = b > a ? b / a : a / b;
+  if (fator < FATOR_CUSTO_SUSPEITO) return null;
+  return {
+    fator: Number(fator.toFixed(1)),
+    subiu: b > a,
+    msg: `preço de ${fmtBRL(a)} para ${fmtBRL(b)} (${fator.toFixed(1)}× ${b > a ? 'mais caro' : 'mais barato'}) — confira se não é preço de caixa/fardo num produto vendido por unidade`,
+  };
+}
+
 function permsEfetivas(role, permissoes) {
   const base = permsPorRole(role);
   if (permissoes && typeof permissoes === 'object') {
@@ -751,6 +771,19 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
       if (qtd > qtdAntes) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}.` });
       novaQtd = Number((qtdAntes - qtd).toFixed(3));
     } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
+    // Salto de preço não atualiza o cadastro nem valoriza o lançamento: mantém o custo
+    // conhecido e devolve o aviso. Sem isso, o erro entra e some no meio do mês.
+    const saltoPreco = (tipo === 'Entrada' && custoBody !== null)
+      ? custoSuspeito(prodAtual.custo, custoBody) : null;
+    // usa o mesmo `forcar` do alerta de quantidade: o app já sabe perguntar
+    // "confirmar mesmo assim?" e reenviar — não precisa de um caminho novo na tela
+    if (saltoPreco && !req.body.forcar) {
+      return res.status(409).json({
+        alerta: true, codigo: 'PRECO_SUSPEITO',
+        custo_atual: Number(prodAtual.custo), custo_informado: custoBody,
+        msg: `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`,
+      });
+    }
     custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
     const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
     valor = Number((custoUnit * valorBase).toFixed(2));
@@ -4070,8 +4103,14 @@ app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
     const lancados = [], confirmar = [], naoachados = [], pendencias = [];
     for (const item of r.itens) {
       // Auto-lança SÓ apelido/nome exato (certeza real) com unidade compatível; 'forte' é palpite — vai pra confirmação.
-      const auto = item.produto && (item.via === 'apelido' || item.via === 'nome_exato') && unidadeCompativel(item.unidade_cupom, item.produto.unidade);
+      // Preço muito fora do conhecido tira o item do automático e manda pra conferência.
+      // Foi assim que a Coca a R$47,88 (preço de FARDO) entrou como preço de LATA em
+      // 31/07 e contaminou o dia 02: o produto era o certo, o preço é que não era.
+      const preco = item.custo_unit > 0 && item.produto ? custoSuspeito(item.produto.custo, item.custo_unit) : null;
+      const auto = item.produto && (item.via === 'apelido' || item.via === 'nome_exato')
+        && unidadeCompativel(item.unidade_cupom, item.produto.unidade) && !preco;
       if (!auto) {
+        if (preco) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} — ${preco.msg}` });
         // Guarda a pendência pra resolver no app (aba Histórico → Pendentes), sem refazer foto.
         pendencias.push({
           produto_cupom: item.nome_cupom, qtd: item.qtd, unidade_cupom: item.unidade_cupom || null,
