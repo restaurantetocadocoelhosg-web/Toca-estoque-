@@ -828,6 +828,17 @@ select.big-input { font-size: 14px; }
         <div style="font-size:15px;font-weight:600;color:var(--muted);padding:12px 16px;background:var(--s2);border-radius:var(--radius);border:1.5px solid var(--border)" id="f-resp-display"></div>
         <input id="f-resp" type="hidden">
       </div>
+      <!-- Data do lançamento: fica escondida por padrão pra não atrapalhar o fluxo do dia a dia
+           (quem lança na hora não precisa nem ver). Só gerente/admin enxergam o link. -->
+      <div class="field-group" id="f-data-wrap" style="display:none">
+        <div id="f-data-link" style="font-size:12px;color:var(--muted);cursor:pointer;padding:4px 0"
+             onclick="abrirDataLancamento()">📅 Lançar com data de outro dia</div>
+        <div id="f-data-box" style="display:none">
+          <div class="field-label">Data do lançamento</div>
+          <input class="big-input" id="f-data" type="date" style="padding:12px 10px" onchange="avisoDataLancamento()">
+          <div id="f-data-aviso" style="font-size:11px;margin-top:6px;line-height:1.45"></div>
+        </div>
+      </div>
       <button id="btn-lancar" class="btn-lancar entrada" onclick="lancar()">⬆️ LANÇAR ENTRADA</button>
     </div>
     <div class="section-header">Últimos lançamentos</div>
@@ -1348,7 +1359,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v73</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v74</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1851,6 +1862,7 @@ async function loadSession() {
   const respDisplay = document.getElementById('f-resp-display');
   if (respDisplay) respDisplay.textContent = currentUser.nome;
   document.getElementById('f-resp').value = currentUser.nome;
+  prepararCampoData();   // o link de data só aparece pra gerente/admin
   // Reset card visível só para admin (bug fix)
   const cardReset = document.getElementById('card-reset');
   if (cardReset) cardReset.style.display = permissions.pode_resetar ? '' : 'none';
@@ -2307,6 +2319,7 @@ function selTipo(el) {
   if (tipoAtual==='Saída') { motivo.value='Produção'; btn.className='btn-lancar saida'; btn.textContent='⬇️ LANÇAR SAÍDA'; }
   if (tipoAtual==='Perda') { motivo.value='Perda/Vencimento'; btn.className='btn-lancar perda'; btn.textContent='❌ REGISTRAR PERDA'; }
   if (tipoAtual==='Ajuste') { motivo.value='Inventário'; btn.className='btn-lancar ajuste'; btn.textContent='🔄 LANÇAR AJUSTE'; }
+  avisoDataLancamento();   // Ajuste + data anterior é combinação recusada — avisa na hora da troca
 }
 
 async function buscaProd(q) {
@@ -2347,6 +2360,59 @@ function clearProd() {
 
 function closeAc() { document.getElementById('ac-list').classList.remove('open'); }
 
+// ── Data do lançamento (retroativo) ──────────────────────────────
+// Só gerente/admin, no máximo RETRO_MAX_DIAS pra trás — o servidor valida de novo, isto aqui
+// é só pra pessoa não descobrir o limite depois de digitar tudo.
+const RETRO_MAX_DIAS = 7;
+function hojeISO() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
+function podeRetroagir() {
+  return currentUser && (currentUser.role === 'admin' || currentUser.role === 'gerente');
+}
+function prepararCampoData() {
+  const wrap = document.getElementById('f-data-wrap');
+  if (!wrap) return;
+  wrap.style.display = podeRetroagir() ? 'block' : 'none';
+  const inp = document.getElementById('f-data');
+  if (!inp) return;
+  const hoje = hojeISO();
+  inp.max = hoje;
+  const min = new Date(Date.now() - RETRO_MAX_DIAS * 864e5);
+  inp.min = min.toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+}
+function abrirDataLancamento() {
+  const box = document.getElementById('f-data-box');
+  const link = document.getElementById('f-data-link');
+  if (!box) return;
+  box.style.display = 'block';
+  if (link) link.style.display = 'none';
+  prepararCampoData();
+  const inp = document.getElementById('f-data');
+  if (inp && !inp.value) inp.value = hojeISO();
+  avisoDataLancamento();
+}
+function dataLancamentoEscolhida() {
+  const box = document.getElementById('f-data-box');
+  const inp = document.getElementById('f-data');
+  if (!box || box.style.display === 'none' || !inp || !inp.value) return null;
+  return inp.value === hojeISO() ? null : inp.value;   // hoje = comportamento normal
+}
+function avisoDataLancamento() {
+  const el = document.getElementById('f-data-aviso');
+  if (!el) return;
+  const d = dataLancamentoEscolhida();
+  if (!d) { el.textContent = ''; el.style.color = ''; return; }
+  if (tipoAtual === 'Ajuste') {
+    el.style.color = '#e85d26';
+    el.innerHTML = '⚠️ Ajuste não aceita data anterior — ele define o saldo de agora e apagaria o que se movimentou depois. Para acertar estoque de dias atrás, use o Inventário.';
+    return;
+  }
+  el.style.color = 'var(--muted)';
+  el.innerHTML = `O consumo vai para <b>${d.split('-').reverse().join('/')}</b> na Planilha e nos relatórios. ` +
+    `O estoque de hoje baixa do mesmo jeito — a mercadoria já saiu.`;
+}
+
 async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
   const qtd = parseFloat(document.getElementById('f-qtd').value);
@@ -2364,10 +2430,12 @@ async function lancar(forcar = false) {
   const btn = document.getElementById('btn-lancar');
   btn.disabled = true; btn.textContent = '⏳ Salvando...';
   try {
+    const dataEscolhida = dataLancamentoEscolhida();
     const resultado = await apiPost('/api/movimentacoes', {
       produto_id: prodAtual.id,
       produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: prodAtual.custo,
-      motivo: document.getElementById('f-motivo').value, obs: '', forcar
+      motivo: document.getElementById('f-motivo').value, obs: '', forcar,
+      ...(dataEscolhida ? { data: dataEscolhida } : {})
     });
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
@@ -2383,7 +2451,10 @@ async function lancar(forcar = false) {
     // Atualiza prodAtual com qtd nova para próximo lançamento
     if (resultado.produto) prodAtual = resultado.produto;
     const sinal = tipoAtual==='Entrada'?'+':tipoAtual==='Ajuste'?'=':'-';
-    toast(`✓ ${sinal}${fmt(qtd)} ${prodAtual.unidade} de ${prodAtual.nome}`, 'ok');
+    // Com data retroativa o toast PRECISA dizer o dia: é a única confirmação de que o
+    // lançamento foi pro dia certo, e o campo continua preenchido pro próximo item.
+    toast(`✓ ${sinal}${fmt(qtd)} ${prodAtual.unidade} de ${prodAtual.nome}` +
+      (dataEscolhida ? ` → ${dataEscolhida.split('-').reverse().join('/')}` : ''), 'ok');
     document.getElementById('f-qtd').value = '';
     // Atualiza display do estoque atual na tela sem fechar o produto
     atualizarEstoqueDisplay(resultado.produto);

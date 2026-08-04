@@ -53,6 +53,33 @@ function nowSP() {
 
 function dateSP() { return nowSP().slice(0, 10); }
 
+// Lançamento retroativo: até o v73 toda movimentação caía em "agora", então quem esquecia a
+// baixa do dia não tinha como jogar o consumo pro dia certo — o custo ia parar no dia errado
+// e o Resultado daquele dia saía inflado (foi o que aconteceu em 09/07 e 03/08 de 2026).
+// A janela é curta de propósito: retroagir muito reescreve mês já fechado e conferido.
+const RETRO_MAX_DIAS = 7;
+
+// Data escolhida → timestamp. Meio-dia, não meia-noite: às 00:00 qualquer arredondamento de
+// fuso joga o lançamento pro dia anterior, e o ponto todo aqui é acertar o DIA.
+function timestampRetroativoSP(dataISO) {
+  return `${dataISO}T12:00:00-03:00`;
+}
+
+// Devolve { erro } ou { ts, retroativo, dias }. Data vazia = hoje (comportamento de sempre).
+function resolverDataLancamento(dataBruta, user) {
+  const dia = dataISOOuNull(dataBruta);
+  if (!dia) return { ts: nowSP(), retroativo: false, dias: 0 };
+  const hoje = dateSP();
+  if (dia === hoje) return { ts: nowSP(), retroativo: false, dias: 0 };
+  if (dia > hoje) return { erro: 'Não dá pra lançar em data futura.' };
+  const dias = Math.round((Date.parse(hoje + 'T12:00:00Z') - Date.parse(dia + 'T12:00:00Z')) / 86400000);
+  if (dias > RETRO_MAX_DIAS)
+    return { erro: `Só dá pra lançar até ${RETRO_MAX_DIAS} dias pra trás (essa data tem ${dias}). Mês fechado se corrige por inventário, não por lançamento solto.` };
+  if (!['admin', 'gerente'].includes(user.role))
+    return { erro: 'Lançamento com data anterior é só para gerente ou administrador.' };
+  return { ts: timestampRetroativoSP(dia), retroativo: true, dias };
+}
+
 function dateAgoDias(dias) {
   const d = new Date(Date.now() - dias * 86400000);
   const partes = new Intl.DateTimeFormat('sv-SE', {
@@ -699,6 +726,14 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   if ((!produto_id && !produto_nome) || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
 
+  // Ajuste retroativo fica de fora de propósito: Ajuste define o saldo ABSOLUTO do produto, e
+  // "o saldo de ontem" aplicado hoje apaga em silêncio tudo que se movimentou nesse meio-tempo.
+  // Corrigir estoque de dias atrás é papel do inventário, que refaz a contagem inteira.
+  const quando = resolverDataLancamento(req.body?.data, req.user);
+  if (quando.erro) return res.status(400).json({ erro: quando.erro });
+  if (quando.retroativo && tipo === 'Ajuste')
+    return res.status(400).json({ erro: 'Ajuste não aceita data anterior — ele define o saldo atual e apagaria o que se movimentou depois. Para acertar estoque de dias atrás, use o Inventário.' });
+
   const { prod, opcoes } = await acharProdutoPorIdOuNome(produto_id, produto_nome);
   if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado. Pesquise e selecione o item novamente na lista.' });
@@ -800,16 +835,24 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
-    custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs,
+    custo: custoUnit, valor, motivo, responsavel: req.user.nome,
+    // Marca o retroativo na própria observação: sem isso o histórico mente — a linha aparece
+    // com data de ontem e não dá pra saber que foi digitada hoje, nem por quem.
+    obs: quando.retroativo
+      ? `${obs ? obs + ' | ' : ''}📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`.slice(0, 200)
+      : obs,
     qtd_antes: qtdAntes, qtd_depois: novaQtd,
-    created_at: nowSP(),
+    created_at: quando.ts,
   }).select('id').single();
   if (movErr) {
     await supabase.from('produtos').update({ qtd: qtdAntes, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd);
     return res.status(500).json({ erro: 'Erro ao registrar movimentação.' });
   }
 
-  await audit('movimentacao', { produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo }, req.user, getClientIp(req));
+  await audit('movimentacao', {
+    produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo,
+    ...(quando.retroativo ? { retroativo: true, data_lancada: String(quando.ts).slice(0, 10), dias_atras: quando.dias } : {}),
+  }, req.user, getClientIp(req));
   if (tipo === 'Entrada' && motivo === 'Compra') {
     await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movIns?.id });
   }
