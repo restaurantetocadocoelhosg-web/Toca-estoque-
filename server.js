@@ -503,6 +503,176 @@ app.get('/api/produtos', auth, async (req, res) => {
   res.json(filtered);
 });
 
+// ==================== LANÇAMENTO EM LOTE (colar lista de saída) ====================
+// Lançar 40 itens um a um é o que faz a baixa do dia não ser lançada. Aqui a pessoa cola a
+// lista do papel do jeito que escreveu e o servidor interpreta; a tela mostra o que casou
+// ANTES de gravar, porque adivinhar produto errado em silêncio é pior que não lançar.
+
+// Formatos que a equipe realmente escreve (todos vistos na lista do Rubens de 03/08/2026):
+//   "1,260 kg fígado"  "2 alho"  "Camarão: 0,520 kg"  "100 g provolone"
+//   "2k de batata frita"  "1 bandeja de batata-baroa — 2 kg"  "* 2 couves-flores"
+// Devolve { qtd, termo } ou null.
+function parseLinhaLote(linhaBruta) {
+  const cru = String(linhaBruta || '').trim();
+  // "-5 kg tomate": traço COLADO no número é sinal negativo, não bullet — tirar como bullet
+  // viraria uma saída de 5. Com espaço ("- 3 bdj vagem") é bullet de lista mesmo.
+  if (/^-[\d.,]/.test(cru)) return null;
+  let s = cru
+    .replace(/^[\s*\-–—•·]+/, '')          // bullets de lista
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!s) return null;
+
+  // "1 bandeja de batata-baroa — 2 kg" / "Camarão: 0,520 kg": o peso que vale é o do fim.
+  // Sem isso, "1 bandeja ... 2 kg" viraria 1 kg de batata baroa em vez de 2.
+  const pesoNoFim = s.match(/^(.*?)[\s:—–-]+([\d.,]+)\s*(kg|quilos?|k|g|gr|gramas?|un|und|unidades?|bdj|bandejas?)\.?$/i);
+  const qtdNoInicio = s.match(/^([\d.,]+)\s*(kg|quilos?|k|g|gr|gramas?|un|und|unidades?|bdj|bandejas?)?\s*(?:de\s+)?(.+)$/i);
+
+  let num = null, un = '', termo = '';
+  if (pesoNoFim && /[a-zà-ú]/i.test(pesoNoFim[1])) {
+    num = pesoNoFim[2]; un = pesoNoFim[3]; termo = pesoNoFim[1];
+  } else if (qtdNoInicio) {
+    num = qtdNoInicio[1]; un = qtdNoInicio[2] || ''; termo = qtdNoInicio[3];
+  } else return null;
+
+  // "1,260" é 1,260 kg — vírgula é decimal em pt-BR, nunca separador de milhar aqui.
+  let qtd = Number(String(num).replace(/\./g, '.').replace(',', '.'));
+  if (!isFinite(qtd) || qtd <= 0) return null;
+
+  // Gramas viram quilo. "100 g provolone" é 0,1 kg — lançar 100 seria 1000× o consumo real.
+  if (/^(g|gr|gramas?)$/i.test(un)) qtd = qtd / 1000;
+
+  // "1 bandeja de batata-baroa — 2 kg": o peso vem do fim, mas o termo ainda carrega
+  // "1 bandeja de". Tira embalagem, depois a contagem que sobrou, depois a preposição —
+  // nessa ordem, senão sobra "1 de batata-baroa" e o produto não casa.
+  termo = termo
+    .replace(/\b(bandejas?|bdj|caixas?|cx|pacotes?|pct|potes?|un|und|unidades?)\b/gi, ' ')
+    .replace(/\s+/g, ' ').trim()
+    .replace(/^[\d.,]+\s*/, '')
+    .replace(/^(de|da|do)\s+/i, '')
+    .replace(/[—–\-:]+$/, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!termo || termo.length < 2) return null;
+  return { qtd: Number(qtd.toFixed(3)), termo };
+}
+
+// Singular pobre mas suficiente pro que a cozinha escreve: "couves-flores" → "couve flor",
+// "ervilhas" → "ervilha", "ovos" → "ovo". Palavra a palavra, porque plural composto em
+// português flexiona as duas ("couves-flores", não "couve-flores").
+function singularizarTermo(txt) {
+  return String(txt).split(' ').map(p => {
+    if (p.length <= 3) return p;
+    if (/oes$/.test(p)) return p.replace(/oes$/, 'ao');    // limoes → limao
+    if (/aes$/.test(p)) return p.replace(/aes$/, 'ao');
+    if (/res$/.test(p)) return p.replace(/es$/, '');       // flores → flor
+    if (/ns$/.test(p)) return p.replace(/ns$/, 'm');       // bons → bom
+    if (/s$/.test(p)) return p.replace(/s$/, '');          // ovos → ovo
+    return p;
+  }).join(' ');
+}
+
+// Casa o termo escrito com um produto do cadastro. Apelido cadastrado vem primeiro (é o mais
+// específico). Depois PONTUA os candidatos em vez de aceitar o primeiro que bate:
+// "tomate grape cereja" batia em "Tomate" e "ovos de codorna" em "Ovos BRANCO" quando a busca
+// usava só a primeira palavra — lançar saída no produto errado em silêncio é pior que não
+// lançar. Empate não vira palpite: devolve as opções pra tela perguntar.
+async function acharProdutoPorTermo(termo) {
+  const base = normalizeSearch(termo);
+  const semHifen = base.replace(/-/g, ' ');
+  const singular = singularizarTermo(semHifen);
+  const variantes = [...new Set([base, semHifen, singular].filter(Boolean))];
+
+  for (const v of variantes) {
+    const { data: sino } = await supabase.from('sinonimos').select('produto_nome').eq('termo', v).limit(1);
+    if (sino && sino.length) {
+      const { data } = await supabase.from('produtos').select('id, nome, unidade, qtd, custo, categoria')
+        .eq('nome', sino[0].produto_nome).or('ativo.eq.1,ativo.is.null').limit(1);
+      if (data && data.length) return { produto: data[0], via: 'apelido' };
+    }
+  }
+
+  // Candidatos: qualquer produto que contenha alguma palavra relevante do termo.
+  const palavras = [...new Set(singular.split(' ').filter(p => p.length >= 3))];
+  if (!palavras.length) return { produto: null, via: 'nao_encontrado' };
+  const filtros = palavras.map(p => `nome_search.ilike.%${p}%`).join(',');
+  const { data: cands } = await supabase.from('produtos').select('id, nome, unidade, qtd, custo, categoria, nome_search')
+    .or(filtros).or('ativo.eq.1,ativo.is.null').limit(40);
+  if (!cands || !cands.length) return { produto: null, via: 'nao_encontrado' };
+
+  const pontuar = (p) => {
+    const nome = singularizarTermo(normalizeSearch(p.nome_search || p.nome));
+    if (nome === singular) return 1000;                       // nome idêntico ao escrito
+    const doNome = nome.split(' ').filter(Boolean);
+    let pts = 0;
+    for (const w of palavras) if (doNome.some(n => n.startsWith(w) || w.startsWith(n))) pts += 10;
+    // Penaliza nome muito maior que o termo: sem isso "tomate" casaria com
+    // "Tomate Seco Portobello Salmou Dren 1,4KG" tão bem quanto com "Tomate".
+    pts -= Math.max(0, doNome.length - palavras.length);
+    return pts;
+  };
+
+  const rank = cands.map(p => ({ p, pts: pontuar(p) })).filter(x => x.pts > 0)
+    .sort((a, b) => b.pts - a.pts || a.p.nome.length - b.p.nome.length);
+  if (!rank.length) return { produto: null, via: 'nao_encontrado' };
+
+  const limpar = ({ nome_search, ...resto }) => resto;
+  // Vencedor claro = ninguém empatou com ele. Empate é ambiguidade real, não palpite.
+  if (rank.length === 1 || rank[0].pts > rank[1].pts) return { produto: limpar(rank[0].p), via: 'nome' };
+  return { produto: null, opcoes: rank.filter(x => x.pts === rank[0].pts).slice(0, 6).map(x => limpar(x.p)), via: 'ambiguo' };
+}
+
+// Interpreta o texto e devolve o que casou — NÃO grava nada. A tela confirma antes.
+app.post('/api/movimentacoes/lote/interpretar', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const texto = String(req.body?.texto || '').slice(0, 20000);
+    const linhas = texto.split(/\r?\n/).filter(l => l.trim());
+    if (!linhas.length) return res.status(400).json({ erro: 'Cole a lista de saídas primeiro.' });
+    if (linhas.length > 200) return res.status(400).json({ erro: 'Lista muito longa (máximo 200 linhas por vez).' });
+
+    const itens = [];
+    for (const linha of linhas) {
+      const p = parseLinhaLote(linha);
+      if (!p) { itens.push({ linha, erro: 'não entendi a linha' }); continue; }
+      const achado = await acharProdutoPorTermo(p.termo);
+      itens.push({
+        linha, termo: p.termo, qtd: p.qtd,
+        produto: achado.produto ? {
+          id: achado.produto.id, nome: achado.produto.nome, unidade: achado.produto.unidade,
+          estoque: Number(achado.produto.qtd), custo: Number(achado.produto.custo || 0),
+        } : null,
+        via: achado.via,
+        opcoes: (achado.opcoes || []).map(o => ({ id: o.id, nome: o.nome, unidade: o.unidade, qtd: Number(o.qtd) })),
+        erro: achado.produto ? null : (achado.via === 'ambiguo' ? 'vários produtos batem' : 'produto não encontrado'),
+      });
+    }
+
+    // Mesma comida em duas linhas do papel (o Rubens tinha frango, cebola e tomate repetidos):
+    // soma, senão a segunda linha vira um lançamento solto e o total do dia sai errado.
+    const porProduto = new Map();
+    for (const it of itens) {
+      if (!it.produto) continue;
+      const ant = porProduto.get(it.produto.id);
+      if (ant) { ant.qtd = Number((ant.qtd + it.qtd).toFixed(3)); ant.linhas.push(it.linha); it._somado = true; }
+      else porProduto.set(it.produto.id, { ...it, linhas: [it.linha] });
+    }
+    const consolidados = [...porProduto.values()].map(it => ({
+      produto_id: it.produto.id, nome: it.produto.nome, unidade: it.produto.unidade,
+      qtd: it.qtd, estoque: it.produto.estoque, custo: it.produto.custo,
+      valor: Number((it.qtd * it.produto.custo).toFixed(2)),
+      sem_saldo: it.qtd > it.produto.estoque,
+      linhas: it.linhas, via: it.via,
+    }));
+
+    res.json({
+      itens: consolidados,
+      problemas: itens.filter(i => i.erro).map(i => ({ linha: i.linha, erro: i.erro, opcoes: i.opcoes || [] })),
+      total_valor: Number(consolidados.reduce((s, i) => s + i.valor, 0).toFixed(2)),
+      total_linhas: linhas.length,
+    });
+  } catch (e) { console.error(e); res.status(500).json({ erro: 'Erro ao interpretar a lista.' }); }
+});
+
 app.get('/api/produtos/buscar', auth, async (req, res) => {
   const q = sanitizeText(req.query?.q, 100);
   if (!q || q.length < 2) return res.json([]);
@@ -858,6 +1028,75 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
   res.json({ ok: true, produto: prodAtualizado });
+});
+
+// Grava o lote já conferido na tela. Vai item a item de propósito: se um falhar (estoque
+// insuficiente, produto arquivado), os outros entram e a resposta diz exatamente qual não foi
+// — melhor que perder a lista inteira por causa de uma linha.
+app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  try {
+    const itens = Array.isArray(req.body?.itens) ? req.body.itens : [];
+    if (!itens.length) return res.status(400).json({ erro: 'Nenhum item para lançar.' });
+    if (itens.length > 200) return res.status(400).json({ erro: 'Máximo de 200 itens por lote.' });
+
+    const tipo = ['Saída', 'Perda'].includes(req.body?.tipo) ? req.body.tipo : 'Saída';
+    const motivo = sanitizeText(req.body?.motivo, 80) || (tipo === 'Perda' ? 'Perda/Vencimento' : 'Produção');
+    const quando = resolverDataLancamento(req.body?.data, req.user);
+    if (quando.erro) return res.status(400).json({ erro: quando.erro });
+
+    const feitos = [], falhas = [];
+    for (const it of itens) {
+      const pid = Number(it.produto_id);
+      const qtd = parsePositiveNumber(it.qtd);
+      if (!pid || qtd === null) { falhas.push({ nome: it.nome || `produto ${pid}`, erro: 'quantidade inválida' }); continue; }
+
+      const { data: prod } = await supabase.from('produtos').select('*').eq('id', pid).single();
+      if (!prod) { falhas.push({ nome: it.nome || `produto ${pid}`, erro: 'produto não encontrado' }); continue; }
+      if (qtd > Number(prod.qtd)) {
+        falhas.push({ nome: prod.nome, erro: `estoque insuficiente (tem ${prod.qtd} ${prod.unidade}, pediu ${qtd})` });
+        continue;
+      }
+
+      const qtdAntes = Number(prod.qtd);
+      const novaQtd = Number((qtdAntes - qtd).toFixed(3));
+      const custoUnit = Number(prod.custo || 0);
+      const valor = Number((custoUnit * qtd).toFixed(2));
+
+      // Trava otimista igual à do lançamento avulso: duas baixas simultâneas do mesmo produto
+      // não podem se sobrescrever.
+      const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd })
+        .eq('id', prod.id).eq('qtd', prod.qtd).select('id');
+      if (!upd || !upd.length) { falhas.push({ nome: prod.nome, erro: 'estoque mudou durante o lançamento, tente de novo' }); continue; }
+
+      const { error: movErr } = await supabase.from('movimentacoes').insert({
+        produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+        tipo, qtd, unidade: prod.unidade, custo: custoUnit, valor, motivo,
+        responsavel: req.user.nome,
+        obs: (quando.retroativo
+          ? `lote · 📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`
+          : 'lote').slice(0, 200),
+        qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: quando.ts,
+      });
+      if (movErr) {
+        await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd);
+        falhas.push({ nome: prod.nome, erro: 'erro ao registrar' });
+        continue;
+      }
+      feitos.push({ nome: prod.nome, qtd, unidade: prod.unidade, valor });
+    }
+
+    await audit('movimentacao_lote', {
+      tipo, motivo, itens: itens.length, lancados: feitos.length, falhas: falhas.length,
+      valor_total: Number(feitos.reduce((s, f) => s + f.valor, 0).toFixed(2)),
+      ...(quando.retroativo ? { retroativo: true, data_lancada: String(quando.ts).slice(0, 10) } : {}),
+    }, req.user, getClientIp(req));
+
+    res.json({
+      ok: true, lancados: feitos.length, falhas,
+      valor_total: Number(feitos.reduce((s, f) => s + f.valor, 0).toFixed(2)),
+      data: String(quando.ts).slice(0, 10), retroativo: quando.retroativo,
+    });
+  } catch (e) { console.error(e); res.status(500).json({ erro: 'Erro ao lançar o lote.' }); }
 });
 
 app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {

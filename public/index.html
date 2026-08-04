@@ -841,6 +841,36 @@ select.big-input { font-size: 14px; }
       </div>
       <button id="btn-lancar" class="btn-lancar entrada" onclick="lancar()">⬆️ LANÇAR ENTRADA</button>
     </div>
+
+    <!-- Lançar a baixa do dia item a item é o que faz ninguém lançar. Aqui cola a lista
+         inteira do papel de uma vez; a conferência acontece antes de gravar. -->
+    <div id="lote-card" style="display:none">
+      <div class="section-header">Lançar lista de saídas</div>
+      <div class="card">
+        <div style="font-size:12px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+          Cole a lista do jeito que estiver escrita — uma por linha.
+          Ex.: <i>4,770 kg coxão duro</i> · <i>2 alho</i> · <i>Camarão: 0,520 kg</i> · <i>100 g provolone</i>
+        </div>
+        <textarea id="lote-texto" rows="7" placeholder="1,260 kg fígado&#10;4,770 kg coxão duro&#10;2 alho&#10;Camarão: 0,520 kg"
+          style="width:100%;padding:12px;border-radius:var(--radius);border:1.5px solid var(--border);background:var(--s2);color:var(--text);font-size:14px;font-family:inherit;resize:vertical"></textarea>
+        <div class="row2" style="margin-top:10px">
+          <div class="field-group" style="margin:0">
+            <div class="field-label">Data</div>
+            <input class="big-input" id="lote-data" type="date" style="padding:12px 10px">
+          </div>
+          <div class="field-group" style="margin:0">
+            <div class="field-label">Motivo</div>
+            <select class="big-input" id="lote-motivo" style="padding:12px 10px">
+              <option value="Produção">Produção</option>
+              <option value="Perda/Vencimento">Perda/Vencto</option>
+            </select>
+          </div>
+        </div>
+        <button id="btn-lote-conferir" class="btn-lancar saida" style="margin-top:10px" onclick="conferirLote()">🔍 CONFERIR LISTA</button>
+        <div id="lote-resultado" style="margin-top:12px"></div>
+      </div>
+    </div>
+
     <div class="section-header">Últimos lançamentos</div>
     <div class="mov-list" id="ultimos-list"></div>
   </div>
@@ -1359,7 +1389,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v74</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v75</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1863,6 +1893,15 @@ async function loadSession() {
   if (respDisplay) respDisplay.textContent = currentUser.nome;
   document.getElementById('f-resp').value = currentUser.nome;
   prepararCampoData();   // o link de data só aparece pra gerente/admin
+  // Lote também é só gerente/admin: baixa muita coisa de uma vez, e erro em massa é caro.
+  const loteCard = document.getElementById('lote-card');
+  if (loteCard) loteCard.style.display = podeRetroagir() ? 'block' : 'none';
+  const loteData = document.getElementById('lote-data');
+  if (loteData) {
+    loteData.max = hojeISO();
+    loteData.min = new Date(Date.now() - RETRO_MAX_DIAS * 864e5).toLocaleDateString('en-CA', { timeZone: 'America/Sao_Paulo' });
+    if (!loteData.value) loteData.value = hojeISO();
+  }
   // Reset card visível só para admin (bug fix)
   const cardReset = document.getElementById('card-reset');
   if (cardReset) cardReset.style.display = permissions.pode_resetar ? '' : 'none';
@@ -2411,6 +2450,99 @@ function avisoDataLancamento() {
   el.style.color = 'var(--muted)';
   el.innerHTML = `O consumo vai para <b>${d.split('-').reverse().join('/')}</b> na Planilha e nos relatórios. ` +
     `O estoque de hoje baixa do mesmo jeito — a mercadoria já saiu.`;
+}
+
+// ── Lançamento em lote (colar a lista de saídas) ──────────────────
+let loteItens = [];
+function conferidoLote() { return loteItens.length > 0; }
+
+async function conferirLote() {
+  const texto = document.getElementById('lote-texto').value.trim();
+  if (!texto) { toast('Cole a lista primeiro', 'err'); return; }
+  const btn = document.getElementById('btn-lote-conferir');
+  btn.disabled = true; btn.textContent = '⏳ Lendo...';
+  try {
+    const r = await apiPost('/api/movimentacoes/lote/interpretar', { texto });
+    loteItens = r.itens || [];
+    renderLote(r);
+  } catch (e) {
+    toast(e.message || 'Erro ao ler a lista', 'err');
+  } finally {
+    btn.disabled = false; btn.textContent = '🔍 CONFERIR LISTA';
+  }
+}
+
+function renderLote(r) {
+  const el = document.getElementById('lote-resultado');
+  const itens = r.itens || [], problemas = r.problemas || [];
+  if (!itens.length && !problemas.length) { el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nada reconhecido na lista.</div>'; return; }
+
+  let html = '';
+  if (itens.length) {
+    const semSaldo = itens.filter(i => i.sem_saldo).length;
+    html += `<div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${itens.length} produto(s) · R$ ${Number(r.total_valor).toFixed(2)}</div>`;
+    for (const it of itens) {
+      const cor = it.sem_saldo ? '#e85d26' : 'var(--text)';
+      const juntou = it.linhas.length > 1 ? ` <span style="color:var(--muted)">(${it.linhas.length} linhas somadas)</span>` : '';
+      html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+        `<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:${cor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(it.nome)}${juntou}</div>` +
+        `<div style="font-size:10px;color:var(--muted)">estoque ${fmt(it.estoque)} ${escapeHtml(it.unidade)}` +
+        (it.sem_saldo ? ' · <b style="color:#e85d26">SEM SALDO</b>' : '') + '</div></div>' +
+        `<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:${cor}">-${fmt(it.qtd)} ${escapeHtml(it.unidade)}</div>` +
+        `<div style="font-size:10px;color:var(--muted)">R$ ${Number(it.valor).toFixed(2)}</div></div></div>`;
+    }
+    if (semSaldo) html += `<div style="font-size:11px;color:#e85d26;margin:6px 0">⚠️ ${semSaldo} item(ns) sem saldo não serão lançados. Corrija a quantidade ou lance a entrada que faltou.</div>`;
+  }
+  if (problemas.length) {
+    html += `<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 6px">${problemas.length} linha(s) que não entendi</div>`;
+    for (const p of problemas) {
+      html += '<div style="padding:8px 10px;background:rgba(232,93,38,0.08);border-radius:8px;margin-bottom:5px">' +
+        `<div style="font-size:12px;font-weight:600">${escapeHtml(p.linha)}</div>` +
+        `<div style="font-size:10px;color:var(--muted)">${escapeHtml(p.erro)}` +
+        (p.opcoes && p.opcoes.length ? ' — pode ser: ' + p.opcoes.slice(0, 4).map(o => escapeHtml(o.nome)).join(' | ') : '') +
+        '</div></div>';
+    }
+    html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Essas linhas <b>não</b> serão lançadas. Corrija o texto e confira de novo, ou lance esses itens na mão.</div>';
+  }
+  const lancaveis = itens.filter(i => !i.sem_saldo).length;
+  if (lancaveis) {
+    html += `<button class="btn-lancar saida" style="margin-top:8px" onclick="lancarLoteSaidas()">⬇️ LANÇAR ${lancaveis} ITEM(NS)</button>`;
+  }
+  el.innerHTML = html;
+}
+
+async function lancarLoteSaidas() {
+  const aLancar = loteItens.filter(i => !i.sem_saldo);
+  if (!aLancar.length) { toast('Nenhum item com saldo para lançar', 'err'); return; }
+  const data = document.getElementById('lote-data').value || hojeISO();
+  const motivo = document.getElementById('lote-motivo').value;
+  const total = aLancar.reduce((s, i) => s + Number(i.valor), 0);
+  const quando = data === hojeISO() ? 'hoje' : data.split('-').reverse().join('/');
+  if (!await askConfirm(
+    `${aLancar.length} produto(s), R$ ${total.toFixed(2)} de consumo, com data de ${quando}.\n\nIsso baixa o estoque de verdade.`,
+    { titulo: 'Lançar a lista?' })) return;
+
+  try {
+    const r = await apiPost('/api/movimentacoes/lote', {
+      itens: aLancar.map(i => ({ produto_id: i.produto_id, qtd: i.qtd, nome: i.nome })),
+      tipo: motivo === 'Perda/Vencimento' ? 'Perda' : 'Saída',
+      motivo,
+      ...(data !== hojeISO() ? { data } : {}),
+    });
+    let msg = `✓ ${r.lancados} lançado(s) · R$ ${Number(r.valor_total).toFixed(2)}`;
+    if (r.retroativo) msg += ` → ${String(r.data).split('-').reverse().join('/')}`;
+    toast(msg, 'ok');
+    if (r.falhas && r.falhas.length) {
+      avisar('Não entraram:\n\n' + r.falhas.map(f => `• ${f.nome}: ${f.erro}`).join('\n'),
+        { titulo: `${r.falhas.length} item(ns) com problema`, perigo: true });
+    }
+    document.getElementById('lote-texto').value = '';
+    document.getElementById('lote-resultado').innerHTML = '';
+    loteItens = [];
+    await loadDash();
+    if (document.getElementById('p-estoque').classList.contains('active')) await loadEstoque();
+    if (document.getElementById('p-hist').classList.contains('active')) await loadHist();
+  } catch (e) { toast(e.message || 'Erro ao lançar', 'err'); }
 }
 
 async function lancar(forcar = false) {
