@@ -809,7 +809,10 @@ select.big-input { font-size: 14px; }
       <div class="row2">
         <div class="field-group" style="margin:0">
           <div class="field-label">Quantidade</div>
-          <input class="qtd-input" id="f-qtd" type="number" placeholder="0" step="0.001" min="0" inputmode="decimal">
+          <!-- type=text + inputmode=decimal: com type=number o navegador rejeita a vírgula
+               e devolve valor vazio; o teclado numérico do celular continua igual. -->
+          <input class="qtd-input" id="f-qtd" type="text" placeholder="0" inputmode="decimal" autocomplete="off" oninput="mascaraQtd(this)">
+          <div id="f-qtd-preview" style="font-size:11px;color:var(--muted);font-weight:600;margin-top:4px;min-height:14px"></div>
         </div>
         <div class="field-group" style="margin:0">
           <div class="field-label">Motivo</div>
@@ -1389,7 +1392,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v77</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v78</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1726,7 +1729,7 @@ select.big-input { font-size: 14px; }
       </div>
       <div class="field-label-sm">Quantidade atual no estoque</div>
       <div style="display:flex;align-items:center;gap:10px">
-        <input class="qtd-input" id="pedit-ajuste-qtd" type="number" min="0" step="0.001" placeholder="0" style="flex:1" oninput="peditAjustePreview()">
+        <input class="qtd-input" id="pedit-ajuste-qtd" type="text" inputmode="decimal" autocomplete="off" placeholder="0" style="flex:1" oninput="peditAjustePreview()">
         <span id="pedit-ajuste-unid" style="font-size:16px;font-weight:700;color:var(--muted)">UN</span>
       </div>
       <div id="pedit-ajuste-preview" style="font-size:13px;color:var(--muted);margin:12px 0;min-height:20px"></div>
@@ -2386,11 +2389,23 @@ function selProd(jsonStr) {
   const estoqueEl = document.getElementById('sel-estoque-atual');
   if (estoqueEl) { estoqueEl.textContent = `Estoque atual: ${fmt(p.qtd)} ${p.unidade}`; estoqueEl.style.color = p.qtd === 0 ? 'var(--red)' : p.qtd <= p.minimo * 0.5 ? 'var(--yellow)' : 'var(--green)'; }
   document.getElementById('sel-info').textContent = `${p.categoria} · Estoque: ${fmt(p.qtd)} ${p.unidade} · Custo: R$ ${Number(p.custo||0).toFixed(2)}`;
-  closeAc(); document.getElementById('f-qtd').focus();
+  // Campo zerado ao trocar de produto: sobra do anterior com máscara de peso vira lançamento
+  // errado quando o novo item é por unidade.
+  const inpQtd = document.getElementById('f-qtd');
+  if (inpQtd) inpQtd.value = '';
+  const dica = document.getElementById('f-qtd-preview');
+  if (dica) {
+    dica.textContent = unidadeFracionaria(p.unidade)
+      ? `digite 1260 para 1,260 ${p.unidade} — a vírgula entra sozinha`
+      : `${p.unidade}: número inteiro`;
+  }
+  closeAc(); inpQtd && inpQtd.focus();
 }
 
 function clearProd() {
   prodAtual = null;
+  const dica = document.getElementById('f-qtd-preview');
+  if (dica) dica.textContent = '';
   document.getElementById('prod-sel').classList.remove('show');
   document.getElementById('busca-wrap').style.display = 'block';
   const inp = document.getElementById('f-busca');
@@ -2569,7 +2584,7 @@ async function lancarLoteSaidas() {
 
 async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
-  const qtd = parseFloat(document.getElementById('f-qtd').value);
+  const qtd = numQtd(document.getElementById('f-qtd').value);
   if ((!qtd&&qtd!==0)||qtd<0||(tipoAtual!=='Ajuste'&&qtd<=0)) {
     toast(tipoAtual==='Ajuste'?'Informe um ajuste válido':'Informe uma quantidade maior que zero','err'); return;
   }
@@ -2610,6 +2625,7 @@ async function lancar(forcar = false) {
     toast(`✓ ${sinal}${fmt(qtd)} ${prodAtual.unidade} de ${prodAtual.nome}` +
       (dataEscolhida ? ` → ${dataEscolhida.split('-').reverse().join('/')}` : ''), 'ok');
     document.getElementById('f-qtd').value = '';
+    previewQtd();   // some o "= 1,260 kg" do item que acabou de entrar
     // Atualiza display do estoque atual na tela sem fechar o produto
     atualizarEstoqueDisplay(resultado.produto);
     await loadDash();
@@ -4959,6 +4975,46 @@ function fmt(n) {
   const num=Number(n); return num%1===0?String(num):num.toFixed(3).replace(/\.?0+$/,'');
 }
 
+// Aceita "1,260" e "1.260" — a equipe digita dos dois jeitos, e o teclado do celular em
+// português oferece vírgula. Number("1,260") é NaN, então sem isso a quantidade some e o
+// app diz "informe uma quantidade maior que zero" com o campo preenchido na frente da pessoa.
+// Quando há vírgula, ela é o decimal e o ponto é separador de milhar ("1.234,5" = 1234.5).
+function numQtd(v) {
+  let s = String(v ?? '').trim();
+  if (!s) return NaN;
+  s = s.replace(/\s/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = Number(s);
+  return isFinite(n) ? n : NaN;
+}
+
+// Produto vendido a peso/volume aceita decimal; un, caixa, fardo e pacote não.
+function unidadeFracionaria(u) {
+  return /^(kg|quilo|g\b|grama|l\b|lt|litro|ml)/i.test(String(u || '').trim());
+}
+
+// Vírgula automática, como balança: os dígitos entram da direita pra esquerda com 3 casas.
+//   1260 → 1,260    ·    520 → 0,520    ·    5000 → 5,000
+// Só em produto por peso — em "un" isso viraria 0,002 quando a pessoa quis 2 alhos.
+function mascaraQtd(el) {
+  if (!prodAtual || !unidadeFracionaria(prodAtual.unidade)) { previewQtd(); return; }
+  const dig = String(el.value).replace(/\D/g, '').replace(/^0+(?=\d{4,})/, '');
+  if (!dig) { el.value = ''; previewQtd(); return; }
+  const n = dig.padStart(4, '0');
+  el.value = n.slice(0, -3).replace(/^0+(?=\d)/, '') + ',' + n.slice(-3);
+  previewQtd();
+}
+
+// Eco do que vai ser lançado. Digitação com vírgula automática confunde nos primeiros usos —
+// ver "= 1,260 kg" embaixo do campo tira a dúvida antes de apertar o botão.
+function previewQtd() {
+  const el = document.getElementById('f-qtd-preview');
+  if (!el) return;
+  const q = numQtd(document.getElementById('f-qtd').value);
+  if (!isFinite(q) || q <= 0 || !prodAtual) { el.textContent = ''; return; }
+  el.textContent = `= ${fmt(q)} ${prodAtual.unidade}`;
+}
+
 function fmtMoneyCompact(n) {
   const num=Number(n||0);
   if (num>=1000) return `${(num/1000).toFixed(1).replace('.0','')}k`;
@@ -5818,7 +5874,7 @@ async function arquivarProduto() {
 
 function peditAjustePreview() {
   if (!prodEditAtual) return;
-  const nova = parseFloat(document.getElementById('pedit-ajuste-qtd').value);
+  const nova = numQtd(document.getElementById('pedit-ajuste-qtd').value);
   if (isNaN(nova)) { document.getElementById('pedit-ajuste-preview').textContent = ''; return; }
   const diff = nova - prodEditAtual.qtd;
   const sinal = diff >= 0 ? '+' : '';
@@ -6143,7 +6199,7 @@ async function renderInventario() {
             '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
             '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + badge + '</div>' +
           '</div>' +
-          '<input type="number" step="0.001" min="0" inputmode="decimal" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
+          '<input type="text" inputmode="decimal" autocomplete="off" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
             'style="width:84px;padding:8px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);text-align:right;font-size:14px">' +
           '<span style="font-size:11px;color:var(--muted);width:24px">' + it.unidade + '</span>' +
         '</div>';
@@ -6182,7 +6238,7 @@ function coletarContagem() {
   const itens = [];
   document.querySelectorAll('.inv-input').forEach(inp => {
     const v = inp.value.trim();
-    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : Number(v) });
+    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : numQtd(v) });
   });
   return itens;
 }
