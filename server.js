@@ -545,6 +545,11 @@ function parseLinhaLote(linhaBruta) {
   // "1 bandeja de batata-baroa — 2 kg": o peso vem do fim, mas o termo ainda carrega
   // "1 bandeja de". Tira embalagem, depois a contagem que sobrou, depois a preposição —
   // nessa ordem, senão sobra "1 de batata-baroa" e o produto não casa.
+  // Observação escrita na própria linha ("1 vagem — há uma sigla ao lado que não consegui
+  // identificar") vira ruído no nome e faz o produto não casar. O peso depois do travessão
+  // já foi extraído acima, então aqui o que vem depois dele é sempre comentário.
+  termo = termo.split(/\s+[—–]\s+|\s+-\s+/)[0].trim() || termo;
+
   termo = termo
     .replace(/\b(bandejas?|bdj|caixas?|cx|pacotes?|pct|potes?|un|und|unidades?)\b/gi, ' ')
     .replace(/\s+/g, ' ').trim()
