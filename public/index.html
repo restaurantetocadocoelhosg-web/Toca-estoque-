@@ -1389,7 +1389,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v76</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v77</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2479,19 +2479,31 @@ function renderLote(r) {
 
   let html = '';
   if (itens.length) {
-    const semSaldo = itens.filter(i => i.sem_saldo).length;
-    html += `<div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${itens.length} produto(s) · R$ ${Number(r.total_valor).toFixed(2)}</div>`;
+    // Total do que vai ser lançado de verdade — o do servidor é do pedido, e itens aparados
+    // pelo saldo valem menos. Mostrar o número do pedido aqui seria mentir sobre o consumo.
+    const totalReal = itens.reduce((s, i) => s + (i.sem_saldo ? Math.max(0, i.estoque) : i.qtd) * Number(i.custo || 0), 0);
+    html += `<div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${itens.length} produto(s) · R$ ${totalReal.toFixed(2)}</div>`;
     for (const it of itens) {
-      const cor = it.sem_saldo ? '#e85d26' : 'var(--text)';
+      // Sem saldo não é erro aqui: baixa o que existe e zera. O que a tela precisa deixar
+      // claro é o que vai ser lançado de verdade, não o que foi pedido.
+      const vaiZerar = it.sem_saldo && it.estoque > 0;
+      const nadaAZerar = it.sem_saldo && it.estoque <= 0;
+      const qtdReal = vaiZerar ? it.estoque : it.qtd;
+      const valorReal = vaiZerar ? Number((it.estoque * it.custo).toFixed(2)) : it.valor;
+      const cor = nadaAZerar ? '#e85d26' : vaiZerar ? '#b8860b' : 'var(--text)';
       const juntou = it.linhas.length > 1 ? ` <span style="color:var(--muted)">(${it.linhas.length} linhas somadas)</span>` : '';
       html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
         `<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:${cor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(it.nome)}${juntou}</div>` +
         `<div style="font-size:10px;color:var(--muted)">estoque ${fmt(it.estoque)} ${escapeHtml(it.unidade)}` +
-        (it.sem_saldo ? ' · <b style="color:#e85d26">SEM SALDO</b>' : '') + '</div></div>' +
-        `<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:${cor}">-${fmt(it.qtd)} ${escapeHtml(it.unidade)}</div>` +
-        `<div style="font-size:10px;color:var(--muted)">R$ ${Number(it.valor).toFixed(2)}</div></div></div>`;
+        (vaiZerar ? ` · <b style="color:#b8860b">pediu ${fmt(it.qtd)} — vai zerar</b>` : '') +
+        (nadaAZerar ? ' · <b style="color:#e85d26">já está zerado</b>' : '') + '</div></div>' +
+        `<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:${cor}">-${fmt(qtdReal)} ${escapeHtml(it.unidade)}</div>` +
+        `<div style="font-size:10px;color:var(--muted)">R$ ${Number(valorReal).toFixed(2)}</div></div></div>`;
     }
-    if (semSaldo) html += `<div style="font-size:11px;color:#e85d26;margin:6px 0">⚠️ ${semSaldo} item(ns) sem saldo não serão lançados. Corrija a quantidade ou lance a entrada que faltou.</div>`;
+    const zerando = itens.filter(i => i.sem_saldo && i.estoque > 0).length;
+    const jaZerados = itens.filter(i => i.sem_saldo && i.estoque <= 0).length;
+    if (zerando) html += `<div style="font-size:11px;color:#b8860b;margin:6px 0">⚠️ ${zerando} item(ns) com saída maior que o saldo: vai baixar o que tem e zerar. Fica registrado no histórico o quanto foi pedido.</div>`;
+    if (jaZerados) html += `<div style="font-size:11px;color:#e85d26;margin:6px 0">${jaZerados} item(ns) já estão zerados no estoque — esses não têm o que baixar e não serão lançados.</div>`;
   }
   if (problemas.length) {
     html += `<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 6px">${problemas.length} linha(s) que não entendi</div>`;
@@ -2504,22 +2516,31 @@ function renderLote(r) {
     }
     html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Essas linhas <b>não</b> serão lançadas. Corrija o texto e confira de novo, ou lance esses itens na mão.</div>';
   }
-  const lancaveis = itens.filter(i => !i.sem_saldo).length;
+  // Item que vai zerar CONTA como lançável — a mercadoria saiu, o estoque é que estava atrás.
+  // Só fica de fora o que já está zerado (não há o que baixar).
+  const lancaveis = loteLancaveis().length;
   if (lancaveis) {
     html += `<button class="btn-lancar saida" style="margin-top:8px" onclick="lancarLoteSaidas()">⬇️ LANÇAR ${lancaveis} ITEM(NS)</button>`;
   }
   el.innerHTML = html;
 }
 
+function loteLancaveis() { return loteItens.filter(i => i.estoque > 0); }
+// O que vai ser baixado de verdade: aparado pelo saldo quando o papel pede mais do que existe.
+function loteQtdReal(i) { return i.sem_saldo ? i.estoque : i.qtd; }
+
 async function lancarLoteSaidas() {
-  const aLancar = loteItens.filter(i => !i.sem_saldo);
+  const aLancar = loteLancaveis();
   if (!aLancar.length) { toast('Nenhum item com saldo para lançar', 'err'); return; }
   const data = document.getElementById('lote-data').value || hojeISO();
   const motivo = document.getElementById('lote-motivo').value;
-  const total = aLancar.reduce((s, i) => s + Number(i.valor), 0);
+  const total = aLancar.reduce((s, i) => s + loteQtdReal(i) * Number(i.custo || 0), 0);
+  const zerando = aLancar.filter(i => i.sem_saldo).length;
   const quando = data === hojeISO() ? 'hoje' : data.split('-').reverse().join('/');
   if (!await askConfirm(
-    `${aLancar.length} produto(s), R$ ${total.toFixed(2)} de consumo, com data de ${quando}.\n\nIsso baixa o estoque de verdade.`,
+    `${aLancar.length} produto(s), R$ ${total.toFixed(2)} de consumo, com data de ${quando}.` +
+    (zerando ? `\n\n${zerando} item(ns) serão zerados (o papel pede mais do que tem em estoque).` : '') +
+    `\n\nIsso baixa o estoque de verdade.`,
     { titulo: 'Lançar a lista?' })) return;
 
   try {
@@ -2527,6 +2548,7 @@ async function lancarLoteSaidas() {
       itens: aLancar.map(i => ({ produto_id: i.produto_id, qtd: i.qtd, nome: i.nome })),
       tipo: motivo === 'Perda/Vencimento' ? 'Perda' : 'Saída',
       motivo,
+      zerar_sem_saldo: true,
       ...(data !== hojeISO() ? { data } : {}),
     });
     let msg = `✓ ${r.lancados} lançado(s) · R$ ${Number(r.valor_total).toFixed(2)}`;

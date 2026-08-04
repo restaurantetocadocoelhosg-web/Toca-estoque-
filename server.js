@@ -1046,6 +1046,9 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
 
     const tipo = ['Saída', 'Perda'].includes(req.body?.tipo) ? req.body.tipo : 'Saída';
     const motivo = sanitizeText(req.body?.motivo, 80) || (tipo === 'Perda' ? 'Perda/Vencimento' : 'Produção');
+    // Só existe aqui no lote, de propósito: no lançamento avulso a pessoa está olhando um
+    // produto só e o "estoque insuficiente" é informação útil, não obstáculo.
+    const zerarSemSaldo = req.body?.zerar_sem_saldo === true;
     const quando = resolverDataLancamento(req.body?.data, req.user);
     if (quando.erro) return res.status(400).json({ erro: quando.erro });
 
@@ -1057,15 +1060,29 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
 
       const { data: prod } = await supabase.from('produtos').select('*').eq('id', pid).single();
       if (!prod) { falhas.push({ nome: it.nome || `produto ${pid}`, erro: 'produto não encontrado' }); continue; }
-      if (qtd > Number(prod.qtd)) {
-        falhas.push({ nome: prod.nome, erro: `estoque insuficiente (tem ${prod.qtd} ${prod.unidade}, pediu ${qtd})` });
-        continue;
+
+      // Saída maior que o saldo: a comida saiu de verdade, quem estava defasado era o
+      // estoque. Com zerar_sem_saldo, baixa o que existe e zera em vez de recusar a linha
+      // inteira — recusar deixaria o consumo de fora e o dia errado de novo.
+      const disponivel = Number(prod.qtd);
+      let qtdFinal = qtd, zerado = null;
+      if (qtd > disponivel) {
+        if (!zerarSemSaldo) {
+          falhas.push({ nome: prod.nome, erro: `estoque insuficiente (tem ${prod.qtd} ${prod.unidade}, pediu ${qtd})` });
+          continue;
+        }
+        if (disponivel <= 0) {
+          falhas.push({ nome: prod.nome, erro: `estoque já estava zerado, nada a baixar (pediu ${qtd})` });
+          continue;
+        }
+        qtdFinal = disponivel;
+        zerado = { pedido: qtd, baixado: disponivel };
       }
 
-      const qtdAntes = Number(prod.qtd);
-      const novaQtd = Number((qtdAntes - qtd).toFixed(3));
+      const qtdAntes = disponivel;
+      const novaQtd = Number((qtdAntes - qtdFinal).toFixed(3));
       const custoUnit = Number(prod.custo || 0);
-      const valor = Number((custoUnit * qtd).toFixed(2));
+      const valor = Number((custoUnit * qtdFinal).toFixed(2));
 
       // Trava otimista igual à do lançamento avulso: duas baixas simultâneas do mesmo produto
       // não podem se sobrescrever.
@@ -1073,13 +1090,17 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
         .eq('id', prod.id).eq('qtd', prod.qtd).select('id');
       if (!upd || !upd.length) { falhas.push({ nome: prod.nome, erro: 'estoque mudou durante o lançamento, tente de novo' }); continue; }
 
+      const partesObs = ['lote'];
+      if (quando.retroativo) partesObs.push(`📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`);
+      // Fica registrado que a baixa foi aparada pelo saldo: sem isso o histórico mostra 1
+      // onde a cozinha usou 3, e ninguém entende a diferença depois.
+      if (zerado) partesObs.push(`⚠️ pedido ${zerado.pedido} ${prod.unidade}, tinha ${zerado.baixado} — zerou`);
+
       const { error: movErr } = await supabase.from('movimentacoes').insert({
         produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-        tipo, qtd, unidade: prod.unidade, custo: custoUnit, valor, motivo,
+        tipo, qtd: qtdFinal, unidade: prod.unidade, custo: custoUnit, valor, motivo,
         responsavel: req.user.nome,
-        obs: (quando.retroativo
-          ? `lote · 📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`
-          : 'lote').slice(0, 200),
+        obs: partesObs.join(' · ').slice(0, 200),
         qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: quando.ts,
       });
       if (movErr) {
@@ -1087,7 +1108,7 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
         falhas.push({ nome: prod.nome, erro: 'erro ao registrar' });
         continue;
       }
-      feitos.push({ nome: prod.nome, qtd, unidade: prod.unidade, valor });
+      feitos.push({ nome: prod.nome, qtd: qtdFinal, unidade: prod.unidade, valor, ...(zerado ? { zerado } : {}) });
     }
 
     await audit('movimentacao_lote', {
