@@ -671,7 +671,12 @@ app.post('/api/movimentacoes/lote/interpretar', auth, requireRole('admin', 'gere
 
     res.json({
       itens: consolidados,
-      problemas: itens.filter(i => i.erro).map(i => ({ linha: i.linha, erro: i.erro, opcoes: i.opcoes || [] })),
+      // qtd e termo vão junto: sem eles a pessoa escolhe o produto na tela e perde o número
+      // que já tinha sido lido da linha.
+      problemas: itens.filter(i => i.erro).map(i => ({
+        linha: i.linha, erro: i.erro, opcoes: i.opcoes || [],
+        qtd: i.qtd ?? null, termo: i.termo || null,
+      })),
       total_valor: Number(consolidados.reduce((s, i) => s + i.valor, 0).toFixed(2)),
       total_linhas: linhas.length,
     });

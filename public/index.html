@@ -1392,7 +1392,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v78</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v79</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2468,8 +2468,10 @@ function avisoDataLancamento() {
 }
 
 // ── Lançamento em lote (colar a lista de saídas) ──────────────────
-let loteItens = [];
-function conferidoLote() { return loteItens.length > 0; }
+// A lista fica editável antes de gravar: quantidade, produto e o que descartar. Conferir sem
+// poder corrigir obrigaria a voltar e reescrever o texto inteiro por causa de um item.
+let loteItens = [];      // já com produto definido — são estes que vão ser lançados
+let lotePendentes = [];  // linhas sem produto (ambíguas ou não encontradas), a resolver na tela
 
 async function conferirLote() {
   const texto = document.getElementById('lote-texto').value.trim();
@@ -2479,7 +2481,8 @@ async function conferirLote() {
   try {
     const r = await apiPost('/api/movimentacoes/lote/interpretar', { texto });
     loteItens = r.itens || [];
-    renderLote(r);
+    lotePendentes = r.problemas || [];
+    renderLote();
   } catch (e) {
     toast(e.message || 'Erro ao ler a lista', 'err');
   } finally {
@@ -2487,57 +2490,211 @@ async function conferirLote() {
   }
 }
 
-function renderLote(r) {
+function renderLote() {
   const el = document.getElementById('lote-resultado');
-  const itens = r.itens || [], problemas = r.problemas || [];
-  if (!itens.length && !problemas.length) { el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nada reconhecido na lista.</div>'; return; }
+  if (!loteItens.length && !lotePendentes.length) {
+    el.innerHTML = '<div style="font-size:13px;color:var(--muted)">Nada reconhecido na lista.</div>';
+    return;
+  }
 
   let html = '';
-  if (itens.length) {
-    // Total do que vai ser lançado de verdade — o do servidor é do pedido, e itens aparados
-    // pelo saldo valem menos. Mostrar o número do pedido aqui seria mentir sobre o consumo.
-    const totalReal = itens.reduce((s, i) => s + (i.sem_saldo ? Math.max(0, i.estoque) : i.qtd) * Number(i.custo || 0), 0);
-    html += `<div style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px">${itens.length} produto(s) · R$ ${totalReal.toFixed(2)}</div>`;
-    for (const it of itens) {
-      // Sem saldo não é erro aqui: baixa o que existe e zera. O que a tela precisa deixar
-      // claro é o que vai ser lançado de verdade, não o que foi pedido.
+  if (loteItens.length) {
+    const totalReal = loteItens.reduce((s, i) => s + Math.max(0, loteQtdReal(i)) * Number(i.custo || 0), 0);
+    html += '<div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">' +
+      '<span style="font-size:12px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.6px">' +
+      loteItens.length + ' produto(s)</span>' +
+      '<span style="font-size:14px;font-weight:800">R$ ' + totalReal.toFixed(2) + '</span></div>';
+
+    loteItens.forEach((it, idx) => {
+      // Sem saldo não é erro: baixa o que existe e zera. A tela mostra o que VAI ser lançado.
       const vaiZerar = it.sem_saldo && it.estoque > 0;
       const nadaAZerar = it.sem_saldo && it.estoque <= 0;
-      const qtdReal = vaiZerar ? it.estoque : it.qtd;
-      const valorReal = vaiZerar ? Number((it.estoque * it.custo).toFixed(2)) : it.valor;
+      const qtdReal = loteQtdReal(it);
+      const valorReal = Number((Math.max(0, qtdReal) * Number(it.custo || 0)).toFixed(2));
       const cor = nadaAZerar ? '#e85d26' : vaiZerar ? '#b8860b' : 'var(--text)';
-      const juntou = it.linhas.length > 1 ? ` <span style="color:var(--muted)">(${it.linhas.length} linhas somadas)</span>` : '';
-      html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
-        `<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;color:${cor};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${escapeHtml(it.nome)}${juntou}</div>` +
-        `<div style="font-size:10px;color:var(--muted)">estoque ${fmt(it.estoque)} ${escapeHtml(it.unidade)}` +
-        (vaiZerar ? ` · <b style="color:#b8860b">pediu ${fmt(it.qtd)} — vai zerar</b>` : '') +
-        (nadaAZerar ? ' · <b style="color:#e85d26">já está zerado</b>' : '') + '</div></div>' +
-        `<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:${cor}">-${fmt(qtdReal)} ${escapeHtml(it.unidade)}</div>` +
-        `<div style="font-size:10px;color:var(--muted)">R$ ${Number(valorReal).toFixed(2)}</div></div></div>`;
-    }
-    const zerando = itens.filter(i => i.sem_saldo && i.estoque > 0).length;
-    const jaZerados = itens.filter(i => i.sem_saldo && i.estoque <= 0).length;
-    if (zerando) html += `<div style="font-size:11px;color:#b8860b;margin:6px 0">⚠️ ${zerando} item(ns) com saída maior que o saldo: vai baixar o que tem e zerar. Fica registrado no histórico o quanto foi pedido.</div>`;
-    if (jaZerados) html += `<div style="font-size:11px;color:#e85d26;margin:6px 0">${jaZerados} item(ns) já estão zerados no estoque — esses não têm o que baixar e não serão lançados.</div>`;
+      const juntou = (it.linhas && it.linhas.length > 1) ? ' <span style="color:var(--muted);font-weight:400">(' + it.linhas.length + ' linhas somadas)</span>' : '';
+      html +=
+        '<div style="padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+          '<div style="display:flex;align-items:center;gap:8px">' +
+            '<div style="flex:1;min-width:0">' +
+              '<div style="font-size:13px;font-weight:600;color:' + cor + ';white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' +
+                escapeHtml(it.nome) + juntou + '</div>' +
+              '<div style="font-size:10px;color:var(--muted)">estoque ' + fmt(it.estoque) + ' ' + escapeHtml(it.unidade) +
+                (vaiZerar ? ' · <b style="color:#b8860b">pediu ' + fmt(it.qtd) + ' — vai zerar</b>' : '') +
+                (nadaAZerar ? ' · <b style="color:#e85d26">já está zerado</b>' : '') +
+              '</div>' +
+            '</div>' +
+            '<input type="text" inputmode="decimal" autocomplete="off" value="' + fmt(it.qtd) + '"' +
+              ' onchange="loteEditarQtd(' + idx + ', this.value)"' +
+              ' style="width:78px;text-align:right;padding:7px 8px;border-radius:7px;border:1.5px solid var(--border);background:var(--s2);color:var(--text);font-size:13px;font-weight:700">' +
+            '<span style="font-size:11px;color:var(--muted);min-width:26px">' + escapeHtml(it.unidade) + '</span>' +
+            '<button onclick="loteRemover(' + idx + ')" title="tirar da lista"' +
+              ' style="background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0 2px;line-height:1">×</button>' +
+          '</div>' +
+          '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">' +
+            '<button onclick="loteTrocarProduto(' + idx + ')"' +
+              ' style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:700;cursor:pointer;padding:0">trocar produto</button>' +
+            '<span style="font-size:11px;color:var(--muted);font-weight:600">R$ ' + valorReal.toFixed(2) + '</span>' +
+          '</div>' +
+        '</div>';
+    });
+
+    const zerando = loteItens.filter(i => i.sem_saldo && i.estoque > 0).length;
+    const jaZerados = loteItens.filter(i => i.sem_saldo && i.estoque <= 0).length;
+    if (zerando) html += '<div style="font-size:11px;color:#b8860b;margin:6px 0">⚠️ ' + zerando + ' item(ns) com saída maior que o saldo: baixa o que tem e zera. Fica registrado no histórico o quanto foi pedido.</div>';
+    if (jaZerados) html += '<div style="font-size:11px;color:#e85d26;margin:6px 0">' + jaZerados + ' item(ns) já estão zerados — não têm o que baixar e não serão lançados.</div>';
   }
-  if (problemas.length) {
-    html += `<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:.6px;margin:10px 0 6px">${problemas.length} linha(s) que não entendi</div>`;
-    for (const p of problemas) {
+
+  // Linhas sem produto definido: em vez de só reclamar, deixa resolver aqui mesmo.
+  if (lotePendentes.length) {
+    html += '<div style="font-size:12px;font-weight:800;color:#e85d26;text-transform:uppercase;letter-spacing:.6px;margin:12px 0 6px">' +
+      lotePendentes.length + ' linha(s) pra resolver</div>';
+    lotePendentes.forEach((p, idx) => {
       html += '<div style="padding:8px 10px;background:rgba(232,93,38,0.08);border-radius:8px;margin-bottom:5px">' +
-        `<div style="font-size:12px;font-weight:600">${escapeHtml(p.linha)}</div>` +
-        `<div style="font-size:10px;color:var(--muted)">${escapeHtml(p.erro)}` +
-        (p.opcoes && p.opcoes.length ? ' — pode ser: ' + p.opcoes.slice(0, 4).map(o => escapeHtml(o.nome)).join(' | ') : '') +
+        '<div style="font-size:12px;font-weight:600">' + escapeHtml(p.linha) + '</div>' +
+        '<div style="font-size:10px;color:var(--muted);margin-bottom:6px">' + escapeHtml(p.erro) + '</div>';
+      if (p.opcoes && p.opcoes.length) {
+        html += '<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:5px">' +
+          p.opcoes.map((o, oi) =>
+            '<button onclick="loteResolverCom(' + idx + ',' + oi + ')"' +
+            ' style="font-size:11px;font-weight:700;padding:5px 9px;border-radius:6px;border:1.5px solid var(--border);background:var(--s2);color:var(--text);cursor:pointer">' +
+            escapeHtml(o.nome) + '</button>').join('') + '</div>';
+      }
+      html += '<div style="display:flex;gap:6px;align-items:center">' +
+        '<button onclick="loteBuscarPara(' + idx + ')"' +
+          ' style="background:none;border:none;color:var(--accent);font-size:11px;font-weight:700;cursor:pointer;padding:0">procurar produto</button>' +
+        '<button onclick="loteDescartar(' + idx + ')"' +
+          ' style="background:none;border:none;color:var(--muted);font-size:11px;font-weight:700;cursor:pointer;padding:0;margin-left:auto">descartar linha</button>' +
         '</div></div>';
-    }
-    html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Essas linhas <b>não</b> serão lançadas. Corrija o texto e confira de novo, ou lance esses itens na mão.</div>';
+    });
+    html += '<div style="font-size:11px;color:var(--muted);margin-bottom:6px">Enquanto ficarem aqui, essas linhas <b>não</b> serão lançadas.</div>';
   }
-  // Item que vai zerar CONTA como lançável — a mercadoria saiu, o estoque é que estava atrás.
-  // Só fica de fora o que já está zerado (não há o que baixar).
+
   const lancaveis = loteLancaveis().length;
   if (lancaveis) {
-    html += `<button class="btn-lancar saida" style="margin-top:8px" onclick="lancarLoteSaidas()">⬇️ LANÇAR ${lancaveis} ITEM(NS)</button>`;
+    html += '<button class="btn-lancar saida" style="margin-top:8px" onclick="lancarLoteSaidas()">⬇️ LANÇAR ' + lancaveis + ' ITEM(NS)</button>';
   }
   el.innerHTML = html;
+}
+
+// ── Edição da lista antes de lançar ───────────────────────────────
+// Conferir sem poder corrigir obriga a voltar e reescrever o texto todo; o normal é a lista
+// vir quase certa e faltar um ajuste de quantidade ou a escolha entre dois produtos parecidos.
+function loteEditarQtd(idx, valor) {
+  const it = loteItens[idx];
+  if (!it) return;
+  const q = numQtd(valor);
+  if (!isFinite(q) || q <= 0) { toast('Quantidade inválida', 'err'); renderLote(); return; }
+  it.qtd = Number(q.toFixed(3));
+  it.sem_saldo = it.qtd > it.estoque;
+  it.valor = Number((it.qtd * Number(it.custo || 0)).toFixed(2));
+  renderLote();
+}
+
+function loteRemover(idx) {
+  loteItens.splice(idx, 1);
+  renderLote();
+}
+
+function loteDescartar(idx) {
+  lotePendentes.splice(idx, 1);
+  renderLote();
+}
+
+// Junta com o item que já existir do mesmo produto, senão a mesma comida entra duas vezes.
+function loteAdicionarProduto(produto, qtd, linha) {
+  const existente = loteItens.find(i => i.produto_id === produto.id);
+  if (existente) {
+    existente.qtd = Number((existente.qtd + qtd).toFixed(3));
+    existente.sem_saldo = existente.qtd > existente.estoque;
+    existente.valor = Number((existente.qtd * Number(existente.custo || 0)).toFixed(2));
+    existente.linhas = (existente.linhas || []).concat(linha ? [linha] : []);
+    return;
+  }
+  const estoque = Number(produto.qtd);
+  const custo = Number(produto.custo || 0);
+  loteItens.push({
+    produto_id: produto.id, nome: produto.nome, unidade: produto.unidade,
+    qtd, estoque, custo, valor: Number((qtd * custo).toFixed(2)),
+    sem_saldo: qtd > estoque, linhas: linha ? [linha] : [], via: 'manual',
+  });
+}
+
+function loteResolverCom(idxPendente, idxOpcao) {
+  const p = lotePendentes[idxPendente];
+  if (!p || !p.opcoes || !p.opcoes[idxOpcao]) return;
+  const qtd = Number(p.qtd);
+  if (!isFinite(qtd) || qtd <= 0) { toast('Essa linha não tem quantidade — corrija o texto', 'err'); return; }
+  loteAdicionarProduto(p.opcoes[idxOpcao], qtd, p.linha);
+  lotePendentes.splice(idxPendente, 1);
+  renderLote();
+}
+
+async function loteBuscarPara(idxPendente) {
+  const p = lotePendentes[idxPendente];
+  if (!p) return;
+  const qtd = Number(p.qtd);
+  if (!isFinite(qtd) || qtd <= 0) { toast('Essa linha não tem quantidade — corrija o texto', 'err'); return; }
+  const escolhido = await loteEscolherProduto(p.termo || p.linha);
+  if (!escolhido) return;
+  loteAdicionarProduto(escolhido, qtd, p.linha);
+  lotePendentes.splice(idxPendente, 1);
+  renderLote();
+}
+
+async function loteTrocarProduto(idx) {
+  const it = loteItens[idx];
+  if (!it) return;
+  const escolhido = await loteEscolherProduto(it.nome);
+  if (!escolhido || escolhido.id === it.produto_id) return;
+  const qtd = it.qtd;
+  loteItens.splice(idx, 1);
+  loteAdicionarProduto(escolhido, qtd, (it.linhas || [])[0]);
+  renderLote();
+}
+
+// Busca com a mesma rota da tela de Lançar (respeita apelidos cadastrados).
+function loteEscolherProduto(termoInicial) {
+  return new Promise(resolve => {
+    const fundo = document.createElement('div');
+    fundo.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:flex-start;justify-content:center;padding:60px 16px';
+    fundo.innerHTML =
+      '<div style="background:var(--s0,#fff);border-radius:12px;width:100%;max-width:460px;padding:14px;max-height:70vh;display:flex;flex-direction:column">' +
+        '<div style="font-size:14px;font-weight:800;margin-bottom:8px">Escolher produto</div>' +
+        '<input id="lote-busca-prod" type="text" placeholder="digite pelo menos 2 letras" autocomplete="off"' +
+          ' style="padding:11px;border-radius:8px;border:1.5px solid var(--border);background:var(--s2);color:var(--text);font-size:14px">' +
+        '<div id="lote-busca-res" style="margin-top:8px;overflow-y:auto;flex:1"></div>' +
+        '<button id="lote-busca-cancelar" style="margin-top:8px;padding:10px;border-radius:8px;border:1.5px solid var(--border);background:var(--s2);color:var(--text);font-weight:700;cursor:pointer">Cancelar</button>' +
+      '</div>';
+    document.body.appendChild(fundo);
+    const inp = fundo.querySelector('#lote-busca-prod');
+    const res = fundo.querySelector('#lote-busca-res');
+    const fechar = (v) => { document.body.removeChild(fundo); resolve(v); };
+    fundo.querySelector('#lote-busca-cancelar').onclick = () => fechar(null);
+    fundo.onclick = (e) => { if (e.target === fundo) fechar(null); };
+
+    let timer = null;
+    const buscar = async () => {
+      const q = inp.value.trim();
+      if (q.length < 2) { res.innerHTML = ''; return; }
+      try {
+        const lista = await api('/api/produtos/buscar?q=' + encodeURIComponent(q));
+        res.innerHTML = (lista || []).length
+          ? lista.map((p, i) =>
+              '<div data-i="' + i + '" style="padding:9px 10px;background:var(--s1);border-radius:8px;margin-bottom:4px;cursor:pointer">' +
+              '<div style="font-size:13px;font-weight:600">' + escapeHtml(p.nome) + '</div>' +
+              '<div style="font-size:10px;color:var(--muted)">' + escapeHtml(p.categoria || '') + ' · estoque ' + fmt(p.qtd) + ' ' + escapeHtml(p.unidade) + '</div></div>').join('')
+          : '<div style="font-size:12px;color:var(--muted);padding:6px">nada encontrado</div>';
+        res.querySelectorAll('[data-i]').forEach(d => {
+          d.onclick = () => fechar(lista[Number(d.dataset.i)]);
+        });
+      } catch (e) { res.innerHTML = '<div style="font-size:12px;color:#e85d26;padding:6px">erro ao buscar</div>'; }
+    };
+    inp.oninput = () => { clearTimeout(timer); timer = setTimeout(buscar, 250); };
+    inp.value = String(termoInicial || '').slice(0, 40);
+    inp.focus();
+    if (inp.value.length >= 2) buscar();
+  });
 }
 
 function loteLancaveis() { return loteItens.filter(i => i.estoque > 0); }
@@ -2575,7 +2732,7 @@ async function lancarLoteSaidas() {
     }
     document.getElementById('lote-texto').value = '';
     document.getElementById('lote-resultado').innerHTML = '';
-    loteItens = [];
+    loteItens = []; lotePendentes = [];
     await loadDash();
     if (document.getElementById('p-estoque').classList.contains('active')) await loadEstoque();
     if (document.getElementById('p-hist').classList.contains('active')) await loadHist();
