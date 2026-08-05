@@ -12,6 +12,26 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
+// ==================== REDE DE SEGURANÇA POR REQUISIÇÃO ====================
+// Achado em 05/08 testando multi-tenant: tenant.js lança TenantError SÍNCRONO
+// (não devolve {data,error} como o supabase-js normal) quando falta contexto de
+// restaurante -- ex.: superadmin acessando rota de dado sem ter escolhido um
+// cliente. A maioria das ~94 rotas nunca precisou de try/catch porque antes do
+// multi-tenant nada dentro delas lançava exceção. Express 4 NÃO encaminha erro de
+// handler async sozinho pro middleware de erro -- sem isso, a conexão fica
+// pendurada pra sempre (o cliente nunca recebe resposta) e o único sinal é um
+// unhandledRejection no log, sem ninguém do lado do usuário saber o que houve.
+// Envolve toda rota registrada daqui pra frente: throw ou promise rejeitada vira
+// next(err) em vez de conexão pendurada.
+for (const metodo of ['get', 'post', 'put', 'delete', 'patch']) {
+  const original = app[metodo].bind(app);
+  app[metodo] = (caminho, ...handlers) => original(caminho, ...handlers.map(h =>
+    typeof h === 'function'
+      ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next)
+      : h
+  ));
+}
+
 // ==================== REDE DE SEGURANÇA GLOBAL ====================
 // Impede que UMA requisição com erro derrube o processo inteiro (Node 22 mata o
 // processo em unhandledRejection por padrão). Loga e mantém o servidor vivo.
@@ -6212,6 +6232,18 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
 });
 
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
+
+// Middleware de erro do Express (4 argumentos) -- é aqui que o next(err) do
+// wrapper acima (e qualquer catch(next) explícito nas rotas) desemboca. Sem
+// isso o Express usaria a página de erro padrão em HTML; aqui a resposta segue
+// sempre JSON, como o resto da API. TenantError vira 400 (pedido mal formado
+// pelo cliente -- faltou tenant), o resto 500.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('[erro não tratado]', req.method, req.originalUrl, err && err.stack || err);
+  const status = err && err.name === 'TenantError' ? 400 : (err && err.statusCode) || 500;
+  res.status(status).json({ erro: (err && err.message) || 'Erro interno.' });
+});
 
 // ==================== START ====================
 // No modo multi-restaurante o seed não se aplica: produtos e usuários pertencem a um
