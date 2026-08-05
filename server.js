@@ -462,6 +462,46 @@ app.post('/api/change-password', auth, async (req, res) => {
   res.json({ ok: true });
 });
 
+// Status de estoque — FONTE ÚNICA (05/08). Antes essa mesma conta (zerado / crítico
+// = qtd ≤ 50% do mínimo / atenção / ok) estava copiada solta em 13 lugares do arquivo
+// (dashboard, lista de produtos, assistente de IA, comandos de WhatsApp, relatório
+// diário, CSV, PDF...). Duas delas já tinham ficado pra trás sem o `qtd > 0` — um
+// produto zerado contava como "crítico" também. Toda tela/relatório/comando agora
+// chama esta função; mudar o limiar aqui muda em todo canto de uma vez.
+function statusProd(p) {
+  const qtd = Number(p.qtd), minimo = Number(p.minimo);
+  if (qtd === 0) return 'ZERADO';
+  if (qtd <= minimo * 0.5) return 'CRITICO';
+  if (qtd < minimo) return 'ATENCAO';
+  return 'OK';
+}
+// Conta zerados/críticos/atenção/ok de uma lista de produtos — usado pelos resumos
+// (dashboard, backup, relatório diário, assistente de IA).
+function contarStatus(produtos) {
+  const c = { zerados: 0, criticos: 0, atencao: 0, ok: 0 };
+  for (const p of produtos) {
+    const st = statusProd(p);
+    if (st === 'ZERADO') c.zerados++;
+    else if (st === 'CRITICO') c.criticos++;
+    else if (st === 'ATENCAO') c.atencao++;
+    else c.ok++;
+  }
+  return c;
+}
+// 'ZERADO'->'zerados' etc — só o "atencao"/"ok" batem por acaso no toLowerCase(),
+// zerado/critico viram singular e não existem nos contadores por categoria (NaN
+// silencioso). Mapa explícito em vez de depender de coincidência de plural.
+const STATUS_PARA_CHAVE = { ZERADO: 'zerados', CRITICO: 'criticos', ATENCAO: 'atencao', OK: 'ok' };
+const STATUS_EMOJI = { ZERADO: '🔴 ZERADO', CRITICO: '🟠 CRÍTICO', ATENCAO: '🟡 ATENÇÃO', OK: '🟢 OK' };
+// "Precisa comprar" (zerado OU crítico) — regra das listas de compra (CSV, PDF e o
+// comando de WhatsApp "compras"). Exige minimo>0: sem mínimo cadastrado não dá pra
+// calcular quanto sugerir comprar (achado em auditoria anterior — ver comentários
+// nos 3 call sites originais).
+function precisaComprar(p) {
+  const minimo = Number(p.minimo);
+  return minimo > 0 && Number(p.qtd) <= minimo * 0.5;
+}
+
 // ==================== ROTAS PRODUTOS ====================
 app.get('/api/produtos', auth, async (req, res) => {
   const { cat, status, q, arquivados } = req.query;
@@ -496,10 +536,10 @@ app.get('/api/produtos', auth, async (req, res) => {
   }
 
   let filtered = rows;
-  if (status === 'zerado') filtered = rows.filter(r => r.qtd === 0);
-  else if (status === 'critico') filtered = rows.filter(r => r.qtd > 0 && r.qtd <= r.minimo * 0.5);
-  else if (status === 'atencao') filtered = rows.filter(r => r.qtd > r.minimo * 0.5 && r.qtd < r.minimo);
-  else if (status === 'ok') filtered = rows.filter(r => r.qtd >= r.minimo);
+  if (status === 'zerado') filtered = rows.filter(r => statusProd(r) === 'ZERADO');
+  else if (status === 'critico') filtered = rows.filter(r => statusProd(r) === 'CRITICO');
+  else if (status === 'atencao') filtered = rows.filter(r => statusProd(r) === 'ATENCAO');
+  else if (status === 'ok') filtered = rows.filter(r => statusProd(r) === 'OK');
   res.json(filtered);
 });
 
@@ -878,7 +918,7 @@ app.get('/api/produtos/:id/resumo', auth, async (req, res) => {
   const consumo30 = agg.saida + agg.perda;
   const mediaDiaria = consumo30 / 30;
   const qtd = Number(p.qtd), minimo = Number(p.minimo);
-  const status = qtd === 0 ? 'ZERADO' : qtd <= minimo * 0.5 ? 'CRITICO' : qtd < minimo ? 'ATENCAO' : 'OK';
+  const status = statusProd(p);
   const cobertura = mediaDiaria > 0 ? Math.floor(qtd / mediaDiaria) : null; // dias que o estoque atual dura
   res.json({
     produto: { id: p.id, nome: p.nome, codigo: p.codigo || null, categoria: p.categoria, unidade: p.unidade,
@@ -1260,9 +1300,7 @@ app.get('/api/dashboard', auth, async (req, res) => {
   // no dashboard, sem bater com o que a pessoa via ao entrar na lista de verdade.
   const { data: produtos } = await supabase.from('produtos').select('qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
   const all = produtos || [];
-  const zerados = all.filter(p => Number(p.qtd) === 0).length;
-  const criticos = all.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
-  const atencao = all.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+  const { zerados, criticos, atencao } = contarStatus(all);
   const valorTotal = all.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
   const hojeSP = dateSP();
   const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true })
@@ -3584,10 +3622,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     // (descontinuado) entrava no CSV misturado com o estoque de verdade.
     const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Custo Unit.','Valor Total','Status'];
-    rows = (data || []).map(r => {
-      let st = Number(r.qtd) === 0 ? 'ZERADO' : Number(r.qtd) <= Number(r.minimo) * 0.5 ? 'CRITICO' : Number(r.qtd) < Number(r.minimo) ? 'ATENCAO' : 'OK';
-      return [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, r.custo, (Number(r.qtd) * Number(r.custo)).toFixed(2), st];
-    });
+    rows = (data || []).map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, r.custo, (Number(r.qtd) * Number(r.custo)).toFixed(2), statusProd(r)]);
     filename = 'estoque_toca_coelho.csv';
   } else if (tipo === 'movimentacoes') {
     const data = await fetchTodas(() => supabase.from('movimentacoes').select('*').order('id', { ascending: false }));
@@ -3599,10 +3634,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     // algo que o restaurante nem usa mais).
     const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     headers = ['Produto','Categoria','Unidade','Qtd Atual','Mínimo','Sugerido Comprar'];
-    // minimo > 0 exigido — sem isso, produto sem mínimo definido (comum: 80 itens sem
-    // movimento) entrava aqui sugerindo "comprar 0" (mesma inconsistência do relatório HTML;
-    // o comando de WhatsApp já exigia minimo>0 corretamente, aqui não exigia).
-    rows = (data || []).filter(r => Number(r.minimo) > 0 && Number(r.qtd) <= Number(r.minimo) * 0.5)
+    rows = (data || []).filter(precisaComprar)
       .map(r => [r.nome, r.categoria, r.unidade, r.qtd, r.minimo, Math.max(0, Number(r.minimo) * 2 - Number(r.qtd)).toFixed(3)]);
     filename = 'lista_compras_toca_coelho.csv';
   } else if (tipo === 'fechamentos') {
@@ -3721,9 +3753,7 @@ app.get('/api/relatorio/:tipo', auth, async (req, res) => {
       const { data } = await supabase.from('produtos').select('nome, categoria, unidade, qtd, minimo, custo')
         .or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
       let prods = data || [];
-      // minimo > 0 exigido — mesma correção do CSV: sem mínimo definido não dá pra sugerir
-      // quanto comprar (o comando de WhatsApp já filtrava certo; aqui não filtrava).
-      if (ehCompras) prods = prods.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);  // zerados + críticos
+      if (ehCompras) prods = prods.filter(precisaComprar);  // zerados + críticos, minimo>0
       const porCat = {};
       for (const p of prods) (porCat[p.categoria || 'Sem categoria'] = porCat[p.categoria || 'Sem categoria'] || []).push(p);
       const cont = { ZERADO: 0, CRITICO: 0, ATENCAO: 0, OK: 0 };
@@ -4825,7 +4855,6 @@ async function buscarProdutos(termo) {
   const { data: parcial } = await supabase.from('produtos').select(SEL_PROD).ilike('nome_search', `%${qn}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(10);
   return { produtos: parcial || [], via: 'parcial' };
 }
-function statusProd(p) { return Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK'; }
 
 // Acha UM produto pelo texto digitado — acento/caixa-insensível, aceita código (BOV-01) e apelido.
 // Retorna { prod } (registro completo) quando a identificação é certa; { opcoes } quando ambíguo; {} quando não achou.
@@ -4870,10 +4899,7 @@ async function executarFerramenta(nome, input, user) {
         let q = supabase.from('produtos').select('id, nome, codigo, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
         if (input.categoria) q = q.eq('categoria', sanitizeText(input.categoria, 80));
         const { data } = await q.limit(500);
-        let res = (data || []).map(p => {
-          const st = Number(p.qtd) === 0 ? 'ZERADO' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'CRITICO' : Number(p.qtd) < Number(p.minimo) ? 'ATENCAO' : 'OK';
-          return { ...p, status: st };
-        });
+        let res = (data || []).map(p => ({ ...p, status: statusProd(p) }));
         if (input.status === 'zerado') res = res.filter(p => p.status === 'ZERADO');
         else if (input.status === 'critico') res = res.filter(p => p.status === 'CRITICO');
         else if (input.status === 'atencao') res = res.filter(p => p.status === 'ATENCAO');
@@ -4918,9 +4944,7 @@ async function executarFerramenta(nome, input, user) {
       case 'ver_dashboard': {
         const { data: all } = await supabase.from('produtos').select('qtd, minimo, custo').or('ativo.eq.1,ativo.is.null');
         const prods = all || [];
-        const zerados = prods.filter(p => Number(p.qtd) === 0).length;
-        const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length;
-        const atencao = prods.filter(p => Number(p.qtd) > Number(p.minimo) * 0.5 && Number(p.qtd) < Number(p.minimo)).length;
+        const { zerados, criticos, atencao } = contarStatus(prods);
         const valor = Number(prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0).toFixed(2));
         const hSP = dateSP();
         const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hSP + 'T00:00:00-03:00').lte('created_at', hSP + 'T23:59:59-03:00');
@@ -5001,8 +5025,7 @@ async function executarFerramenta(nome, input, user) {
           const c = catMap[p.categoria];
           c.total++;
           c.valor += Number(p.qtd) * Number(p.custo);
-          const st = Number(p.qtd) === 0 ? 'zerados' : Number(p.qtd) <= Number(p.minimo) * 0.5 ? 'criticos' : Number(p.qtd) < Number(p.minimo) ? 'atencao' : 'ok';
-          c[st]++;
+          c[STATUS_PARA_CHAVE[statusProd(p)]]++;
         }
         return { categorias: Object.entries(catMap).sort((a, b) => a[0].localeCompare(b[0])).map(([cat, d]) => ({ categoria: cat, ...d, valor: Number(d.valor.toFixed(2)) })) };
       }
@@ -5792,10 +5815,10 @@ async function criarBackupEstoque(motivo = 'automatico') {
   const { data: produtos } = await supabase.from('produtos').select('id, nome, categoria, unidade, qtd, minimo, custo, ativo');
   if (!produtos || !produtos.length) return null;
   const ativos = produtos.filter(p => p.ativo !== 0);
+  const { zerados, criticos } = contarStatus(ativos);
   const snapshot = { data_backup: nowSP(), motivo, total_produtos: produtos.length,
     valor_total: ativos.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0),
-    zerados: ativos.filter(p => Number(p.qtd) === 0).length,
-    criticos: ativos.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5).length,
+    zerados, criticos,
     dados: JSON.stringify(produtos) };
   const { data, error } = await supabase.from('backups_estoque').insert(snapshot).select('id, data_backup').single();
   if (error) { console.error('❌ Erro no backup:', error.message); return null; }
@@ -5863,7 +5886,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     if (!produto_nome) return res.json({ resposta: 'Me diz o nome do produto que quer consultar.' });
     const { data: resultados } = await supabase.from('produtos').select('nome, categoria, qtd, unidade, minimo, custo').ilike('nome_search', `%${normalizeSearch(produto_nome)}%`).or('ativo.eq.1,ativo.is.null').order('nome').limit(5);
     if (!resultados || !resultados.length) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
-    const linhas = resultados.map(p => { const st = Number(p.qtd) === 0 ? '🔴 ZERADO' : Number(p.qtd) <= Number(p.minimo)*0.5 ? '🟠 CRÍTICO' : Number(p.qtd) < Number(p.minimo) ? '🟡 ATENÇÃO' : '🟢 OK'; return `📦 *${p.nome}*\n   ${p.qtd} ${p.unidade} (mín: ${p.minimo}) ${st}\n   Custo: R$${Number(p.custo).toFixed(2)}`; });
+    const linhas = resultados.map(p => `📦 *${p.nome}*\n   ${p.qtd} ${p.unidade} (mín: ${p.minimo}) ${STATUS_EMOJI[statusProd(p)]}\n   Custo: R$${Number(p.custo).toFixed(2)}`);
     return res.json({ resposta: linhas.join('\n\n') });
   }
 
@@ -5872,7 +5895,8 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     const prods = all || [];
     const hojeSP = dateSP();
     const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
-    return res.json({ resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n📦 Total: ${prods.length}\n🔴 Zerados: ${prods.filter(p=>Number(p.qtd)===0).length}\n🟠 Críticos: ${prods.filter(p=>Number(p.qtd)>0&&Number(p.qtd)<=Number(p.minimo)*0.5).length}\n🟡 Atenção: ${prods.filter(p=>Number(p.qtd)>Number(p.minimo)*0.5&&Number(p.qtd)<Number(p.minimo)).length}\n💰 Valor total: R$ ${prods.reduce((s,p)=>s+Number(p.qtd)*Number(p.custo),0).toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje||0}` });
+    const { zerados, criticos, atencao } = contarStatus(prods);
+    return res.json({ resposta: `📊 *RESUMO DO ESTOQUE*\n📅 ${hojeSP}\n\n📦 Total: ${prods.length}\n🔴 Zerados: ${zerados}\n🟠 Críticos: ${criticos}\n🟡 Atenção: ${atencao}\n💰 Valor total: R$ ${prods.reduce((s,p)=>s+Number(p.qtd)*Number(p.custo),0).toFixed(2)}\n📋 Lançamentos hoje: ${lancHoje||0}` });
   }
 
   if (acao === 'zerados') {
@@ -5883,7 +5907,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
 
   if (acao === 'criticos') {
     const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
-    const crit = (data || []).filter(p => Number(p.qtd) <= Number(p.minimo) * 0.5);
+    const crit = (data || []).filter(p => statusProd(p) === 'CRITICO');
     if (!crit.length) return res.json({ resposta: '✅ Nenhum produto em nível crítico!' });
     return res.json({ resposta: `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${crit.map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}` });
   }
@@ -5943,7 +5967,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
     const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade, grupo_troca').or('ativo.eq.1,ativo.is.null').order('categoria').order('nome');
     const todos = data || [];
     const semMinimo = todos.filter(p => Number(p.minimo) <= 0 && Number(p.qtd) === 0).length;
-    const baixos = todos.filter(p => Number(p.minimo) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+    const baixos = todos.filter(precisaComprar);
     // Grupo de troca: se um irmão tem estoque, o item baixo sai do urgente (você escolhe pelo preço).
     const estoquePorGrupo = {};
     for (const p of todos) {
@@ -6161,8 +6185,8 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
   const { data: all } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, custo, unidade').or('ativo.eq.1,ativo.is.null');
   const prods = all || [];
-  const zerados = prods.filter(p => Number(p.qtd) === 0);
-  const criticos = prods.filter(p => Number(p.qtd) > 0 && Number(p.qtd) <= Number(p.minimo) * 0.5);
+  const zerados = prods.filter(p => statusProd(p) === 'ZERADO');
+  const criticos = prods.filter(p => statusProd(p) === 'CRITICO');
   const valor = prods.reduce((s, p) => s + Number(p.qtd) * Number(p.custo), 0);
   const hojeSP = dateSP();
   const { count: lancHoje } = await supabase.from('movimentacoes').select('id', { count: 'exact', head: true }).gte('created_at', hojeSP + 'T00:00:00-03:00').lte('created_at', hojeSP + 'T23:59:59-03:00');
