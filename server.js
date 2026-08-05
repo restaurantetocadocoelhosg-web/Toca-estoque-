@@ -894,6 +894,15 @@ app.get('/api/produtos/:id/resumo', auth, async (req, res) => {
   });
 });
 
+// Produto está sendo contado agora num inventário em aberto? Usado pra bloquear Ajuste
+// manual concorrente (REST e assistente de IA) — ver comentário na chamada abaixo.
+async function inventarioAbertoDoProduto(produtoId) {
+  const { data } = await supabase.from('inventario_itens')
+    .select('inventario_id, inventarios!inner(id, status)')
+    .eq('produto_id', produtoId).eq('inventarios.status', 'aberto').limit(1);
+  return (data && data.length) ? data[0].inventario_id : null;
+}
+
 // ==================== ROTAS MOVIMENTAÇÕES ====================
 app.post('/api/movimentacoes', auth, async (req, res) => {
   const produto_id = Number(req.body?.produto_id || 0);
@@ -926,6 +935,26 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     ? null : parseNonNegativeNumber(req.body?.custo);
   if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null)
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
+
+  // Trava de inventário aberto: Ajuste manual (tela de Lançar) num produto que está
+  // sendo contado agora num inventário em aberto. SEM bypass por forcar — a contagem
+  // em andamento é a fonte da verdade, e um Ajuste concorrente cria exatamente o
+  // problema descoberto em 03/08: durante o Inventário #31, um Ajuste manual pôs Coca
+  // KS Normal e Coca KS Zero em 120 un (ambas não tinham se mexido há dias, então a
+  // trava de "movimento recente" abaixo nem disparava). Por ~50min o sistema mostrou
+  // 120un de cada — nenhuma apareceria como Crítico se alguém checasse a lista nesse
+  // meio-tempo — até o fechamento do inventário corrigir pra 13 e 14 (real). Bloqueia
+  // aqui: quem quiser corrigir agora precisa fechar o inventário, ou atualizar a
+  // contagem na tela dele (que não toca no saldo até o fechamento).
+  if (tipo === 'Ajuste') {
+    const invAberto = await inventarioAbertoDoProduto(prod.id);
+    if (invAberto) {
+      return res.status(409).json({
+        alerta: true, codigo: 'PRODUTO_EM_INVENTARIO_ABERTO',
+        msg: `${prod.nome} está sendo contado agora no Inventário #${invAberto}, ainda aberto. Ajuste manual bloqueado pra não bater de frente com a contagem — corrija o valor na tela do inventário, ou feche-o primeiro.`
+      });
+    }
+  }
 
   // Trava de contagem desatualizada: Ajuste em produto que se movimentou há pouco.
   // A causa nº1 de "produto que volta": contagem feita ANTES das saídas da noite,
@@ -4991,6 +5020,13 @@ async function executarFerramenta(nome, input, user) {
           opcoes: cands.map(p => ({ codigo: p.codigo, nome: p.nome, qtd: p.qtd, unidade: p.unidade })) };
         const { data: prod } = await supabase.from('produtos').select('*').eq('id', cands[0].id).single();
         if (!prod) return { sucesso: false, erro: `Produto "${nomeBusca}" não encontrado.` };
+        // Mesma trava do endpoint REST: Ajuste não pode bater de frente com uma
+        // contagem de inventário em aberto pra esse produto (achado em 03/08 — ver
+        // comentário completo em /api/movimentacoes).
+        if (tipo === 'Ajuste') {
+          const invAberto = await inventarioAbertoDoProduto(prod.id);
+          if (invAberto) return { sucesso: false, erro: `${prod.nome} está sendo contado agora no Inventário #${invAberto}, ainda aberto. Ajuste manual bloqueado — corrija na tela do inventário ou feche-o primeiro.` };
+        }
         // Trava otimista com retry — mesmo padrão do endpoint REST: dois comandos
         // simultâneos ao assistente não corrompem o estoque.
         let novaQtd, qtdAntes, custoUnit, valor, prodAtual = prod, sucesso = false;
