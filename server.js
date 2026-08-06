@@ -451,6 +451,18 @@ const webhookLimiter = rateLimit({
   message: { erro: 'Muitas requisições. Aguarde 1 minuto.' },
 });
 
+// Achado em 06/08: os 4 webhooks do bot WhatsApp (ler-conta, ler-nota, whatsapp,
+// relatorio-diario) não passam pelo login, então nunca ganhavam contexto de
+// restaurante — com MULTI_TENANT=on, toda consulta neles vinha vazia ("fora do
+// contexto de um restaurante"), quebrando o bot inteiro em silêncio a noite toda.
+// Só o Toca do Coelho (tenant 1) usa WhatsApp hoje, então prende esses 4 webhooks
+// nele. Quando outro restaurante quiser bot próprio, isso precisa virar por
+// número/instância do WhatsApp em vez de fixo — não é só trocar o "1".
+function webhookTenant1(req, res, next) {
+  if (!MULTI_TENANT) return next();
+  comContexto(1, next);
+}
+
 // ==================== AUTH ROUTES ====================
 app.post('/api/login', loginLimiter, async (req, res) => {
   const username = sanitizeText(req.body?.username, 40).toLowerCase();
@@ -4774,7 +4786,7 @@ async function classificarConta({ fornecedor, grupo, categoria, descricao }) {
   return { grupo: null, categoria: null, confianca: 'nenhuma' };
 }
 
-app.post('/api/webhook/ler-conta', webhookLimiter, async (req, res) => {
+app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenant1, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
@@ -4954,7 +4966,7 @@ app.post('/api/conta-pendencias/:id/ignorar', auth, requirePerm('contas'), async
   res.json({ ok: true });
 });
 
-app.post('/api/webhook/ler-nota', webhookLimiter, async (req, res) => {
+app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenant1, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
@@ -6288,7 +6300,13 @@ let ultimoBackupDia = '';
 setInterval(async () => {
   const agora = nowSP(), hora = agora.slice(11, 16), dia = agora.slice(0, 10);
   const HORA_BACKUP = process.env.HORA_BACKUP || '18:00';
-  if (hora === HORA_BACKUP && dia !== ultimoBackupDia) { ultimoBackupDia = dia; await criarBackupEstoque('automatico_18h'); }
+  if (hora === HORA_BACKUP && dia !== ultimoBackupDia) {
+    ultimoBackupDia = dia;
+    // Mesmo motivo do webhookTenant1: isso roda fora de requisição, sem contexto de
+    // restaurante. Só o Toca do Coelho (tenant 1) tem backup automático hoje.
+    if (MULTI_TENANT) await comContexto(1, () => criarBackupEstoque('automatico_18h'));
+    else await criarBackupEstoque('automatico_18h');
+  }
 }, 60 * 1000);
 
 app.post('/api/backup', auth, requireRole('admin', 'gerente'), async (req, res) => {
@@ -6332,7 +6350,7 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 if (!WEBHOOK_SECRET) console.error('⚠️ FATAL: WEBHOOK_SECRET não definido — webhook WhatsApp DESATIVADO até configurar no Railway.');
 
-app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
+app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenant1, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
@@ -6637,7 +6655,7 @@ app.post('/api/webhook/whatsapp', webhookLimiter, async (req, res) => {
   res.json({ resposta: `🐰 *Toca do Coelho — Estoque*\n\nComandos: consultar | resumo | zerados | criticos | compras | entrada | saida | fechamento | realidade | conferencia | conferencia_mensal` });
 });
 
-app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
+app.get('/api/webhook/relatorio-diario', webhookLimiter, webhookTenant1, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.query?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
