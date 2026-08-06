@@ -451,16 +451,33 @@ const webhookLimiter = rateLimit({
   message: { erro: 'Muitas requisições. Aguarde 1 minuto.' },
 });
 
-// Achado em 06/08: os 4 webhooks do bot WhatsApp (ler-conta, ler-nota, whatsapp,
-// relatorio-diario) não passam pelo login, então nunca ganhavam contexto de
-// restaurante — com MULTI_TENANT=on, toda consulta neles vinha vazia ("fora do
-// contexto de um restaurante"), quebrando o bot inteiro em silêncio a noite toda.
-// Só o Toca do Coelho (tenant 1) usa WhatsApp hoje, então prende esses 4 webhooks
-// nele. Quando outro restaurante quiser bot próprio, isso precisa virar por
-// número/instância do WhatsApp em vez de fixo — não é só trocar o "1".
+// Achado em 06/08: os webhooks do bot WhatsApp não passam pelo login, então nunca
+// ganhavam contexto de restaurante — com MULTI_TENANT=on, toda consulta neles vinha
+// vazia ("fora do contexto de um restaurante"), quebrando o bot inteiro em silêncio
+// a noite toda. relatorio-diario é só do Toca do Coelho por enquanto (ninguém mais
+// pediu), então fica preso no tenant 1.
 function webhookTenant1(req, res, next) {
   if (!MULTI_TENANT) return next();
   comContexto(1, next);
+}
+
+// ler-conta, ler-nota e o roteador de comandos (whatsapp) já servem mais de um
+// restaurante: cada cliente tem seu próprio grupo, e o n8n manda o id desse grupo
+// (grupo_id = remoteJid do WhatsApp) junto com a mensagem. `whatsapp_grupos` é
+// quem sabe de qual restaurante é cada grupo — cadastro fica em
+// POST /api/whatsapp-grupos, autoatendimento de cada admin pro seu próprio tenant.
+// Grupo não cadastrado (ou n8n antigo sem mandar grupo_id) cai no Toca do Coelho —
+// é o comportamento de sempre, preservado como fallback.
+async function tenantDoGrupo(grupoId) {
+  if (!grupoId) return null;
+  const { data } = await supabase.from('whatsapp_grupos').select('tenant_id').eq('grupo_id', grupoId).maybeSingle();
+  return data ? Number(data.tenant_id) : null;
+}
+async function webhookTenantDoGrupo(req, res, next) {
+  if (!MULTI_TENANT) return next();
+  const grupoId = sanitizeText(req.body?.grupo_id, 60);
+  const tenantId = (await tenantDoGrupo(grupoId)) || 1;
+  comContexto(tenantId, next);
 }
 
 // ==================== AUTH ROUTES ====================
@@ -3562,6 +3579,43 @@ app.put('/api/restaurante', auth, requireRole('admin', 'superadmin'), async (req
   }
 });
 
+// ── GRUPOS DE WHATSAPP DO RESTAURANTE ───────────────────────────────────────
+// Cada admin cadastra o(s) grupo(s) do PRÓPRIO restaurante -- o id do grupo
+// (grupo_id, o remoteJid do WhatsApp) o Rubens consegue puxar via Evolution API
+// na hora de criar o grupo do cliente novo. Sem isso cadastrado, o webhook do
+// bot cai no Toca do Coelho por padrão (ver webhookTenantDoGrupo).
+app.get('/api/whatsapp-grupos', auth, requireRole('admin', 'superadmin'), async (req, res) => {
+  if (!MULTI_TENANT || !req.tenantId) return res.json({ grupos: [] });
+  const { data } = await supabase.from('whatsapp_grupos').select('id, tipo, grupo_id, nome, criado_em').eq('tenant_id', req.tenantId).order('criado_em');
+  res.json({ grupos: data || [] });
+});
+
+app.post('/api/whatsapp-grupos', auth, requireRole('admin', 'superadmin'), async (req, res) => {
+  if (!MULTI_TENANT || !req.tenantId) return res.status(400).json({ erro: 'Indisponível.' });
+  const tipo = req.body?.tipo;
+  const grupo_id = sanitizeText(req.body?.grupo_id, 60);
+  const nome = sanitizeText(req.body?.nome || '', 80) || null;
+  if (!['notas', 'contas'].includes(tipo)) return res.status(400).json({ erro: 'tipo precisa ser "notas" ou "contas".' });
+  if (!grupo_id) return res.status(400).json({ erro: 'grupo_id é obrigatório (o remoteJid do grupo no WhatsApp).' });
+  const { data, error } = await supabase.from('whatsapp_grupos').insert({ tenant_id: req.tenantId, tipo, grupo_id, nome }).select('id').single();
+  if (error) {
+    // grupo_id é único na plataforma inteira: dois restaurantes não podem reusar o mesmo grupo.
+    const msg = /duplicate|unique/i.test(error.message) ? 'Esse grupo já está cadastrado (talvez em outro restaurante).' : 'Erro ao cadastrar o grupo.';
+    return res.status(400).json({ erro: msg });
+  }
+  await audit('whatsapp_grupo_cadastrar', { tipo, grupo_id }, req.user, getClientIp(req));
+  res.json({ ok: true, id: data.id });
+});
+
+app.delete('/api/whatsapp-grupos/:id', auth, requireRole('admin', 'superadmin'), async (req, res) => {
+  if (!MULTI_TENANT || !req.tenantId) return res.status(400).json({ erro: 'Indisponível.' });
+  const { data: g } = await supabase.from('whatsapp_grupos').select('id, tenant_id, grupo_id').eq('id', req.params.id).maybeSingle();
+  if (!g || Number(g.tenant_id) !== Number(req.tenantId)) return res.status(404).json({ erro: 'Grupo não encontrado.' });
+  await supabase.from('whatsapp_grupos').delete().eq('id', g.id);
+  await audit('whatsapp_grupo_remover', { grupo_id: g.grupo_id }, req.user, getClientIp(req));
+  res.json({ ok: true });
+});
+
 // Painel da plataforma — só o superadmin enxerga. Mostra a SAÚDE de cada cliente,
 // não o financeiro dele: o que importa pra operar a plataforma é saber quem está
 // lançando e quem parou. Cliente que deixa de lançar cancela em dois meses, e isso
@@ -4786,7 +4840,7 @@ async function classificarConta({ fornecedor, grupo, categoria, descricao }) {
   return { grupo: null, categoria: null, confianca: 'nenhuma' };
 }
 
-app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenant1, async (req, res) => {
+app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
@@ -4966,7 +5020,7 @@ app.post('/api/conta-pendencias/:id/ignorar', auth, requirePerm('contas'), async
   res.json({ ok: true });
 });
 
-app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenant1, async (req, res) => {
+app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
@@ -6350,7 +6404,7 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 if (!WEBHOOK_SECRET) console.error('⚠️ FATAL: WEBHOOK_SECRET não definido — webhook WhatsApp DESATIVADO até configurar no Railway.');
 
-app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenant1, async (req, res) => {
+app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });

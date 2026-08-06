@@ -28,7 +28,10 @@ const TABELAS_POR_TENANT = new Set([
 
 // Tabelas globais da plataforma — não têm dono e NÃO devem receber filtro.
 // `sessions` é global de propósito: a sessão aponta pro usuário, que já tem dono.
-const TABELAS_GLOBAIS = new Set(['tenants', 'users', 'produtos_modelo', 'sessions']);
+// `whatsapp_grupos` também é global de propósito: é ELA que resolve o tenant a
+// partir do grupo — não dá pra filtrar por tenant algo que serve pra descobrir o
+// tenant (webhook do WhatsApp não tem tenant nenhum até consultar essa tabela).
+const TABELAS_GLOBAIS = new Set(['tenants', 'users', 'produtos_modelo', 'sessions', 'whatsapp_grupos']);
 
 class TenantError extends Error {
   constructor(msg) { super(msg); this.name = 'TenantError'; }
