@@ -12,6 +12,26 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 1);
 
+// ==================== REDE DE SEGURANÇA POR REQUISIÇÃO ====================
+// Achado em 05/08 testando multi-tenant: tenant.js lança TenantError SÍNCRONO
+// (não devolve {data,error} como o supabase-js normal) quando falta contexto de
+// restaurante -- ex.: superadmin acessando rota de dado sem ter escolhido um
+// cliente. A maioria das ~94 rotas nunca precisou de try/catch porque antes do
+// multi-tenant nada dentro delas lançava exceção. Express 4 NÃO encaminha erro de
+// handler async sozinho pro middleware de erro -- sem isso, a conexão fica
+// pendurada pra sempre (o cliente nunca recebe resposta) e o único sinal é um
+// unhandledRejection no log, sem ninguém do lado do usuário saber o que houve.
+// Envolve toda rota registrada daqui pra frente: throw ou promise rejeitada vira
+// next(err) em vez de conexão pendurada.
+for (const metodo of ['get', 'post', 'put', 'delete', 'patch']) {
+  const original = app[metodo].bind(app);
+  app[metodo] = (caminho, ...handlers) => original(caminho, ...handlers.map(h =>
+    typeof h === 'function'
+      ? (req, res, next) => Promise.resolve(h(req, res, next)).catch(next)
+      : h
+  ));
+}
+
 // ==================== REDE DE SEGURANÇA GLOBAL ====================
 // Impede que UMA requisição com erro derrube o processo inteiro (Node 22 mata o
 // processo em unhandledRejection por padrão). Loga e mantém o servidor vivo.
@@ -29,7 +49,22 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
   console.error('❌ SUPABASE_URL e SUPABASE_SERVICE_KEY são obrigatórios!');
   process.exit(1);
 }
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+// ── MULTI-RESTAURANTE ────────────────────────────────────────────────────────
+// Duas variáveis INDEPENDENTES, e isso é proposital:
+//   SUPABASE_SCHEMA  onde estão as tabelas   (public em produção, mt no ambiente isolado)
+//   MULTI_TENANT     liga o isolamento       (on/off)
+//
+// Elas precisam ser separadas porque na implantação real o schema continua sendo
+// `public` COM o multi-tenant ligado. E porque é isso que dá o rollback: se algo
+// der errado depois do deploy, MULTI_TENANT=off devolve o comportamento de hoje na
+// hora — as colunas tenant_id ficam no banco, apenas ignoradas.
+const { clienteMultiTenant, comContexto, middlewareContexto } = require('./tenant');
+const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
+// Restaurante de referência: de onde saem as categorias ao abrir um novo.
+const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
+const MULTI_TENANT = /^(1|on|true|sim)$/i.test(String(process.env.MULTI_TENANT || ''));
+const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, SCHEMA !== 'public' ? { db: { schema: SCHEMA } } : undefined);
+const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
 app.use(cors({ origin: process.env.ALLOWED_ORIGIN || true }));
 app.use(express.json({ limit: '15mb' }));
@@ -168,7 +203,16 @@ function custoSuspeito(custoAtual, custoNovo) {
   };
 }
 
+// No multi-restaurante, o que era único no sistema passa a ser único POR RESTAURANTE.
+// Todo upsert precisa refletir isso na chave de conflito, senão o Postgres reclama
+// ("no unique constraint matching the ON CONFLICT specification") ou — pior — dois
+// restaurantes disputariam a mesma linha.
+const chaveConflito = (cols) => MULTI_TENANT ? 'tenant_id,' + cols : cols;
+
 function permsEfetivas(role, permissoes) {
+  // superadmin administra a PLATAFORMA, não o restaurante. Sem isso ele caía no
+  // fallback de operador e recebia acesso ao app do cliente sem ter escolhido nenhum.
+  if (role === 'superadmin') return Object.fromEntries(PERM_KEYS.map(k => [k, false]));
   const base = permsPorRole(role);
   if (permissoes && typeof permissoes === 'object') {
     for (const k of PERM_KEYS) if (typeof permissoes[k] === 'boolean') base[k] = permissoes[k];
@@ -294,7 +338,8 @@ async function auth(req, res, next) {
   }
 
   const { data: user } = await supabase
-    .from('users').select('id, username, nome, role, active').eq('id', session.user_id).single();
+    .from('users').select(MULTI_TENANT ? 'id, username, nome, role, active, tenant_id' : 'id, username, nome, role, active')
+    .eq('id', session.user_id).single();
   if (!user || !user.active) {
     await deleteSession(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
@@ -303,6 +348,9 @@ async function auth(req, res, next) {
   await touchSession(token);
   req.user = user;
   req.token = token;
+  // No modo multi-restaurante, tudo daqui pra frente roda preso ao restaurante do
+  // usuário — inclusive as consultas que as rotas fazem sem saber que ele existe.
+  if (MULTI_TENANT) return middlewareContexto(req, res, next);
   next();
 }
 
@@ -413,8 +461,23 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   if (!user || !verifyPassword(password, user.password_hash))
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
 
+  // Restaurante suspenso (inadimplência, encerramento) não entra — e a mensagem diz o
+  // motivo real em vez de "senha inválida", que faria o cliente achar que é problema dele.
+  if (MULTI_TENANT && user.tenant_id) {
+    const { data: t } = await supabaseRaw.from('tenants').select('ativo, nome').eq('id', user.tenant_id).maybeSingle();
+    if (t && t.ativo === false) {
+      return res.status(403).json({ erro: 'Acesso suspenso. Fale com a administração da plataforma para reativar.' });
+    }
+  }
+
   const token = await createSession(user);
-  await audit('login', { username: user.username }, user, getClientIp(req));
+  // O login acontece ANTES de existir contexto de restaurante (é ele que descobre qual é).
+  // Então a auditoria roda explicitamente presa ao restaurante do usuário que acabou de entrar.
+  if (MULTI_TENANT && user.tenant_id) {
+    await comContexto(Number(user.tenant_id), () => audit('login', { username: user.username }, user, getClientIp(req)));
+  } else if (!MULTI_TENANT) {
+    await audit('login', { username: user.username }, user, getClientIp(req));
+  }
   res.json({ token, user: { id: user.id, username: user.username, nome: user.nome, role: user.role } });
 });
 
@@ -765,7 +828,21 @@ app.get('/api/categorias', auth, async (req, res) => {
 });
 
 // ==================== GESTÃO DE CATEGORIAS (Admin) ====================
-app.post('/api/categorias', auth, requireRole('admin', 'gerente'), async (req, res) => {
+// CATEGORIA é ESTRUTURA, não dado do cliente: é ela que liga produto → conta do
+// plano de contas (MAPA_CONTA_COMPRA). Se o dono do restaurante criar 'Carnes XYZ' ou
+// renomear 'Hortifruti', a compra dele para de classificar e o CMV/Prime Cost quebram
+// em silêncio. Por isso, no modo plataforma, só a administração mexe nisso — foi o que
+// o Rubens pediu: 'ele não poderia mudar coisas que interferem no relatório'.
+function requireEstrutura(...roles) {
+  return (req, res, next) => {
+    if (MULTI_TENANT && req.user?.role !== 'superadmin') {
+      return res.status(403).json({ erro: 'As categorias fazem parte da estrutura do relatório e são definidas pela plataforma. Fale com a administração se precisar de uma nova.' });
+    }
+    return requireRole(...roles)(req, res, next);
+  };
+}
+
+app.post('/api/categorias', auth, requireEstrutura('admin', 'gerente'), async (req, res) => {
   const nome = sanitizeText(req.body?.nome, 80);
   if (!nome || nome.length < 2) return res.status(400).json({ erro: 'Nome de categoria inválido.' });
   const { error } = await supabase.from('categorias').insert({ nome });
@@ -777,19 +854,19 @@ app.post('/api/categorias', auth, requireRole('admin', 'gerente'), async (req, r
   res.json({ ok: true, nome });
 });
 
-app.put('/api/categorias/renomear', auth, requireRole('admin'), async (req, res) => {
+app.put('/api/categorias/renomear', auth, requireEstrutura('admin'), async (req, res) => {
   const de = sanitizeText(req.body?.de, 80);
   const para = sanitizeText(req.body?.para, 80);
   if (!de || !para || de === para) return res.status(400).json({ erro: 'Informe a categoria atual e o novo nome.' });
   const { data: afetados } = await supabase.from('produtos').select('id').eq('categoria', de);
   await supabase.from('produtos').update({ categoria: para }).eq('categoria', de);
   await supabase.from('categorias').delete().eq('nome', de);
-  await supabase.from('categorias').upsert({ nome: para }, { onConflict: 'nome' });
+  await supabase.from('categorias').upsert({ nome: para }, { onConflict: chaveConflito('nome') });
   await audit('renomear_categoria', { de, para, produtos_afetados: (afetados || []).length }, req.user, getClientIp(req));
   res.json({ ok: true, produtos_afetados: (afetados || []).length });
 });
 
-app.delete('/api/categorias/:nome', auth, requireRole('admin'), async (req, res) => {
+app.delete('/api/categorias/:nome', auth, requireEstrutura('admin'), async (req, res) => {
   const nome = sanitizeText(req.params.nome, 80);
   const { count } = await supabase.from('produtos').select('id', { count: 'exact', head: true }).eq('categoria', nome).or('ativo.eq.1,ativo.is.null');
   if (count > 0) return res.status(400).json({ erro: `Categoria em uso por ${count} produto(s). Mova-os antes de excluir.` });
@@ -1288,7 +1365,7 @@ async function ensureSnapshotDiario() {
       qtd: p.qtd, unidade: p.unidade, data: hoje,
     }));
     await supabase.from('snapshots_diarios').upsert(rows,
-      { onConflict: 'produto_id,data', ignoreDuplicates: true });
+      { onConflict: chaveConflito('produto_id,data'), ignoreDuplicates: true });
   } catch(e) { console.error('Snapshot diario erro:', e.message); }
 }
 
@@ -1537,15 +1614,29 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
     // linha do backfill E criaria a nova = custo duplicado naquele dia.
     await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'taxa-backfill']);
     const linhas = [];
+    // Cada restaurante negocia a taxa dele com a maquininha — usar a taxa de outro
+    // faria o custo sair errado todo mês. A config do restaurante manda; a constante
+    // do código é só o padrão de quem ainda não configurou.
+    let taxasDoRestaurante = null;
+    if (MULTI_TENANT) {
+      try {
+        const id = require('./tenant').tenantAtual();
+        if (id) {
+          const { data: t } = await supabaseRaw.from('tenants').select('config').eq('id', id).maybeSingle();
+          taxasDoRestaurante = t?.config?.taxas || null;
+        }
+      } catch (e) { /* sem config: cai no padrão */ }
+    }
     for (const [key, cfg] of Object.entries(TAXA_POR_FORMA)) {
       const bruto = Number(formas?.[key]?.valor || 0);
       if (bruto <= 0) continue;
-      const valor = Number((bruto * cfg.taxa / 100).toFixed(2));
+      const pctTaxa = Number(taxasDoRestaurante?.[key] ?? cfg.taxa);
+      const valor = Number((bruto * pctTaxa / 100).toFixed(2));
       if (valor <= 0) continue;
       linhas.push({
         data: dataDia, grupo: 'Despesas Financeiras', categoria: cfg.conta,
         forma: 'taxa_operadora', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
-        descricao: sanitizeText(`Taxa ${formas[key].forma} ${cfg.taxa}% sobre ${fmtBRL(bruto)} (${cfg.ref})`, 180),
+        descricao: sanitizeText(`Taxa ${formas[key].forma} ${pctTaxa}% sobre ${fmtBRL(bruto)} (${cfg.ref})`, 180),
         origem: 'taxa-auto', responsavel: responsavel || 'sistema',
         created_at: nowSP(), updated_at: nowSP(),
       });
@@ -3119,7 +3210,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       lixo_buffet_g: lixoBuffetG,
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
-    }, { onConflict: 'data' });
+    }, { onConflict: chaveConflito('data') });
     if (error) {
       if (isTabelaFechamentoMissing(error)) {
         return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
@@ -3228,6 +3319,373 @@ app.get('/api/planilha-mensal', auth, requirePerm('planilha'), async (req, res) 
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar planilha mensal.' });
+  }
+});
+
+// ── ABRIR UM RESTAURANTE NOVO NA PLATAFORMA ─────────────────────────────────
+// O restaurante nasce PRONTO PRA USAR, não vazio (Rubens, 01/08: "deveria já vir
+// completo, a pessoa se encaixa no perfil do aplicativo"). Deixar o estoque vazio
+// joga a maior fricção no cliente logo no primeiro dia — cadastrar centenas de
+// produtos é onde ele desiste. O catálogo-modelo (produtos_modelo) vem dos produtos
+// reais do Toca, sem preço e sem quantidade: o dono revisa e ajusta em vez de digitar.
+function requireSuperadmin(req, res, next) {
+  if (req.user?.role !== 'superadmin') return res.status(403).json({ erro: 'Só a administração da plataforma pode fazer isso.' });
+  next();
+}
+
+// ── VALIDAÇÃO DO CADASTRO ────────────────────────────────────────────────────
+// Cadastro é a maior alavanca de retenção de um SaaS (pesquisa 01/08: onboarding
+// responde por 30–50% da variação de churn). Mas aqui ele tem um segundo papel:
+// impedir que um cadastro torto entre e quebre o fluxo depois — do cliente ou nosso.
+// Tudo é validado no SERVIDOR; o formulário só antecipa a mensagem.
+
+// Mod-11 da Receita. Confirma que o número é ESTRUTURALMENTE plausível — não confirma
+// que a empresa existe nem que está ativa. Por isso o CNPJ é opcional: barrar cadastro
+// por causa dele criaria atrito sem entregar a garantia que o cliente imagina.
+function cnpjValido(valor) {
+  const n = String(valor || '').replace(/\D/g, '');
+  if (n.length !== 14) return false;
+  if (/^(\d)\1{13}$/.test(n)) return false;               // 00000000000000 e afins passam no mod-11
+  const dv = (base, pesos) => {
+    const soma = base.split('').reduce((s, d, i) => s + Number(d) * pesos[i], 0);
+    const r = soma % 11;
+    return r < 2 ? 0 : 11 - r;
+  };
+  const d1 = dv(n.slice(0, 12), [5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  const d2 = dv(n.slice(0, 13), [6, 5, 4, 3, 2, 9, 8, 7, 6, 5, 4, 3, 2]);
+  return d1 === Number(n[12]) && d2 === Number(n[13]);
+}
+
+const RESERVADOS = new Set(['admin', 'api', 'app', 'root', 'sistema', 'plataforma', 'suporte', 'null', 'undefined', 'teste', 'test', 'www']);
+
+function validarCadastroRestaurante(b) {
+  const erros = [];
+  const nome = sanitizeText(b.nome || '', 120);
+  if (nome.length < 3) erros.push({ campo: 'nome', erro: 'O nome do restaurante precisa de ao menos 3 letras.' });
+
+  const slug = sanitizeText(b.slug || '', 60).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]{2,39}$/.test(slug)) {
+    erros.push({ campo: 'slug', erro: 'O identificador deve ter de 3 a 40 caracteres, só letras minúsculas, números e hífen.' });
+  } else if (RESERVADOS.has(slug)) {
+    erros.push({ campo: 'slug', erro: `"${slug}" é reservado pelo sistema. Escolha outro.` });
+  }
+
+  const usuario = sanitizeText(b.admin_usuario || '', 40).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{2,39}$/.test(usuario)) {
+    erros.push({ campo: 'admin_usuario', erro: 'O usuário deve ter de 3 a 40 caracteres, só letras minúsculas, números, ponto, hífen ou sublinhado.' });
+  } else if (RESERVADOS.has(usuario)) {
+    erros.push({ campo: 'admin_usuario', erro: `"${usuario}" é reservado pelo sistema. Escolha outro.` });
+  }
+
+  const senha = String(b.admin_senha || '');
+  if (senha.length < 8) erros.push({ campo: 'admin_senha', erro: 'A senha precisa de ao menos 8 caracteres.' });
+  else if (!/[a-zA-Z]/.test(senha) || !/\d/.test(senha)) erros.push({ campo: 'admin_senha', erro: 'A senha precisa misturar letras e números.' });
+  else if (senha.toLowerCase().includes(usuario) || /^(12345678|senha123|password)/i.test(senha)) {
+    erros.push({ campo: 'admin_senha', erro: 'Essa senha é fácil de adivinhar. Escolha outra.' });
+  }
+
+  const cnpj = String(b.cnpj || '').replace(/\D/g, '');
+  if (cnpj && !cnpjValido(cnpj)) erros.push({ campo: 'cnpj', erro: 'CNPJ inválido — confira os números.' });
+
+  if (b.plano && !['financeiro', 'estoque', 'completo'].includes(b.plano)) {
+    erros.push({ campo: 'plano', erro: 'Plano inválido.' });
+  }
+  return { erros, limpos: { nome, slug, usuario, senha, cnpj, plano: b.plano || 'financeiro' } };
+}
+
+async function abrirRestaurante({ nome, slug, cnpj, telefone, plano, admin_usuario, admin_senha, admin_nome, importar_catalogo = true }) {
+  const raw = supabaseRaw;   // criação acontece FORA do contexto de tenant (o tenant ainda não existe)
+  const { data: tenant, error: errT } = await raw.from('tenants').insert({
+    nome: sanitizeText(nome, 120), slug: sanitizeText(slug, 60).toLowerCase(),
+    cnpj: sanitizeText(cnpj || '', 20) || null, telefone: sanitizeText(telefone || '', 20) || null,
+    plano: ['financeiro', 'estoque', 'completo'].includes(plano) ? plano : 'financeiro',
+  }).select('*').single();
+  if (errT) throw new Error(errT.message.includes('duplicate') ? 'Já existe restaurante com esse identificador.' : errT.message);
+
+  const resumo = { tenant, categorias: 0, produtos: 0, usuario: null };
+
+  // Criar restaurante são vários passos e o Postgrest não dá transação entre eles.
+  // Se qualquer um falhar, DESFAZ tudo: restaurante criado pela metade é pior que
+  // restaurante nenhum — o cliente entra, encontra o app quebrado e a confiança acaba
+  // no primeiro dia. O cascade das FKs limpa categorias, produtos e usuários juntos.
+  try {
+    return await montarRestaurante(raw, tenant, resumo, { importar_catalogo, admin_usuario, admin_senha, admin_nome, nome, slug });
+  } catch (e) {
+    try { await raw.from('tenants').delete().eq('id', tenant.id); } catch (_) {}
+    throw e;
+  }
+}
+
+async function montarRestaurante(raw, tenant, resumo, { importar_catalogo, admin_usuario, admin_senha, admin_nome, nome, slug }) {
+  // 1) Categorias: são a ponte produto → conta contábil. Sem elas o CMV não classifica.
+  const { data: cats } = await raw.from('categorias').select('nome').eq('tenant_id', TENANT_MODELO);
+  const nomesCat = [...new Set((cats || []).map(c => c.nome))].filter(n => !/^qa robo/i.test(n));
+  if (nomesCat.length) {
+    await raw.from('categorias').insert(nomesCat.map(nome => ({ nome, tenant_id: tenant.id })));
+    resumo.categorias = nomesCat.length;
+  }
+
+  // 2) Catálogo: zerado e sem preço — é sugestão de cadastro, não estoque de mentira.
+  if (importar_catalogo) {
+    const { data: modelo } = await raw.from('produtos_modelo').select('nome, categoria, unidade');
+    const linhas = (modelo || []).map(p => ({
+      nome: p.nome, nome_search: normalizeSearch(p.nome), categoria: p.categoria, unidade: p.unidade,
+      qtd: 0, custo: 0, minimo: 1, ativo: 1, tenant_id: tenant.id, updated_at: nowSP(),
+    }));
+    for (let i = 0; i < linhas.length; i += 500) {
+      const { error } = await raw.from('produtos').insert(linhas.slice(i, i + 500));
+      if (error) throw new Error('Erro ao importar o catálogo: ' + error.message);
+    }
+    resumo.produtos = linhas.length;
+  }
+
+  // 3) O dono, que administra os usuários dele daqui pra frente.
+  // O nome de usuário é único na PLATAFORMA, não no restaurante: o login recebe só
+  // usuário e senha, então dois "admin" em restaurantes diferentes deixariam o sistema
+  // sem saber quem é quem — e o login falharia com "senha inválida", que manda o dono
+  // procurar o problema no lugar errado. Melhor barrar aqui, com a mensagem certa.
+  const usuario = sanitizeText(admin_usuario, 40).toLowerCase();
+  const { data: jaExiste } = await raw.from('users').select('id').ilike('username', usuario).maybeSingle();
+  if (jaExiste) {
+    // o rollback fica por conta do catch em abrirRestaurante — um lugar só, sem duplicar
+    throw new Error(`O usuário "${usuario}" já existe na plataforma. Escolha outro (ex: ${slug}.admin).`);
+  }
+  const { data: u, error: errU } = await raw.from('users').insert({
+    tenant_id: tenant.id, username: usuario, password_hash: hashPassword(String(admin_senha)),
+    nome: sanitizeText(admin_nome || nome, 80), role: 'admin', active: 1,
+  }).select('id, username, nome, role').single();
+  if (errU) throw new Error('Restaurante criado, mas falhou ao criar o usuário: ' + errU.message);
+  resumo.usuario = u;
+  return resumo;
+}
+
+// Confere disponibilidade ANTES de o cadastro ser enviado — evita o cliente preencher
+// tudo e só então descobrir que o identificador já existe.
+app.get('/api/plataforma/disponivel', auth, requireSuperadmin, async (req, res) => {
+  const slug = sanitizeText(req.query?.slug || '', 60).toLowerCase();
+  const usuario = sanitizeText(req.query?.usuario || '', 40).toLowerCase();
+  const out = {};
+  if (slug) {
+    const { data } = await supabaseRaw.from('tenants').select('id').eq('slug', slug).maybeSingle();
+    out.slug = { livre: !data && !RESERVADOS.has(slug) };
+  }
+  if (usuario) {
+    const { data } = await supabaseRaw.from('users').select('id').ilike('username', usuario).maybeSingle();
+    out.usuario = { livre: !data && !RESERVADOS.has(usuario) };
+  }
+  res.json(out);
+});
+
+app.post('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const { erros, limpos } = validarCadastroRestaurante(b);
+    if (erros.length) return res.status(400).json({ erro: erros[0].erro, erros });
+    // Passa os valores JÁ NORMALIZADOS adiante. Sem isso, valido um valor ("Cantina"
+    // vira "cantina" na checagem) e gravo outro caminho de normalização — divergência
+    // silenciosa que só apareceria quando dois cadastros colidissem.
+    const r = await abrirRestaurante({
+      ...b, nome: limpos.nome, slug: limpos.slug, cnpj: limpos.cnpj || null,
+      plano: limpos.plano, admin_usuario: limpos.usuario, admin_senha: limpos.senha,
+    });
+    res.json({
+      ok: true, restaurante: { id: r.tenant.id, nome: r.tenant.nome, slug: r.tenant.slug, plano: r.tenant.plano },
+      preparado: { categorias: r.categorias, produtos: r.produtos }, admin: r.usuario,
+    });
+  } catch (e) {
+    console.error('abrir restaurante:', e.message);
+    res.status(400).json({ erro: e.message });
+  }
+});
+
+// ── O QUE O DONO DO RESTAURANTE PODE CONFIGURAR ─────────────────────────────
+// Parâmetro é diferente de estrutura. Taxa de maquininha e dados da empresa são
+// DELE — cada restaurante negocia a taxa que consegue, e usar a taxa de outro faria
+// o custo sair errado. O que ele não mexe é o que muda a forma de medir: plano de
+// contas, categorias e as regras dos índices continuam iguais pra todo mundo, que é
+// justamente o que permite comparar um restaurante com outro.
+app.get('/api/restaurante', auth, async (req, res) => {
+  if (!MULTI_TENANT) return res.json({ multi_tenant: false });
+  const { data } = await supabaseRaw.from('tenants').select('id, nome, slug, cnpj, telefone, endereco, plano, config').eq('id', req.tenantId).maybeSingle();
+  if (!data) return res.status(404).json({ erro: 'Restaurante não encontrado.' });
+  res.json({ multi_tenant: true, restaurante: data, pode_editar: ['admin', 'superadmin'].includes(req.user.role) });
+});
+
+app.put('/api/restaurante', auth, requireRole('admin', 'superadmin'), async (req, res) => {
+  if (!MULTI_TENANT) return res.status(400).json({ erro: 'Indisponível.' });
+  try {
+    const b = req.body || {};
+    const { data: atual } = await supabaseRaw.from('tenants').select('config').eq('id', req.tenantId).maybeSingle();
+    const cfg = { ...(atual?.config || {}) };
+
+    if (b.taxas && typeof b.taxas === 'object') {
+      const taxas = { ...(cfg.taxas || {}) };
+      for (const k of ['credito', 'debito', 'voucher', 'pix', 'cartao']) {
+        if (b.taxas[k] === undefined || b.taxas[k] === '') continue;
+        const v = Number(String(b.taxas[k]).replace(',', '.'));
+        // Taxa fora de 0–20% é digitação errada, não negociação — barra antes de virar
+        // custo errado em todo fechamento do mês.
+        if (!Number.isFinite(v) || v < 0 || v > 20) {
+          return res.status(400).json({ erro: `Taxa de ${k} inválida: use um número entre 0 e 20.` });
+        }
+        taxas[k] = Number(v.toFixed(2));
+      }
+      cfg.taxas = taxas;
+    }
+    if (b.alerta_caixa && typeof b.alerta_caixa === 'object') {
+      cfg.alerta_caixa = { ...(cfg.alerta_caixa || {}), ...b.alerta_caixa };
+    }
+
+    const patch = { config: cfg };
+    for (const campo of ['nome', 'cnpj', 'telefone', 'endereco']) {
+      if (typeof b[campo] === 'string') patch[campo] = sanitizeText(b[campo], 120);
+    }
+    const { error } = await supabaseRaw.from('tenants').update(patch).eq('id', req.tenantId);
+    if (error) throw error;
+    await audit('restaurante_config', { campos: Object.keys(patch) }, req.user, getClientIp(req));
+    res.json({ ok: true, config: cfg });
+  } catch (e) {
+    console.error('config restaurante:', e.message);
+    res.status(500).json({ erro: 'Erro ao salvar as configurações.' });
+  }
+});
+
+// Painel da plataforma — só o superadmin enxerga. Mostra a SAÚDE de cada cliente,
+// não o financeiro dele: o que importa pra operar a plataforma é saber quem está
+// lançando e quem parou. Cliente que deixa de lançar cancela em dois meses, e isso
+// dá pra ver antes de acontecer.
+app.get('/api/plataforma/restaurantes', auth, requireSuperadmin, async (req, res) => {
+  try {
+    const { data: tenants } = await supabaseRaw.from('tenants').select('*').order('id');
+    const mes = dateSP().slice(0, 7);
+    const inicioMes = `${mes}-01`;
+    const hoje = dateSP();
+    const diaDoMes = Number(hoje.slice(8, 10));
+
+    const lista = [];
+    for (const t of (tenants || [])) {
+      const [fech, usuarios, prods] = await Promise.all([
+        supabaseRaw.from('fechamentos_diarios').select('data').eq('tenant_id', t.id).gte('data', inicioMes).lte('data', hoje),
+        supabaseRaw.from('users').select('id', { count: 'exact', head: true }).eq('tenant_id', t.id).eq('active', 1),
+        supabaseRaw.from('produtos').select('id', { count: 'exact', head: true }).eq('tenant_id', t.id).eq('ativo', 1),
+      ]);
+      const diasLancados = (fech.data || []).length;
+      // A métrica que antecipa cancelamento: abaixo de 80% dos dias, o cliente está
+      // perdendo o hábito — e sem lançamento o sistema mostra número errado e ele culpa a ferramenta.
+      const aderencia = diaDoMes > 0 ? Math.round((diasLancados / diaDoMes) * 100) : 0;
+      lista.push({
+        id: t.id, nome: t.nome, slug: t.slug, plano: t.plano, ativo: t.ativo,
+        criado_em: t.criado_em,
+        usuarios: usuarios.count || 0,
+        produtos: prods.count || 0,
+        dias_lancados: diasLancados,
+        dias_do_mes: diaDoMes,
+        aderencia,
+        saude: aderencia >= 80 ? 'ok' : (aderencia >= 50 ? 'atencao' : 'risco'),
+      });
+    }
+    res.json({ restaurantes: lista, mes });
+  } catch (e) {
+    console.error('painel plataforma:', e.message);
+    res.status(500).json({ erro: 'Erro ao carregar os restaurantes.' });
+  }
+});
+
+app.post('/api/plataforma/restaurantes/:id/status', auth, requireSuperadmin, async (req, res) => {
+  const ativo = req.body?.ativo !== false;
+  const { error } = await supabaseRaw.from('tenants')
+    .update({ ativo, suspenso_em: ativo ? null : nowSP() }).eq('id', req.params.id);
+  if (error) return res.status(500).json({ erro: 'Erro ao mudar o status.' });
+  res.json({ ok: true, ativo });
+});
+
+// COMPARADOR DE PERÍODOS — a aba Relatórios deixa de repetir o que a Planilha já mostra
+// (Rubens, 01/08: "não é uma duplicidade de informação?"). Era: os mesmos números com
+// período flexível. Agora responde a pergunta que nenhuma outra tela responde:
+// "este período foi melhor ou pior que o anterior, e em quê?".
+function variacao(atual, anterior) {
+  const a = Number(atual || 0), b = Number(anterior || 0);
+  if (!b) return { abs: Number(a.toFixed(2)), pct: null };  // sem base, % não significa nada
+  return { abs: Number((a - b).toFixed(2)), pct: Number((((a - b) / Math.abs(b)) * 100).toFixed(1)) };
+}
+
+// Período anterior do mesmo tamanho, imediatamente antes — é a comparação que faz sentido
+// por padrão (7 dias contra os 7 anteriores, um mês contra o mês anterior).
+function periodoAnterior(inicio, fim) {
+  const d1 = new Date(inicio + 'T12:00:00Z'), d2 = new Date(fim + 'T12:00:00Z');
+  const dias = Math.round((d2 - d1) / 86400000) + 1;
+  const fimAnt = new Date(d1.getTime() - 86400000);
+  const iniAnt = new Date(fimAnt.getTime() - (dias - 1) * 86400000);
+  const iso = d => d.toISOString().slice(0, 10);
+  return { inicio: iso(iniAnt), fim: iso(fimAnt) };
+}
+
+app.get('/api/comparar', auth, requirePerm('planilha'), async (req, res) => {
+  try {
+    const aIni = validarDataISO(req.query?.inicio || dateAgoDias(6));
+    const aFim = validarDataISO(req.query?.fim || dateSP());
+    const ant = periodoAnterior(aIni, aFim);
+    const bIni = validarDataISO(req.query?.base_inicio || ant.inicio);
+    const bFim = validarDataISO(req.query?.base_fim || ant.fim);
+
+    const [a, b] = await Promise.all([
+      montarRelatorioPeriodo(aIni, aFim),
+      montarRelatorioPeriodo(bIni, bFim),
+    ]);
+
+    // Em cada linha: se "subir" é bom ou ruim. Sem isso a tela pinta de verde um
+    // consumo que disparou — que é justamente o que o dono precisa enxergar.
+    const LINHAS = [
+      { chave: 'vendas', rotulo: 'Vendas', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'pratos_vendidos', rotulo: 'Pratos vendidos', tipo: 'numero', subir: 'bom' },
+      { chave: 'ticket_medio', rotulo: 'Ticket médio', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'consumo_estoque', rotulo: 'Consumo de estoque', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'perdas', rotulo: 'Perdas', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'despesas_caixa', rotulo: 'Despesas do caixa', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'compras_estoque', rotulo: 'Compras de estoque', tipo: 'dinheiro', subir: 'neutro' },
+      { chave: 'contas_pagas', rotulo: 'Contas pagas', tipo: 'dinheiro', subir: 'neutro' },
+      { chave: 'cortes', rotulo: 'Cortes', tipo: 'dinheiro', subir: 'ruim' },
+      { chave: 'resultado_operacional', rotulo: 'Resultado operacional', tipo: 'dinheiro', subir: 'bom' },
+      { chave: 'dias_com_caixa', rotulo: 'Dias com caixa lançado', tipo: 'numero', subir: 'bom' },
+    ];
+
+    const linhas = LINHAS.map(l => {
+      const atual = a.totais[l.chave], anterior = b.totais[l.chave];
+      const v = variacao(atual, anterior);
+      const melhorou = l.subir === 'neutro' || v.abs === 0 ? null
+        : (l.subir === 'bom' ? v.abs > 0 : v.abs < 0);
+      return { ...l, atual: atual ?? null, anterior: anterior ?? null, ...v, melhorou };
+    });
+
+    // Consumo sobre vendas é o índice que mais denuncia problema: se a venda caiu e o
+    // consumo não, alguma coisa está saindo sem ser vendida.
+    const pctA = pct(a.totais.consumo_estoque, a.totais.vendas);
+    const pctB = pct(b.totais.consumo_estoque, b.totais.vendas);
+    linhas.push({
+      chave: 'consumo_sobre_vendas', rotulo: 'Consumo sobre vendas', tipo: 'pct', subir: 'ruim',
+      atual: pctA, anterior: pctB,
+      abs: (pctA !== null && pctB !== null) ? Number((pctA - pctB).toFixed(1)) : null,
+      pct: null, melhorou: (pctA !== null && pctB !== null) ? pctA < pctB : null,
+    });
+
+    res.json({
+      atual: { inicio: aIni, fim: aFim, dias: a.totais.dias_periodo, label: `${dataBR(aIni)} a ${dataBR(aFim)}` },
+      base: { inicio: bIni, fim: bFim, dias: b.totais.dias_periodo, label: `${dataBR(bIni)} a ${dataBR(bFim)}` },
+      linhas,
+      alerta: (() => {
+        const vend = linhas.find(l => l.chave === 'vendas');
+        const cons = linhas.find(l => l.chave === 'consumo_estoque');
+        if (vend?.pct !== null && cons?.pct !== null && vend?.pct < -5 && cons?.pct > 5)
+          return 'A venda caiu e o consumo de estoque subiu no mesmo período. Vale conferir perda, desperdício ou saída sem venda.';
+        const cs = linhas.find(l => l.chave === 'consumo_sobre_vendas');
+        if (cs?.abs !== null && cs?.abs > 5)
+          return `O consumo passou de ${cs.anterior}% para ${cs.atual}% das vendas. Cada ponto aí sai direto do seu resultado.`;
+        return null;
+      })(),
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao comparar os períodos.' });
   }
 });
 
@@ -4479,7 +4937,7 @@ app.post('/api/conta-pendencias/:id/confirmar', auth, requirePerm('contas'), asy
       termo, grupo: conta.grupo, categoria: conta.categoria,
       vezes: (mem?.vezes || 0) + 1, ultimo_valor: valor,
       atualizado_em: nowSP(), criado_por: req.user.nome,
-    }, { onConflict: 'termo' });
+    }, { onConflict: chaveConflito('termo') });
   }
   await supabase.from('conta_pendencias').update({
     status: 'resolvido', pagamento_id: pag.id, resolvido_em: nowSP(), resolvido_por: req.user.nome,
@@ -4636,7 +5094,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
 
   // "Memorizar": salva o apelido (nome da nota → produto), pra próxima lançar sozinho.
   if (memorizar && pend.produto_cupom) {
-    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: 'termo' }); } catch (e) {}
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
   await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
@@ -4679,7 +5137,7 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   }).select('id').single();
   await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
   if (memorizar && pend.produto_cupom) {
-    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: 'termo' }); } catch (e) {}
+    try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
   await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
   await audit('pendencia_criar_produto', { pendencia_id: pend.id, produto: novo.nome, qtd, categoria, unidade }, req.user, getClientIp(req));
@@ -5705,7 +6163,7 @@ app.post('/api/sinonimos', auth, requireRole('admin', 'gerente'), async (req, re
   const { prod, opcoes } = await acharProdutoUnico(produto_nome);
   if (opcoes) return res.status(400).json({ erro: `Vários produtos batem com "${produto_nome}". Seja mais específico: ${opcoes.slice(0, 5).map(p => p.nome).join(' | ')}` });
   if (!prod) return res.status(404).json({ erro: 'Produto não encontrado no estoque.' });
-  const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: 'termo' });
+  const { error } = await supabase.from('sinonimos').upsert({ termo: normalizeSearch(termo), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') });
   if (error) return res.status(500).json({ erro: 'Erro ao salvar sinônimo.' });
   res.json({ ok: true });
 });
@@ -5719,7 +6177,7 @@ app.post('/api/sinonimos/importar', auth, requireRole('admin'), async (req, res)
       const termo = normalizeSearch(String(s.termo || ''));
       const { prod } = await acharProdutoUnico(String(s.produto_nome || ''));
       if (!termo || !prod) { erros.push(s.termo); continue; }
-      await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: 'termo' });
+      await supabase.from('sinonimos').upsert({ termo, produto_nome: prod.nome }, { onConflict: chaveConflito('termo') });
       ok++;
     } catch(e) { erros.push(s.termo); }
   }
@@ -6230,8 +6688,24 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, async (req, res) => {
 
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 
+// Middleware de erro do Express (4 argumentos) -- é aqui que o next(err) do
+// wrapper acima (e qualquer catch(next) explícito nas rotas) desemboca. Sem
+// isso o Express usaria a página de erro padrão em HTML; aqui a resposta segue
+// sempre JSON, como o resto da API. TenantError vira 400 (pedido mal formado
+// pelo cliente -- faltou tenant), o resto 500.
+app.use((err, req, res, next) => {
+  if (res.headersSent) return next(err);
+  console.error('[erro não tratado]', req.method, req.originalUrl, err && err.stack || err);
+  const status = err && err.name === 'TenantError' ? 400 : (err && err.statusCode) || 500;
+  res.status(status).json({ erro: (err && err.message) || 'Erro interno.' });
+});
+
 // ==================== START ====================
-seed().then(async () => {
+// No modo multi-restaurante o seed não se aplica: produtos e usuários pertencem a um
+// restaurante, e cada um nasce com os seus (ou importa o catálogo-modelo). O erro que
+// isso dava no boot era o isolamento funcionando — consulta a tabela de dado sem
+// restaurante definido é recusada de propósito.
+(MULTI_TENANT ? Promise.resolve() : seed()).then(async () => {
   await initSessionsBackend();
   app.listen(PORT, () => {
     console.log(`🐰 Toca do Coelho — Estoque (Supabase) rodando em http://localhost:${PORT}`);

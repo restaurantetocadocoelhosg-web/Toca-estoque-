@@ -318,6 +318,9 @@ select.big-input { font-size: 14px; }
    e as linhas de total ganham peso pra separar derivado de grupo. */
 .sheet-table tr.row-muted td { opacity: 0.55; }
 .sheet-table tr.row-total td { background: rgba(232,93,38,0.06); border-top: 2px solid var(--accent, #e85d26); font-weight: 700; }
+.pf-dica { font-size:11px; color:var(--muted); margin-top:3px; min-height:14px; }
+.pf-dica.bom { color:var(--green); }
+.pf-dica.ruim { color:var(--red); }
 .sheet-pay-list, .sheet-pendency-list { display: flex; flex-direction: column; gap: 8px; }
 .sheet-pay-row, .sheet-pendency-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
 .sheet-pay-row b, .sheet-pendency-row b { color: var(--text); }
@@ -1128,6 +1131,82 @@ select.big-input { font-size: 14px; }
     </div>
   </div>
 
+  <!-- PLATAFORMA — área do administrador da plataforma (não aparece para o cliente) -->
+  <div id="p-plataforma" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>🏢 Restaurantes na plataforma</span>
+          <span class="sheet-muted">área da administração — o cliente não vê isto</span>
+        </div>
+        <div class="sheet-actions" style="margin-top:10px">
+          <button class="btn-export btn-success" onclick="abrirFormRestaurante()">＋ Abrir restaurante</button>
+          <button class="btn-sm" onclick="loadPlataforma()">↻</button>
+        </div>
+      </div>
+
+      <div class="real-card" id="pf-form-card" style="display:none">
+        <div class="real-card-title">Novo restaurante</div>
+        <div style="display:flex;flex-direction:column;gap:10px;margin-top:8px">
+
+          <div>
+            <input class="small-input" id="pf-nome" placeholder="Nome do restaurante" oninput="sugerirSlug()" onblur="validarCampo('nome')">
+            <div class="pf-dica" id="dica-nome"></div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-slug" placeholder="identificador (ex: cantina-da-esquina)" oninput="validarCampo('slug')">
+            <div class="pf-dica" id="dica-slug">só minúsculas, números e hífen — é o apelido do restaurante no sistema</div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-cnpj" placeholder="CNPJ (opcional)" oninput="mascaraCNPJ(this); validarCampo('cnpj')">
+            <div class="pf-dica" id="dica-cnpj">confere só o formato do número — não consulta a Receita</div>
+          </div>
+
+          <select class="small-input" id="pf-plano">
+            <option value="financeiro">Plano Financeiro — contas e índices</option>
+            <option value="estoque">Plano Estoque — inclui CMV real</option>
+            <option value="completo" selected>Completo</option>
+          </select>
+
+          <hr style="border:none;border-top:1px solid var(--border);margin:2px 0">
+          <div class="sheet-muted"><b>Acesso do dono</b></div>
+
+          <div>
+            <input class="small-input" id="pf-user" placeholder="usuário do dono (ex: cantina.admin)" oninput="validarCampo('usuario')">
+            <div class="pf-dica" id="dica-usuario">precisa ser único na plataforma inteira</div>
+          </div>
+
+          <div>
+            <input class="small-input" id="pf-senha" type="text" placeholder="senha inicial" oninput="validarCampo('senha')">
+            <div class="pf-dica" id="dica-senha">mínimo 8 caracteres, misturando letras e números</div>
+          </div>
+
+          <label class="sheet-muted" style="display:flex;gap:6px;align-items:center">
+            <input type="checkbox" id="pf-catalogo" checked> já criar com o catálogo de produtos sugerido
+          </label>
+
+          <div class="sheet-actions">
+            <button class="btn-export btn-success" id="pf-btn-criar" onclick="criarRestaurante()">Criar restaurante</button>
+            <button class="btn-sm" onclick="document.getElementById('pf-form-card').style.display='none'">Cancelar</button>
+          </div>
+          <div id="pf-form-msg" class="real-alert" style="display:none"></div>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">
+          <span>Saúde dos clientes</span>
+          <span class="sheet-muted">quem parou de lançar cancela em ~2 meses</span>
+        </div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="pf-tabela"></table>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ÍNDICES GERENCIAIS -->
   <div id="p-indices" class="page">
     <div class="sheet-section">
@@ -1167,41 +1246,29 @@ select.big-input { font-size: 14px; }
   <div id="p-relatorios" class="page">
     <div class="sheet-section">
       <div class="real-card">
-        <div class="real-card-title">📊 Relatórios</div>
+        <div class="real-card-title">
+          <span>⚖️ Comparar períodos</span>
+          <span class="sheet-muted">este período contra outro</span>
+        </div>
         <div class="sheet-head">
-          <input type="date" class="small-input" id="rel-data-inicio" onchange="loadRelatorios()">
-          <input type="date" class="small-input" id="rel-data-fim" onchange="loadRelatorios()">
-          <button class="btn-sm" onclick="loadRelatorios()">↻</button>
+          <input type="date" class="small-input" id="cmp-inicio" onchange="loadComparar()">
+          <input type="date" class="small-input" id="cmp-fim" onchange="loadComparar()">
+          <button class="btn-sm" onclick="loadComparar()">↻</button>
         </div>
         <div class="sheet-actions" style="margin-top:10px">
-          <button class="btn-sm" onclick="relatorioPreset('hoje')">Hoje</button>
-          <button class="btn-sm" onclick="relatorioPreset('7')">7 dias</button>
-          <button class="btn-sm" onclick="relatorioPreset('30')">30 dias</button>
-          <button class="btn-sm" onclick="relatorioPreset('mes')">Mês atual</button>
-          <button class="btn-sm" onclick="relatorioPreset('mes-anterior')">Mês anterior</button>
+          <button class="btn-sm" onclick="cmpPreset('7')">Últimos 7 dias</button>
+          <button class="btn-sm" onclick="cmpPreset('30')">Últimos 30 dias</button>
+          <button class="btn-sm" onclick="cmpPreset('mes')">Mês atual</button>
+          <button class="btn-sm" onclick="cmpPreset('mes-anterior')">Mês anterior</button>
         </div>
+        <div class="sheet-muted" id="cmp-periodos" style="margin-top:10px"></div>
+        <div id="cmp-alerta" class="real-alert" style="display:none;margin-top:10px"></div>
       </div>
 
       <div class="real-card">
-        <div class="real-card-title">Resumo do período</div>
-        <div class="real-grid" id="rel-resumo"><div class="loading">Carregando...</div></div>
-        <div class="real-insight" id="rel-insight" style="margin-top:10px"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Recebimentos</div>
-        <div id="rel-formas" class="sheet-pay-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Contas pagas</div>
-        <div id="rel-contas" class="sheet-pay-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">Dias do período</div>
+        <div class="real-card-title">O que mudou</div>
         <div class="sheet-scroll">
-          <table class="sheet-table" id="rel-dias"></table>
+          <table class="sheet-table" id="cmp-tabela"><tbody><tr><td class="loading">Carregando...</td></tr></tbody></table>
         </div>
       </div>
     </div>
@@ -1392,7 +1459,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v81</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v82</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1458,13 +1525,44 @@ select.big-input { font-size: 14px; }
         <div id="sin-list"></div>
       </div>
 
+      <!-- MEU RESTAURANTE — parâmetros que são do cliente (não mexem no relatório) -->
+      <div class="admin-card" id="card-meu-restaurante" style="display:none">
+        <div class="admin-card-title">🏪 Meu restaurante</div>
+        <div style="font-size:12px;color:var(--muted);margin-bottom:10px">
+          Dados da empresa e as taxas que <b>você</b> negociou com a maquininha. A taxa entra
+          sozinha no fechamento do dia — se estiver errada aqui, seu custo sai errado no mês.
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <input class="small-input" id="rest-nome" placeholder="Nome do restaurante">
+          <input class="small-input" id="rest-cnpj" placeholder="CNPJ">
+          <input class="small-input" id="rest-telefone" placeholder="Telefone">
+          <div style="font-size:12px;color:var(--muted);margin-top:6px"><b>Taxas da maquininha (%)</b></div>
+          <div class="form-row" style="gap:6px;flex-wrap:wrap">
+            <label class="sheet-muted" style="flex:1;min-width:92px">Crédito<input class="small-input" id="tx-credito" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Débito<input class="small-input" id="tx-debito" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Voucher<input class="small-input" id="tx-voucher" inputmode="decimal"></label>
+            <label class="sheet-muted" style="flex:1;min-width:92px">Pix<input class="small-input" id="tx-pix" inputmode="decimal"></label>
+          </div>
+          <button class="btn-export btn-success" onclick="salvarMeuRestaurante()">Salvar</button>
+          <div id="rest-msg" class="real-alert" style="display:none"></div>
+        </div>
+      </div>
+
       <!-- GESTÃO DE CATEGORIAS -->
       <div class="admin-card">
         <div class="admin-card-title">🗂️ Categorias <button class="btn-sm" onclick="loadCatsAdmin()">↻</button></div>
+        <div id="cat-aviso-plataforma" class="real-alert" style="display:none;margin-bottom:10px">
+          🔒 As categorias fazem parte da estrutura do relatório: são elas que ligam cada produto
+          à conta certa do CMV. Por isso são iguais para todos os restaurantes e definidas pela
+          plataforma — é o que permite comparar seu CMV com o de outros. Precisa de uma nova?
+          Fale com a administração.
+        </div>
+        <div id="cat-edicao">
         <div style="font-size:12px;color:var(--muted);margin-bottom:10px">Crie, renomeie ou exclua categorias. Renomear move todos os produtos junto.</div>
         <div class="form-row" style="margin-bottom:10px">
           <input class="small-input" id="cat-nova" placeholder="Nova categoria (ex: Padaria)">
           <button class="btn-export btn-success" style="padding:11px" onclick="criarCategoria()">➕ Criar categoria</button>
+        </div>
         </div>
         <div id="cats-admin-list"></div>
       </div>
@@ -1609,7 +1707,8 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
   <button class="nav-btn" id="nav-indices" onclick="goPage('indices', this)"><span class="icon">📐</span>Índices</button>
-  <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">📊</span>Relatórios</button>
+  <button class="nav-btn" id="nav-plataforma" onclick="goPage('plataforma', this)" style="display:none"><span class="icon">🏢</span>Plataforma</button>
+  <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">⚖️</span>Comparar</button>
   <button class="nav-btn" id="nav-pagamentos" onclick="goPage('pagamentos', this)"><span class="icon">💳</span>Contas</button>
   <button class="nav-btn" id="nav-chat" onclick="goPage('chat', this)"><span class="icon">🤖</span>IA</button>
   <button class="nav-btn" id="nav-admin" onclick="goPage('admin', this)" style="display:none"><span class="icon">⚙️</span>Admin</button>
@@ -1916,6 +2015,9 @@ async function loadSession() {
     gerente:  { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:true, auditoria:true, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true },
     operador: { lancar:true, dia:true, planilha:true, contas:true, exportar:true, ia:false, auditoria:false, alertas:true, agenda:true, pendencias:false, admin:false, cardapio:true }
   };
+  // superadmin opera a PLATAFORMA, não o restaurante: sem permissões do app do cliente
+  // enquanto não escolher um restaurante para dar suporte.
+  ROLE_DEF.superadmin = { lancar:false, dia:false, planilha:false, contas:false, exportar:false, ia:false, auditoria:false, alertas:false, agenda:false, pendencias:false, admin:false, cardapio:false };
   const baseP = ROLE_DEF[currentUser.role] || ROLE_DEF.operador;
   const srvP = (data && data.permissoes && typeof data.permissoes === 'object') ? data.permissoes : {};
   const P = {};
@@ -1928,6 +2030,7 @@ async function loadSession() {
   gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
   gate('nav-indices', P.planilha);
+  gate('nav-plataforma', currentUser.role === 'superadmin');
   gate('nav-relatorios', P.planilha);
   gate('nav-pagamentos', P.contas);
   // Auditoria/Exportar saíram do menu inferior e viraram atalhos dentro do Admin —
@@ -1996,9 +2099,10 @@ function goPage(id, btn) {
   if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
   if (id === 'indices') loadIndices();
-  if (id === 'relatorios') loadRelatorios();
+  if (id === 'plataforma') loadPlataforma();
+  if (id === 'relatorios') loadComparar();
   if (id === 'pagamentos') loadPagamentos();
-  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); }
+  if (id === 'admin') { loadUsers(); loadSinonimos(); loadProdAdmin(); loadCatsAdmin(); loadGrupos(); loadMeuRestaurante(); }
   if (id === 'audit') initAuditoria();
   if (id === 'inventario') loadInventario();
   if (id === 'chat') iniciarChatBoot();
@@ -4374,6 +4478,274 @@ function renderPlanilhaMensal(d) {
   }
 }
 
+// ── MEU RESTAURANTE (área do cliente) ───────────────────────────────
+// O dono configura o que é DELE: dados da empresa e as taxas que ele negociou.
+// O que muda a forma de MEDIR (categorias, plano de contas, regras dos índices)
+// continua igual pra todos — é isso que deixa comparar um restaurante com outro.
+async function loadMeuRestaurante() {
+  try {
+    const d = await api('/api/restaurante');
+    if (!d.multi_tenant) return;                       // app de um restaurante só: nada a fazer
+    const card = document.getElementById('card-meu-restaurante');
+    if (!card) return;
+    card.style.display = d.pode_editar ? 'block' : 'none';
+    const r = d.restaurante || {};
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.value = v ?? ''; };
+    set('rest-nome', r.nome); set('rest-cnpj', r.cnpj); set('rest-telefone', r.telefone);
+    const t = (r.config && r.config.taxas) || {};
+    set('tx-credito', t.credito); set('tx-debito', t.debito);
+    set('tx-voucher', t.voucher); set('tx-pix', t.pix);
+
+    // Categoria é estrutura: cliente vê, entende o porquê, mas não edita.
+    const ehPlataforma = (currentUser?.role !== 'superadmin');
+    const aviso = document.getElementById('cat-aviso-plataforma');
+    const edicao = document.getElementById('cat-edicao');
+    if (aviso) aviso.style.display = ehPlataforma ? 'block' : 'none';
+    if (edicao) edicao.style.display = ehPlataforma ? 'none' : 'block';
+  } catch (e) { /* app sem plataforma: segue como sempre foi */ }
+}
+
+async function salvarMeuRestaurante() {
+  const msg = document.getElementById('rest-msg');
+  const val = id => document.getElementById(id).value.trim();
+  try {
+    await apiPost('/api/restaurante', {
+      nome: val('rest-nome'), cnpj: val('rest-cnpj'), telefone: val('rest-telefone'),
+      taxas: { credito: val('tx-credito'), debito: val('tx-debito'), voucher: val('tx-voucher'), pix: val('tx-pix') },
+    }, 'PUT');
+    msg.style.display = 'block';
+    msg.textContent = '✅ Salvo. As próximas taxas do fechamento já usam esses valores.';
+    toast('Configurações salvas.');
+  } catch (e) {
+    msg.style.display = 'block';
+    msg.textContent = '❌ ' + (e.message || 'Erro ao salvar.');
+  }
+}
+
+// ── PLATAFORMA (só administração) ───────────────────────────────────
+// Área separada do app do cliente: aqui se abre restaurante e se acompanha a
+// saúde de cada um. Nenhuma tela daqui aparece pro dono de restaurante.
+function abrirFormRestaurante() {
+  const c = document.getElementById('pf-form-card');
+  c.style.display = c.style.display === 'none' ? 'block' : 'none';
+  document.getElementById('pf-form-msg').style.display = 'none';
+}
+
+function sugerirSlug() {
+  const nome = document.getElementById('pf-nome').value || '';
+  const slug = nome.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  document.getElementById('pf-slug').value = slug;
+  if (slug && !document.getElementById('pf-user').value) {
+    document.getElementById('pf-user').value = slug.split('-')[0] + '.admin';
+  }
+}
+
+// Validação no formulário é só antecipação da mensagem — quem decide é o servidor.
+// O objetivo aqui é o cadastro não entrar torto e quebrar o cliente depois.
+const PF_REGRAS = {
+  nome:    v => v.length >= 3 || 'nome muito curto',
+  slug:    v => /^[a-z0-9][a-z0-9-]{2,39}$/.test(v) || 'de 3 a 40: minúsculas, números e hífen',
+  usuario: v => /^[a-z0-9][a-z0-9._-]{2,39}$/.test(v) || 'de 3 a 40: minúsculas, números, ponto, hífen',
+  senha:   v => v.length < 8 ? 'mínimo 8 caracteres'
+                : (!/[a-zA-Z]/.test(v) || !/\d/.test(v)) ? 'misture letras e números' : true,
+  cnpj:    v => !v ? true : (cnpjValidoClient(v) || 'CNPJ inválido — confira os números'),
+};
+
+function cnpjValidoClient(valor) {
+  const n = String(valor || '').replace(/\D/g, '');
+  if (n.length !== 14 || /^(\d)\1{13}$/.test(n)) return false;
+  const dv = (base, pesos) => {
+    const s = base.split('').reduce((a, d, i) => a + Number(d) * pesos[i], 0);
+    const r = s % 11; return r < 2 ? 0 : 11 - r;
+  };
+  return dv(n.slice(0, 12), [5,4,3,2,9,8,7,6,5,4,3,2]) === Number(n[12])
+      && dv(n.slice(0, 13), [6,5,4,3,2,9,8,7,6,5,4,3,2]) === Number(n[13]);
+}
+
+function mascaraCNPJ(el) {
+  const n = el.value.replace(/\D/g, '').slice(0, 14);
+  el.value = n.replace(/^(\d{2})(\d)/, '$1.$2').replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3')
+              .replace(/\.(\d{3})(\d)/, '.$1/$2').replace(/(\d{4})(\d)/, '$1-$2');
+}
+
+let pfTimer = null;
+function validarCampo(campo) {
+  const mapa = { nome: 'pf-nome', slug: 'pf-slug', usuario: 'pf-user', senha: 'pf-senha', cnpj: 'pf-cnpj' };
+  const el = document.getElementById(mapa[campo]);
+  const dica = document.getElementById('dica-' + campo);
+  if (!el || !dica) return;
+  const v = el.value.trim();
+  if (!v && campo !== 'senha') { dica.className = 'pf-dica'; return; }
+  const r = PF_REGRAS[campo] ? PF_REGRAS[campo](v) : true;
+  if (r !== true) { dica.className = 'pf-dica ruim'; dica.textContent = '✕ ' + r; return; }
+  dica.className = 'pf-dica bom'; dica.textContent = '✓ ok';
+
+  // slug e usuário precisam ser únicos: pergunta ao servidor, sem travar a digitação
+  if (campo === 'slug' || campo === 'usuario') {
+    clearTimeout(pfTimer);
+    pfTimer = setTimeout(async () => {
+      try {
+        const q = campo === 'slug' ? 'slug=' + encodeURIComponent(v) : 'usuario=' + encodeURIComponent(v);
+        const d = await api('/api/plataforma/disponivel?' + q);
+        const livre = campo === 'slug' ? d.slug?.livre : d.usuario?.livre;
+        dica.className = 'pf-dica ' + (livre ? 'bom' : 'ruim');
+        dica.textContent = livre ? '✓ disponível' : '✕ já está em uso — escolha outro';
+      } catch (e) { /* sem conexão: o servidor barra na hora de criar */ }
+    }, 400);
+  }
+}
+
+async function criarRestaurante() {
+  const msg = document.getElementById('pf-form-msg');
+  const corpo = {
+    nome: document.getElementById('pf-nome').value.trim(),
+    slug: document.getElementById('pf-slug').value.trim(),
+    cnpj: document.getElementById('pf-cnpj').value.trim(),
+    plano: document.getElementById('pf-plano').value,
+    admin_usuario: document.getElementById('pf-user').value.trim(),
+    admin_senha: document.getElementById('pf-senha').value,
+    importar_catalogo: document.getElementById('pf-catalogo').checked,
+  };
+  // Trava o botão enquanto cria: clique duplo criaria dois restaurantes.
+  const btn = document.getElementById('pf-btn-criar');
+  btn.disabled = true; btn.textContent = 'Criando...';
+  try {
+    const r = await apiPost('/api/plataforma/restaurantes', corpo);
+    msg.style.display = 'block';
+    // O que vem depois de criar importa tanto quanto criar: o dono precisa saber os
+    // primeiros passos até o app mostrar valor, senão a conta fica parada e ele cancela.
+    msg.innerHTML = `✅ <b>${escapeHtml(r.restaurante.nome)}</b> criado.<br>` +
+      `Já tem ${r.preparado.categorias} categorias e ${r.preparado.produtos} produtos cadastrados.<br>` +
+      `Acesso do dono: <b>${escapeHtml(r.admin.username)}</b><br><br>` +
+      `<b>Primeiros passos para passar pra ele:</b><br>` +
+      `1. Revisar o catálogo e desativar o que não usa<br>` +
+      `2. Lançar o caixa do dia na aba Dia<br>` +
+      `3. Mandar as contas do mês (luz, água, aluguel)<br>` +
+      `4. Conferir as taxas da maquininha dele em Admin → Meu restaurante<br>` +
+      `<i>Depois disso a aba Índices já mostra o resultado dele.</i>`;
+    ['pf-nome', 'pf-slug', 'pf-cnpj', 'pf-user', 'pf-senha'].forEach(id => document.getElementById(id).value = '');
+    ['nome', 'slug', 'cnpj', 'usuario', 'senha'].forEach(c => {
+      const d = document.getElementById('dica-' + c); if (d) { d.className = 'pf-dica'; d.textContent = ''; }
+    });
+    loadPlataforma();
+  } catch (e) {
+    msg.style.display = 'block';
+    msg.textContent = '❌ ' + (e.message || 'Erro ao criar.');
+  } finally {
+    btn.disabled = false; btn.textContent = 'Criar restaurante';
+  }
+}
+
+async function loadPlataforma() {
+  const tab = document.getElementById('pf-tabela');
+  if (!tab) return;
+  tab.innerHTML = '<tbody><tr><td class="loading">Carregando...</td></tr></tbody>';
+  try {
+    const d = await api('/api/plataforma/restaurantes');
+    const selo = r => r.saude === 'ok' ? '<span class="sheet-status fechado">em dia</span>'
+      : r.saude === 'atencao' ? '<span class="sheet-status caixa">atenção</span>'
+      : '<span class="sheet-status sem_caixa">em risco</span>';
+    tab.innerHTML = `
+      <thead><tr>
+        <th>Restaurante</th><th>Plano</th>
+        <th class="num">Lançou</th><th class="num">Aderência</th>
+        <th class="num">Usuários</th><th class="num">Produtos</th>
+        <th>Situação</th><th></th>
+      </tr></thead>
+      <tbody>${(d.restaurantes || []).map(r => `
+        <tr${r.ativo ? '' : ' class="row-muted"'}>
+          <td><b>${escapeHtml(r.nome)}</b><div class="sheet-muted">${escapeHtml(r.slug)}</div></td>
+          <td>${escapeHtml(r.plano)}</td>
+          <td class="num">${r.dias_lancados}/${r.dias_do_mes} dias</td>
+          <td class="num">${r.aderencia}%</td>
+          <td class="num">${r.usuarios}</td>
+          <td class="num">${r.produtos}</td>
+          <td>${r.ativo ? selo(r) : '<span class="sheet-status vazio">suspenso</span>'}</td>
+          <td><button class="btn-sm" onclick="alternarRestaurante(${r.id}, ${!r.ativo})">${r.ativo ? 'Suspender' : 'Reativar'}</button></td>
+        </tr>`).join('')}</tbody>`;
+  } catch (e) {
+    tab.innerHTML = '<tbody><tr><td class="empty-text">Erro ao carregar.</td></tr></tbody>';
+    handleApiError(e);
+  }
+}
+
+async function alternarRestaurante(id, ativo) {
+  try { await apiPost(`/api/plataforma/restaurantes/${id}/status`, { ativo }); loadPlataforma(); }
+  catch (e) { handleApiError(e); }
+}
+
+// ── COMPARAR PERÍODOS ───────────────────────────────────────────────
+// Substituiu a antiga aba Relatórios, que repetia os números da Planilha com
+// período flexível. Aqui a pergunta é outra: melhorou ou piorou, e em quê.
+function cmpPreset(tipo) {
+  const hoje = new Date();
+  const iso = d => d.toISOString().slice(0, 10);
+  let ini, fim = new Date(hoje);
+  if (tipo === '7') { ini = new Date(hoje); ini.setDate(ini.getDate() - 6); }
+  else if (tipo === '30') { ini = new Date(hoje); ini.setDate(ini.getDate() - 29); }
+  else if (tipo === 'mes') { ini = new Date(hoje.getFullYear(), hoje.getMonth(), 1); }
+  else if (tipo === 'mes-anterior') {
+    ini = new Date(hoje.getFullYear(), hoje.getMonth() - 1, 1);
+    fim = new Date(hoje.getFullYear(), hoje.getMonth(), 0);
+  }
+  document.getElementById('cmp-inicio').value = iso(ini);
+  document.getElementById('cmp-fim').value = iso(fim);
+  loadComparar();
+}
+
+async function loadComparar() {
+  const iniEl = document.getElementById('cmp-inicio'), fimEl = document.getElementById('cmp-fim');
+  if (!iniEl || !fimEl) return;
+  if (!iniEl.value || !fimEl.value) { cmpPreset('7'); return; }
+  const tabela = document.getElementById('cmp-tabela');
+  tabela.innerHTML = '<tbody><tr><td class="loading">Carregando...</td></tr></tbody>';
+  try {
+    renderComparar(await api(`/api/comparar?inicio=${iniEl.value}&fim=${fimEl.value}`));
+  } catch (e) {
+    tabela.innerHTML = '<tbody><tr><td class="empty-text">Erro ao comparar.</td></tr></tbody>';
+    handleApiError(e);
+  }
+}
+
+function renderComparar(d) {
+  document.getElementById('cmp-periodos').innerHTML =
+    `<b>${escapeHtml(d.atual.label)}</b> (${d.atual.dias} dias) &nbsp;comparado com&nbsp; <b>${escapeHtml(d.base.label)}</b>`;
+
+  const al = document.getElementById('cmp-alerta');
+  if (d.alerta) { al.style.display = 'block'; al.textContent = '⚠️ ' + d.alerta; }
+  else al.style.display = 'none';
+
+  const fmtVal = (v, tipo) => v === null || v === undefined ? '—'
+    : tipo === 'dinheiro' ? fmtBRLMoney(v)
+    : tipo === 'pct' ? String(v).replace('.', ',') + '%'
+    : String(v);
+
+  // Cor pela MELHORA, não pelo sinal: consumo subindo é vermelho mesmo sendo "+".
+  const seta = l => {
+    if (l.abs === null || l.abs === 0) return '<span class="sheet-muted">sem mudança</span>';
+    const cor = l.melhorou === null ? '' : (l.melhorou ? 'green' : 'red');
+    const sinal = l.abs > 0 ? '▲' : '▼';
+    const pct = l.pct === null ? '' : ` (${l.pct > 0 ? '+' : ''}${String(l.pct).replace('.', ',')}%)`;
+    return `<b class="${cor}">${sinal} ${fmtVal(Math.abs(l.abs), l.tipo)}${pct}</b>`;
+  };
+
+  document.getElementById('cmp-tabela').innerHTML = `
+    <thead><tr>
+      <th>Indicador</th>
+      <th class="num">${escapeHtml(d.atual.label)}</th>
+      <th class="num">${escapeHtml(d.base.label)}</th>
+      <th class="num">Variação</th>
+    </tr></thead>
+    <tbody>${d.linhas.map(l => `
+      <tr${l.chave === 'resultado_operacional' ? ' class="row-total"' : ''}>
+        <td><b>${escapeHtml(l.rotulo)}</b></td>
+        <td class="num">${fmtVal(l.atual, l.tipo)}</td>
+        <td class="num">${fmtVal(l.anterior, l.tipo)}</td>
+        <td class="num">${seta(l)}</td>
+      </tr>`).join('')}</tbody>`;
+}
+
 // ── ÍNDICES GERENCIAIS ──────────────────────────────────────────────
 // Mostra sempre MÊS e MÉDIA lado a lado. O mês serve pra conferir se o lançamento foi
 // feito; a média é a que serve pra decidir, porque item comprado em lote (gás, óleo,
@@ -4551,148 +4923,11 @@ function fimMesClient(mes) {
   return new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10);
 }
 
-function relatorioPreset(tipo) {
-  const hoje = hojeSPClient();
-  const ini = document.getElementById('rel-data-inicio');
-  const fim = document.getElementById('rel-data-fim');
-  if (!ini || !fim) return;
-  if (tipo === 'hoje') {
-    ini.value = hoje;
-    fim.value = hoje;
-  } else if (tipo === '7') {
-    ini.value = addDiasClient(hoje, -6);
-    fim.value = hoje;
-  } else if (tipo === '30') {
-    ini.value = addDiasClient(hoje, -29);
-    fim.value = hoje;
-  } else if (tipo === 'mes') {
-    const mes = mesAtualClient();
-    ini.value = `${mes}-01`;
-    fim.value = fimMesClient(mes);
-  } else if (tipo === 'mes-anterior') {
-    const [y, m] = mesAtualClient().split('-').map(Number);
-    const mesAnt = new Date(Date.UTC(y, m - 2, 1)).toISOString().slice(0, 7);
-    ini.value = `${mesAnt}-01`;
-    fim.value = fimMesClient(mesAnt);
-  }
-  loadRelatorios();
-}
 
-async function loadRelatorios() {
-  const ini = document.getElementById('rel-data-inicio');
-  const fim = document.getElementById('rel-data-fim');
-  if (!ini || !fim) return;
-  if (!ini.value || !fim.value) {
-    const hoje = hojeSPClient();
-    ini.value = addDiasClient(hoje, -6);
-    fim.value = hoje;
-  }
-  const resumoEl = document.getElementById('rel-resumo');
-  const formasEl = document.getElementById('rel-formas');
-  const contasEl = document.getElementById('rel-contas');
-  const diasEl = document.getElementById('rel-dias');
-  resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
-  formasEl.innerHTML = '';
-  contasEl.innerHTML = '';
-  diasEl.innerHTML = '';
-  try {
-    const qs = new URLSearchParams({ data_inicio: ini.value, data_fim: fim.value });
-    const d = await api('/api/relatorios/periodo?' + qs.toString());
-    relatoriosCache = d;
-    renderRelatorios(d);
-  } catch(e) {
-    resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar relatório.</div></div>';
-    handleApiError(e, true);
-  }
-}
 
-function renderRelatorios(d) {
-  const t = d.totais || {};
-  const resumoEl = document.getElementById('rel-resumo');
-  const insightEl = document.getElementById('rel-insight');
-  const formasEl = document.getElementById('rel-formas');
-  const contasEl = document.getElementById('rel-contas');
-  const diasEl = document.getElementById('rel-dias');
 
-  resumoEl.innerHTML = `
-    <div class="real-kpi big">
-      <div class="real-label">Vendas</div>
-      <div class="real-val green">${fmtBRLMoney(t.vendas)}</div>
-      <div class="real-sub">${t.pratos_vendidos || 0} pratos · ticket ${fmtBRLMoney(t.ticket_medio)}</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Resultado operacional</div>
-      <div class="real-val ${Number(t.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_operacional)}</div>
-      <div class="real-sub">vendas - consumo - perdas - despesas caixa</div>
-    </div>
-    <div class="real-kpi warn">
-      <div class="real-label">Compras estoque</div>
-      <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
-      <div class="real-sub">investimento separado</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Consumo estoque</div>
-      <div class="real-val">${fmtBRLMoney(t.consumo_estoque)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.consumo_estoque / t.vendas) * 100 : null)} das vendas</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Perdas</div>
-      <div class="real-val red">${fmtBRLMoney(t.perdas)}</div>
-      <div class="real-sub">${fmtPct(t.vendas ? (t.perdas / t.vendas) * 100 : null)} das vendas</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Despesas caixa</div>
-      <div class="real-val red">${fmtBRLMoney(t.despesas_caixa)}</div>
-      <div class="real-sub">despesas digitadas no movimento</div>
-    </div>
-    <div class="real-kpi loss">
-      <div class="real-label">Contas pagas</div>
-      <div class="real-val red">${fmtBRLMoney(t.contas_pagas)}</div>
-      <div class="real-sub">${t.lancamentos_contas || 0} lançamento(s)</div>
-    </div>
-    <div class="real-kpi">
-      <div class="real-label">Dias fechados</div>
-      <div class="real-val">${t.dias_com_caixa || 0}/${t.dias_periodo || 0}</div>
-      <div class="real-sub">${escapeHtml(d.inicio_br || '')} até ${escapeHtml(d.fim_br || '')}</div>
-    </div>`;
 
-  insightEl.textContent = 'Compras de estoque aparecem separadas do resultado. Contas pagas também ficam separadas das despesas lançadas no caixa do dia.';
 
-  formasEl.innerHTML = d.formas_pagamento?.length
-    ? d.formas_pagamento.map(f => `
-      <div class="sheet-pay-row">
-        <div><b>${escapeHtml(f.forma)}</b><div class="sheet-muted">${f.qtd ? f.qtd + ' lançamento(s)' : 'sem quantidade'}</div></div>
-        <b>${fmtBRLMoney(f.valor)}</b>
-      </div>`).join('')
-    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhum recebimento no período.</div></div>';
-
-  const contas = d.contas?.por_categoria || [];
-  contasEl.innerHTML = contas.length
-    ? contas.slice(0, 20).map(c => `
-      <div class="sheet-pay-row">
-        <div><b>${escapeHtml(c.categoria)}</b><div class="sheet-muted">${escapeHtml(c.grupo)} · ${c.qtd} lançamento(s)</div></div>
-        <b>${fmtBRLMoney(c.valor_bruto)}</b>
-      </div>`).join('')
-    : '<div class="empty" style="padding:22px 10px"><div class="empty-text">Nenhuma conta paga no período.</div></div>';
-
-  diasEl.innerHTML = `
-    <thead><tr>
-      <th>Data</th><th class="num">Vendas</th><th class="num">Pratos</th><th class="num">Contas</th>
-      <th class="num">Compras</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Desp. caixa</th><th class="num">Resultado</th>
-    </tr></thead>
-    <tbody>${(d.dias || []).map(row => `
-      <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
-        <td><b>${escapeHtml(row.data_br)}</b></td>
-        <td class="num">${fmtSheetMoney(row.vendas)}</td>
-        <td class="num">${row.pratos_vendidos || '—'}</td>
-        <td class="num">${fmtSheetMoney(row.contas_pagas)}</td>
-        <td class="num">${fmtSheetMoney(row.compras_estoque)}</td>
-        <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
-        <td class="num">${fmtSheetMoney(row.perdas)}</td>
-        <td class="num">${fmtSheetMoney(row.despesas)}</td>
-        <td class="num"><b class="${Number(row.resultado_operacional || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_operacional)}</b></td>
-      </tr>`).join('')}</tbody>`;
-}
 
 function grupoDaContaPagamento(categoria) {
   const alvo = norm(categoria);
