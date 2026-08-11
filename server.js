@@ -3977,20 +3977,35 @@ function isTabelaCardapiosSalvosMissing(error) {
   );
 }
 
+// Cuba Tripla: 1 espaço físico de cuba dividido em 3 tiras empilhadas, cada uma com um
+// prato diferente (pedido do Rubens 11/08, baseado na foto real da bancada). Ocupa o
+// mesmo lugar de 1 cuba normal na contagem de "16 Cubas" do buffet, mas carrega ate 3
+// pratos_tripla em vez de 1 prato_id so. Fatias vazias ficam como null (ainda nao escolhida).
 function normalizarSecaoCardapio(value, max = 20) {
   const rows = arrayFromMaybeJson(value);
   return rows.slice(0, max).map(row => {
-    const pratoId = Number.isInteger(Number(row?.prato_id)) && Number(row?.prato_id) > 0 ? Number(row.prato_id) : null;
+    const tipo = row?.tipo === 'tripla' ? 'tripla' : 'normal';
     const cubas = parseNonNegativeInteger(row?.cubas ?? 1) || 1;
     const obs = sanitizeText(row?.obs || '', 160);
-    return { prato_id: pratoId, cubas, obs };
-  }).filter(row => row.prato_id);
+    if (tipo === 'tripla') {
+      const bruto = Array.isArray(row?.pratos_tripla) ? row.pratos_tripla : [];
+      const pratosTripla = [0, 1, 2].map(i => {
+        const v = Number(bruto[i]);
+        return Number.isInteger(v) && v > 0 ? v : null;
+      });
+      return { tipo, prato_id: null, pratos_tripla: pratosTripla, cubas, obs };
+    }
+    const pratoId = Number.isInteger(Number(row?.prato_id)) && Number(row?.prato_id) > 0 ? Number(row.prato_id) : null;
+    return { tipo, prato_id: pratoId, cubas, obs };
+  }).filter(row => row.tipo === 'tripla' ? row.pratos_tripla.some(Boolean) : row.prato_id);
 }
 
 async function comDetalhesPratos(base) {
   const secoes = ['buffet_principal', 'rechaud_redondo', 'rechaud_retangular'];
   const idsPratos = [...new Set(
-    secoes.flatMap(s => arrayFromMaybeJson(base[s]).map(item => item?.prato_id).filter(Boolean))
+    secoes.flatMap(s => arrayFromMaybeJson(base[s]).flatMap(item =>
+      item?.tipo === 'tripla' ? (item.pratos_tripla || []).filter(Boolean) : [item?.prato_id].filter(Boolean)
+    ))
   )];
   let pratosPorId = {};
   if (idsPratos.length) {
@@ -4003,7 +4018,30 @@ async function comDetalhesPratos(base) {
     const { data: produtosLigados } = await supabase.from('produtos').select('id,qtd,unidade,ativo,minimo').in('id', idsProdutos);
     for (const p of (produtosLigados || [])) estoquePorId[p.id] = p;
   }
+  const detalheDe = (pratoId) => {
+    const prato = pratoId ? pratosPorId[pratoId] : null;
+    const prod = prato?.produto_id ? estoquePorId[prato.produto_id] : null;
+    return {
+      prato_id: pratoId || null,
+      nome: prato ? prato.nome : (pratoId ? '(prato removido do catálogo)' : ''),
+      foto_url: prato ? prato.foto_url : '',
+      prato_removido: !!(pratoId && !prato),
+      estoque_atual: prod ? Number(prod.qtd) : null,
+      estoque_unidade: prod ? prod.unidade : null,
+      estoque_baixo: prod ? (Number(prod.qtd) <= Number(prod.minimo || 0) && Number(prod.minimo || 0) > 0) : false,
+      produto_arquivado: prod ? !(prod.ativo === 1 || prod.ativo === null) : false,
+    };
+  };
   const comDetalhes = (secaoRows) => arrayFromMaybeJson(secaoRows).map(item => {
+    if (item?.tipo === 'tripla') {
+      const fatias = (item.pratos_tripla || []).map(id => detalheDe(id));
+      return {
+        ...item,
+        tipo: 'tripla',
+        fatias,
+        estoque_baixo: fatias.some(f => f.estoque_baixo),
+      };
+    }
     const prato = item?.prato_id ? pratosPorId[item.prato_id] : null;
     const prod = prato?.produto_id ? estoquePorId[prato.produto_id] : null;
     return {

@@ -408,6 +408,14 @@ select.big-input { font-size: 14px; }
 .card-cuba-warn { position: absolute; bottom: 5px; right: 5px; font-size: 12px; z-index: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
 .card-cuba-cubas-badge { position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.55); color: #fff; font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
 
+/* Cuba Tripla — 1 slot de buffet dividido em 3 fatias empilhadas, cada uma com um prato */
+.card-cuba-item.tripla { display: flex; flex-direction: column; gap: 3px; cursor: default; padding: 4px; }
+.tripla-fatia { position: relative; flex: 1; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
+.tripla-fatia img, .tripla-fatia .card-cuba-sem-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tripla-fatia.vazia { display: flex; align-items: center; justify-content: center; border: 1px dashed rgba(255,255,255,0.32); color: rgba(255,255,255,0.55); font-size: 14px; background: rgba(255,255,255,0.05); }
+.tripla-fatia-nome { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, rgba(0,0,0,.78), transparent); color: #fff; font-size: 7px; font-weight: 800; padding: 2px 4px 1px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tripla-fatia-warn { position: absolute; top: 1px; right: 2px; font-size: 8px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.8)); z-index: 2; }
+
 /* Rechauds — pratos redondos e retangulares, visualmente diferentes das cubas do buffet */
 .rechaud-redondo .card-cuba-item, .rechaud-redondo .pan-tray-inner { border-radius: 50%; }
 .rechaud-redondo .card-cuba-remove { top: 2px; right: 2px; }
@@ -1067,6 +1075,7 @@ select.big-input { font-size: 14px; }
             <span class="buffet-section-icon buffet-icon-principal">🍛</span>
             Buffet principal <span id="card-cubas-total" class="sheet-muted"></span>
             <button class="btn-sm" onclick="abrirSeletorPrato('buffet_principal')">+ cuba</button>
+            <button class="btn-sm" onclick="adicionarCubaTripla('buffet_principal')">+ tripla</button>
           </div>
           <div class="buffet-counter">
             <div class="buffet-counter-rail"></div>
@@ -1560,7 +1569,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v90</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v91</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3482,6 +3491,7 @@ let cardapioEstado = { buffet_principal: [], rechaud_redondo: [], rechaud_retang
 let catalogoPratos = [];
 let cardSeletorSecaoAlvo = null;
 let cardSeletorIdxTroca = null;
+let cardSeletorTriplaSlot = null; // null = cuba normal; 0/1/2 = qual fatia da Cuba Tripla
 let cardPratoProdutoSel = null;
 let cardPratoFotoBase64 = null;
 let cardBuscaSalvosTimer = null;
@@ -3563,7 +3573,37 @@ function cubaFotoHtml(item) {
   return `<div class="card-cuba-sem-foto">🍽️</div>`;
 }
 
+// Cuba Tripla: 1 espaço de cuba dividido em 3 tiras empilhadas, cada uma com um prato
+// diferente (fatias). Ocupa 1 posição na sequência numerada igual uma cuba normal.
+function fatiaTriplaHtml(secao, idx, slot, fatia) {
+  if (!fatia || !fatia.prato_id) {
+    return `<div class="tripla-fatia vazia" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">+</div>`;
+  }
+  const foto = fatia.foto_url ? `<img src="${escapeHtml(fatia.foto_url)}" alt="">` : `<div class="card-cuba-sem-foto">🍽️</div>`;
+  const tituloWarn = fatia.estoque_baixo ? ` — estoque baixo: ${fatia.estoque_atual ?? '?'} ${escapeHtml(fatia.estoque_unidade || '')}` : '';
+  return `<div class="tripla-fatia" title="${escapeHtml(fatia.nome || '')}${tituloWarn}" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">
+    ${foto}
+    <div class="tripla-fatia-nome">${escapeHtml(fatia.nome || '')}</div>
+    ${fatia.estoque_baixo ? `<div class="tripla-fatia-warn">⚠️</div>` : ''}
+  </div>`;
+}
+
+function cubaItemTriplaHtml(secao, item, idx) {
+  const fatias = item.fatias || [null, null, null];
+  return `<div class="pan-slot">
+    <div class="pan-header">
+      <span class="pan-num">${idx + 1}</span>
+      <span class="pan-name">Cuba Tripla</span>
+    </div>
+    <div class="card-cuba-item tripla">
+      <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
+      ${[0, 1, 2].map(slot => fatiaTriplaHtml(secao, idx, slot, fatias[slot])).join('')}
+    </div>
+  </div>`;
+}
+
 function cubaItemHtml(secao, item, idx) {
+  if (item.tipo === 'tripla') return cubaItemTriplaHtml(secao, item, idx);
   const baixo = item.estoque_baixo ? ' estoque-baixo' : '';
   const tituloWarn = item.estoque_baixo ? `Estoque baixo: ${item.estoque_atual ?? '?'} ${escapeHtml(item.estoque_unidade || '')}` : '';
   return `<div class="pan-slot">
@@ -3592,7 +3632,8 @@ function atualizarResumoCardapio() {
   const buffet = cardapioEstado.buffet_principal || [];
   const redondo = cardapioEstado.rechaud_redondo || [];
   const retangular = cardapioEstado.rechaud_retangular || [];
-  const totalPratos = buffet.length + redondo.length + retangular.length;
+  const contarPratos = (arr) => arr.reduce((s, i) => s + (i.tipo === 'tripla' ? (i.fatias || []).filter(f => f && f.prato_id).length : 1), 0);
+  const totalPratos = contarPratos(buffet) + contarPratos(redondo) + contarPratos(retangular);
   const totalCubas = buffet.reduce((s, i) => s + Number(i.cubas || 1), 0);
   const totalRechauds = redondo.length + retangular.length;
   const elP = document.getElementById('card-resumo-pratos');
@@ -3628,8 +3669,10 @@ function atualizarCardAlerta() {
   const card = document.getElementById('card-alerta-card');
   const list = document.getElementById('card-alerta-list');
   if (!card || !list) return;
-  const todos = [...cardapioEstado.buffet_principal, ...cardapioEstado.rechaud_redondo, ...cardapioEstado.rechaud_retangular]
-    .filter(i => i.estoque_baixo);
+  const expandir = (arr) => (arr || []).flatMap(i => i.tipo === 'tripla'
+    ? (i.fatias || []).filter(f => f && f.estoque_baixo)
+    : (i.estoque_baixo ? [i] : []));
+  const todos = [...expandir(cardapioEstado.buffet_principal), ...expandir(cardapioEstado.rechaud_redondo), ...expandir(cardapioEstado.rechaud_retangular)];
   if (!todos.length) { card.style.display = 'none'; return; }
   card.style.display = 'block';
   list.innerHTML = todos.map(item =>
@@ -3638,13 +3681,33 @@ function atualizarCardAlerta() {
 }
 
 function coletarCardapioSecao(secao) {
-  return (cardapioEstado[secao] || []).map(i => ({ prato_id: i.prato_id, cubas: i.cubas || 1, obs: i.obs || '' }));
+  return (cardapioEstado[secao] || []).map(i => i.tipo === 'tripla'
+    ? { tipo: 'tripla', pratos_tripla: i.pratos_tripla || [null, null, null], cubas: i.cubas || 1, obs: i.obs || '' }
+    : { prato_id: i.prato_id, cubas: i.cubas || 1, obs: i.obs || '' });
+}
+
+// ---- Cuba Tripla: adiciona uma nova (vazia) e já abre o seletor na 1ª fatia ----
+function adicionarCubaTripla(secao) {
+  cardapioEstado[secao].push({ tipo: 'tripla', prato_id: null, pratos_tripla: [null, null, null], fatias: [null, null, null], cubas: 1, obs: '' });
+  const idx = cardapioEstado[secao].length - 1;
+  renderTodasCubas();
+  editarFatiaTripla(secao, idx, 0);
+}
+
+function editarFatiaTripla(secao, idx, slot) {
+  cardSeletorSecaoAlvo = secao;
+  cardSeletorIdxTroca = idx;
+  cardSeletorTriplaSlot = slot;
+  document.getElementById('card-seletor-busca').value = '';
+  document.getElementById('card-seletor-overlay').style.display = 'flex';
+  renderSeletorPrato('');
 }
 
 // ---- Seletor de prato (modal) ----
 function abrirSeletorPrato(secao, idxTroca = null) {
   cardSeletorSecaoAlvo = secao;
   cardSeletorIdxTroca = idxTroca;
+  cardSeletorTriplaSlot = null;
   document.getElementById('card-seletor-busca').value = '';
   document.getElementById('card-seletor-overlay').style.display = 'flex';
   renderSeletorPrato('');
@@ -3654,6 +3717,7 @@ function fecharSeletorPrato() {
   document.getElementById('card-seletor-overlay').style.display = 'none';
   cardSeletorSecaoAlvo = null;
   cardSeletorIdxTroca = null;
+  cardSeletorTriplaSlot = null;
 }
 
 function renderSeletorPrato(q) {
@@ -3676,7 +3740,21 @@ function escolherPratoNoSeletor(pratoId) {
   if (!prato || !cardSeletorSecaoAlvo) return;
   const secao = cardSeletorSecaoAlvo;
   const idx = cardSeletorIdxTroca;
+  const slot = cardSeletorTriplaSlot;
   fecharSeletorPrato();
+
+  // Escolhendo uma fatia de Cuba Tripla — atualiza só aquela fatia, o resto do item fica igual.
+  if (slot !== null && slot !== undefined) {
+    const item = cardapioEstado[secao] && cardapioEstado[secao][idx];
+    if (!item) return;
+    if (!item.pratos_tripla) item.pratos_tripla = [null, null, null];
+    if (!item.fatias) item.fatias = [null, null, null];
+    item.pratos_tripla[slot] = prato.id;
+    item.fatias[slot] = { prato_id: prato.id, nome: prato.nome, foto_url: prato.foto_url, estoque_baixo: false, estoque_atual: null, estoque_unidade: null };
+    renderTodasCubas();
+    return;
+  }
+
   // Estoque (estoque_atual/estoque_baixo) só vem calculado do servidor depois de Salvar +
   // recarregar — nesta escolha ainda não-salva, mostra só nome/foto (sem alerta de estoque).
   const novoItem = { prato_id: prato.id, nome: prato.nome, foto_url: prato.foto_url, cubas: 1, obs: '', estoque_baixo: false, estoque_atual: null, estoque_unidade: null };
@@ -3981,7 +4059,12 @@ async function excluirCardapioAtual() {
 
 function imprimirCardapio() {
   const label = (cardapioAtualNome || 'NOVO CARDÁPIO').toUpperCase();
-  const linha = (item, numero) => `<tr><td>${numero}</td><td>${escapeHtml(item.nome)}${item.cubas > 1 ? ` <b>(${item.cubas} CUBAS)</b>` : ''}${item.obs ? `<br><small>${escapeHtml(item.obs)}</small>` : ''}</td></tr>`;
+  const linha = (item, numero) => {
+    const nome = item.tipo === 'tripla'
+      ? ((item.fatias || []).map(f => f && f.nome).filter(Boolean).join(' + ') || 'Cuba Tripla (vazia)')
+      : item.nome;
+    return `<tr><td>${numero}</td><td>${escapeHtml(nome)}${item.cubas > 1 ? ` <b>(${item.cubas} CUBAS)</b>` : ''}${item.obs ? `<br><small>${escapeHtml(item.obs)}</small>` : ''}</td></tr>`;
+  };
   const buffet = cardapioEstado.buffet_principal;
   const redondo = cardapioEstado.rechaud_redondo;
   const retangular = cardapioEstado.rechaud_retangular;
