@@ -6436,22 +6436,30 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
   }
 
   if (acao === 'criticos') {
-    const { data } = await supabase.from('produtos').select('id, nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
-    const crit = (data || []).filter(p => statusProd(p) === 'CRITICO');
+    // QA Robo (teste) é produto fictício do robô de QA — nunca deve aparecer em alerta real.
+    const CATEGORIAS_TESTE = ['QA Robo (teste)'];
+    const { data: dataRaw } = await supabase.from('produtos').select('id, nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
+    const data = (dataRaw || []).filter(p => !CATEGORIAS_TESTE.includes(p.categoria));
+    const crit = data.filter(p => statusProd(p) === 'CRITICO');
 
     // Itens parados: tem estoque mas NENHUMA saída (venda/consumo) há N dias — giro
     // zero, é dinheiro/estoque parado (diferente de crítico, que é estoque baixo).
-    // Pedido do Rubens 11/08: separar "vai faltar" de "não roda".
+    // Pedido do Rubens 11/08: separar "vai faltar" de "não roda". Embalagens fora daqui —
+    // não têm "giro" no mesmo sentido de comida (compradas em lote, ficam paradas por natureza).
+    // Itens substitutos (ex: paleta bovina x coxão duro, compra o mais barato do momento)
+    // continuam aparecendo normalmente — isso é esperado, não é bug pra filtrar.
+    const CATEGORIAS_SEM_GIRO = ['Embalagens', ...CATEGORIAS_TESTE];
     const DIAS_PARADO_MIN = 10;
     let parados = [];
-    if (data && data.length) {
-      const ids = data.map(p => p.id);
+    const dataParaGiro = data.filter(p => !CATEGORIAS_SEM_GIRO.includes(p.categoria));
+    if (dataParaGiro.length) {
+      const ids = dataParaGiro.map(p => p.id);
       const { data: movs } = await supabase.from('movimentacoes')
         .select('produto_id, created_at').eq('tipo', 'Saída').in('produto_id', ids)
         .order('created_at', { ascending: false });
       const ultimaSaida = {};
       for (const m of (movs || [])) { if (!ultimaSaida[m.produto_id]) ultimaSaida[m.produto_id] = m.created_at; }
-      for (const p of data) {
+      for (const p of dataParaGiro) {
         const last = ultimaSaida[p.id];
         const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
         if (dias === null || dias >= DIAS_PARADO_MIN) parados.push({ ...p, dias_parado: dias });
