@@ -6436,10 +6436,39 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
   }
 
   if (acao === 'criticos') {
-    const { data } = await supabase.from('produtos').select('nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
+    const { data } = await supabase.from('produtos').select('id, nome, categoria, qtd, minimo, unidade').gt('qtd', 0).or('ativo.eq.1,ativo.is.null').order('nome');
     const crit = (data || []).filter(p => statusProd(p) === 'CRITICO');
-    if (!crit.length) return res.json({ resposta: '✅ Nenhum produto em nível crítico!' });
-    return res.json({ resposta: `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${crit.map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}` });
+
+    // Itens parados: tem estoque mas NENHUMA saída (venda/consumo) há N dias — giro
+    // zero, é dinheiro/estoque parado (diferente de crítico, que é estoque baixo).
+    // Pedido do Rubens 11/08: separar "vai faltar" de "não roda".
+    const DIAS_PARADO_MIN = 10;
+    let parados = [];
+    if (data && data.length) {
+      const ids = data.map(p => p.id);
+      const { data: movs } = await supabase.from('movimentacoes')
+        .select('produto_id, created_at').eq('tipo', 'Saída').in('produto_id', ids)
+        .order('created_at', { ascending: false });
+      const ultimaSaida = {};
+      for (const m of (movs || [])) { if (!ultimaSaida[m.produto_id]) ultimaSaida[m.produto_id] = m.created_at; }
+      for (const p of data) {
+        const last = ultimaSaida[p.id];
+        const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
+        if (dias === null || dias >= DIAS_PARADO_MIN) parados.push({ ...p, dias_parado: dias });
+      }
+      parados.sort((a, b) => Number(b.qtd) - Number(a.qtd)); // o que mais tem parado primeiro
+    }
+
+    let resposta = crit.length
+      ? `🟠 *PRODUTOS CRÍTICOS (${crit.length})*\n\n${crit.map(p=>`• ${p.nome}: ${p.qtd}/${p.minimo} ${p.unidade}`).join('\n')}`
+      : '✅ Nenhum produto em nível crítico!';
+    if (parados.length) {
+      const top = parados.slice(0, 15);
+      resposta += `\n\n🟣 *PARADOS SEM GIRO (${parados.length})* — sem saída há ${DIAS_PARADO_MIN}+ dias, o que mais tem primeiro\n\n` +
+        top.map(p => `• ${p.nome}: ${p.qtd} ${p.unidade}${p.dias_parado !== null ? ` (${p.dias_parado}d parado)` : ' (sem histórico)'}`).join('\n') +
+        (parados.length > top.length ? `\n… e mais ${parados.length - top.length}.` : '');
+    }
+    return res.json({ resposta });
   }
 
   if (acao === 'entrada' || acao === 'saida') {
