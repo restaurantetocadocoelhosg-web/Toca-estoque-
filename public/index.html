@@ -342,18 +342,77 @@ select.big-input { font-size: 14px; }
 .card-alert-item { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: rgba(239,68,68,0.07); border: 1px solid rgba(239,68,68,0.25); border-radius: 10px; padding: 9px 11px; font-size: 12px; }
 .card-alert-item b { color: var(--red); }
 
-/* Grade de cubas (buffet/rechauds) — cards com foto do prato */
-.card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; }
-.card-cuba-item { position: relative; background: var(--bg); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; cursor: pointer; aspect-ratio: 1; display: flex; flex-direction: column; }
-.card-cuba-item.vazia { display: flex; align-items: center; justify-content: center; border-style: dashed; color: var(--muted); font-size: 24px; }
-.card-cuba-item.estoque-baixo { border-color: rgba(239,68,68,0.5); box-shadow: 0 0 0 2px rgba(239,68,68,0.2) inset; }
-.card-cuba-foto { width: 100%; flex: 1; min-height: 0; object-fit: cover; background: var(--s2); display: block; }
-.card-cuba-sem-foto { width: 100%; flex: 1; min-height: 0; background: var(--s2); display: flex; align-items: center; justify-content: center; font-size: 26px; }
-.card-cuba-nome { flex-shrink: 0; font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; line-height: 1.25; background: var(--s1); text-align: center; }
-.card-cuba-badge { position: absolute; top: 6px; left: 6px; width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 10px; font-weight: 800; display: flex; align-items: center; justify-content: center; z-index: 2; }
-.card-cuba-remove { position: absolute; top: 6px; right: 6px; width: 20px; height: 20px; border-radius: 50%; background: rgba(0,0,0,0.55); color: #fff; font-size: 11px; font-weight: 800; border: none; display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 2; }
-.card-cuba-warn { position: absolute; bottom: 22px; right: 4px; font-size: 13px; z-index: 2; }
-.card-cuba-cubas-badge { position: absolute; bottom: 22px; left: 4px; background: rgba(0,0,0,0.6); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
+/* ============ Cardápio — layout com bancada de buffet ============ */
+.cardapio-layout { display: grid; grid-template-columns: 1fr 260px; gap: 16px; align-items: start; }
+.cardapio-main { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.cardapio-aside { display: flex; flex-direction: column; gap: 16px; position: sticky; top: 12px; }
+@media (max-width: 900px) { .cardapio-layout { grid-template-columns: 1fr; } .cardapio-aside { position: static; } }
+
+.buffet-topbar-title { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 15px; margin-bottom: 4px; }
+.buffet-section-icon { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 8px; font-size: 13px; margin-right: 2px; }
+.buffet-icon-principal { background: rgba(184,134,59,0.16); }
+.buffet-icon-redondo   { background: rgba(180,80,40,0.14); }
+.buffet-icon-retangular{ background: rgba(90,120,80,0.14); }
+
+.buffet-resumo-card .real-card-title { margin-bottom: 4px; }
+.buffet-resumo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.cardapio-aside .buffet-resumo-grid { grid-template-columns: 1fr; }
+.buffet-resumo-stat { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; display: flex; align-items: baseline; gap: 8px; }
+.buffet-resumo-stat b { font-size: 22px; font-weight: 900; color: var(--accent); line-height: 1; }
+.buffet-resumo-stat span { font-size: 11px; color: var(--muted); font-weight: 600; }
+
+/* A bancada: superfície escura com friso metálico no topo, onde as cubas "encaixam" */
+.buffet-counter {
+  position: relative;
+  background: linear-gradient(165deg, #4a3520 0%, #2e2013 62%, #241a10 100%);
+  border-radius: 18px;
+  padding: 20px 14px 16px;
+  box-shadow: inset 0 2px 0 rgba(255,255,255,0.08), inset 0 -22px 40px rgba(0,0,0,0.4), 0 10px 26px rgba(40,26,10,0.28);
+}
+.buffet-counter-rechaud { background: linear-gradient(165deg, #3a2e28 0%, #241c18 65%, #1b1512 100%); }
+.buffet-counter-rail {
+  position: absolute; top: 0; left: 16px; right: 16px; height: 7px;
+  background: linear-gradient(180deg, #efe9d8, #b7ad93);
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+}
+
+/* Grade de cubas — cada slot tem um cabeçalho (nº + nome) e a "cuba" de inox embaixo */
+.card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 14px 12px; position: relative; z-index: 1; }
+.pan-slot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pan-num {
+  flex-shrink: 0; width: 19px; height: 19px; border-radius: 50%;
+  background: linear-gradient(135deg, #e9c874, #ad7f2e);
+  color: #2c1c04; font-size: 10px; font-weight: 900;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.35);
+}
+.pan-name { font-size: 11px; font-weight: 800; color: #f3ead3; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.card-cuba-item {
+  position: relative; cursor: pointer; aspect-ratio: 1;
+  border-radius: 13px;
+  background: linear-gradient(150deg, #e4e8ec, #aab2bb);
+  padding: 4px;
+  box-shadow: 0 4px 10px rgba(0,0,0,0.38), inset 0 1px 1px rgba(255,255,255,0.7), inset 0 -1px 2px rgba(0,0,0,0.15);
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.card-cuba-item:hover { transform: translateY(-2px); box-shadow: 0 8px 18px rgba(0,0,0,0.42), inset 0 1px 1px rgba(255,255,255,0.7); }
+.card-cuba-item.vazia { display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.06); border: 2px dashed rgba(255,255,255,0.28); color: rgba(255,255,255,0.5); font-size: 24px; box-shadow: none; }
+.card-cuba-item.estoque-baixo { box-shadow: 0 4px 10px rgba(0,0,0,0.38), inset 0 1px 1px rgba(255,255,255,0.7), 0 0 0 2px rgba(230,140,20,0.75); }
+.pan-tray-inner { width: 100%; height: 100%; border-radius: 9px; overflow: hidden; background: #14100a; box-shadow: inset 0 4px 12px rgba(0,0,0,0.55), inset 0 -2px 6px rgba(0,0,0,0.3); }
+.card-cuba-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
+.card-cuba-sem-foto { width: 100%; height: 100%; background: #241c14; display: flex; align-items: center; justify-content: center; font-size: 26px; opacity: 0.6; }
+.card-cuba-remove { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; background: rgba(20,15,10,0.85); color: #fff; font-size: 11px; font-weight: 800; border: 1px solid rgba(255,255,255,0.25); display: flex; align-items: center; justify-content: center; cursor: pointer; z-index: 3; }
+.card-cuba-warn { position: absolute; bottom: 5px; right: 5px; font-size: 12px; z-index: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
+.card-cuba-cubas-badge { position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.55); color: #fff; font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
+
+/* Rechauds — pratos redondos e retangulares, visualmente diferentes das cubas do buffet */
+.rechaud-redondo .card-cuba-item, .rechaud-redondo .pan-tray-inner { border-radius: 50%; }
+.rechaud-redondo .card-cuba-remove { top: 2px; right: 2px; }
+.rechaud-retangular .card-cuba-item { aspect-ratio: 4/3; border-radius: 10px; }
+.rechaud-retangular .pan-tray-inner { border-radius: 6px; }
 
 /* Catálogo de pratos — galeria de cadastro */
 .card-catalogo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -399,29 +458,20 @@ select.big-input { font-size: 14px; }
   min-height: 100%;
 }
 #p-cardapio .real-card { box-shadow: var(--shadow); }
-#p-cardapio .real-card-title { border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+#p-cardapio .real-card-title { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+#p-cardapio .real-card-title .btn-sm { margin-left: auto; }
 #p-cardapio .btn-export.btn-primary { box-shadow: 0 2px 10px rgba(184,134,59,0.30); }
 
-#p-cardapio .card-cuba-item,
 #p-cardapio .card-catalogo-item {
   box-shadow: var(--shadow);
   transition: transform 0.15s ease, box-shadow 0.15s ease;
 }
-#p-cardapio .card-cuba-item:hover,
 #p-cardapio .card-catalogo-item:hover {
   transform: translateY(-2px);
   box-shadow: var(--shadow-md);
 }
-#p-cardapio .card-cuba-nome,
 #p-cardapio .card-catalogo-nome {
   border-top: 2px solid var(--accent);
-}
-#p-cardapio .card-cuba-badge {
-  background: linear-gradient(135deg, #D4A94D, #A8752E);
-}
-#p-cardapio .card-cuba-item.vazia {
-  border-color: var(--accent);
-  color: var(--accent);
 }
 
 @media (max-width: 380px) {
@@ -987,72 +1037,113 @@ select.big-input { font-size: 14px; }
 
   <!-- CARDÁPIO DA SEMANA -->
   <div id="p-cardapio" class="page">
-    <div class="real-section">
-      <div class="real-card">
-        <div class="real-card-title">📂 <span id="card-titulo-atual">Novo cardápio</span></div>
-        <div class="real-form-actions">
-          <input class="small-input" id="card-busca-salvos" type="text" placeholder="🔍 Buscar cardápio salvo (ex: Terça Mineira)..." oninput="buscarCardapiosSalvos(this.value)" autocomplete="off">
-          <button class="btn-sm" onclick="novoCardapioEmBranco()">+ Novo cardápio</button>
-        </div>
-        <div class="card-salvos-lista" id="card-busca-salvos-lista"></div>
-      </div>
-
-      <div id="card-config" class="real-alert" style="display:none"></div>
-      <div id="card-config-pratos" class="real-alert" style="display:none"></div>
-
-      <div class="real-card" id="card-alerta-card" style="display:none">
-        <div class="real-card-title">⚠️ Estoque baixo neste cardápio</div>
-        <div class="card-alert-list" id="card-alerta-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">🍽️ Buffet principal <span id="card-cubas-total" class="sheet-muted"></span>
-          <button class="btn-sm" onclick="abrirSeletorPrato('buffet_principal')">+ cuba</button>
-        </div>
-        <div class="card-cuba-grid" id="card-buffet_principal-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">🔥 Rechaud redondo (R1-R3)
-          <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_redondo')">+ cuba</button>
-        </div>
-        <div class="card-cuba-grid" id="card-rechaud_redondo-list"></div>
-      </div>
-
-      <div class="real-card">
-        <div class="real-card-title">🔥 Rechaud retangular (R4-R5)
-          <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_retangular')">+ cuba</button>
-        </div>
-        <div class="card-cuba-grid" id="card-rechaud_retangular-list"></div>
-      </div>
-
+    <div class="buffet-topbar real-card">
+      <div class="buffet-topbar-title">🍽️ <span id="card-titulo-atual">Novo cardápio</span></div>
       <div class="real-form-actions">
-        <button class="btn-sm" onclick="imprimirCardapio()">🖨️ Imprimir</button>
-        <button class="btn-sm danger" id="card-btn-excluir" onclick="excluirCardapioAtual()" style="display:none">🗑️ Excluir este cardápio</button>
+        <input class="small-input" id="card-busca-salvos" type="text" placeholder="🔍 Buscar cardápio salvo (ex: Terça Mineira)..." oninput="buscarCardapiosSalvos(this.value)" autocomplete="off">
+        <button class="btn-sm" onclick="novoCardapioEmBranco()">+ Novo cardápio</button>
       </div>
-      <button class="btn-export btn-primary" id="card-btn-atualizar" onclick="atualizarCardapioAtual()" style="display:none">Atualizar "<span id="card-nome-atualizar"></span>"</button>
-      <button class="btn-export btn-success" id="card-btn-salvar" onclick="salvarComoNovoCardapio()">Salvar cardápio (novo nome)</button>
-      <div class="sheet-muted" id="card-atualizado" style="margin-top:6px"></div>
+      <div class="card-salvos-lista" id="card-busca-salvos-lista"></div>
+    </div>
 
-      <div class="real-card">
-        <div class="real-card-title">📸 Catálogo de pratos <button class="btn-sm" onclick="toggleFormNovoPrato()">+ cadastrar prato</button></div>
-        <div id="card-prato-form" style="display:none">
-          <div class="real-card-title" id="card-prato-form-titulo" style="margin-bottom:8px">Cadastrar prato novo</div>
-          <div class="real-form-actions">
-            <input class="small-input" id="card-prato-nome" type="text" maxlength="120" placeholder="Nome do prato">
-            <input class="small-input" id="card-prato-produto-busca" type="text" placeholder="Produto do estoque (opcional)" oninput="buscaCardPratoProduto(this.value)" autocomplete="off">
+    <div id="card-config" class="real-alert" style="display:none"></div>
+    <div id="card-config-pratos" class="real-alert" style="display:none"></div>
+
+    <div class="cardapio-layout">
+      <div class="cardapio-main">
+
+        <div class="real-card">
+          <div class="real-card-title">
+            <span class="buffet-section-icon buffet-icon-principal">🍛</span>
+            Buffet principal <span id="card-cubas-total" class="sheet-muted"></span>
+            <button class="btn-sm" onclick="abrirSeletorPrato('buffet_principal')">+ cuba</button>
           </div>
-          <div class="ac-list" id="card-prato-produto-ac"></div>
-          <input type="file" id="card-prato-foto-input" accept="image/*" style="margin-top:8px">
-          <div id="card-prato-foto-preview"></div>
-          <div class="real-form-actions" style="margin-top:8px">
-            <button class="btn-sm" onclick="fecharFormPrato()">Cancelar</button>
-            <button class="btn-sm success" id="card-prato-btn-salvar" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+          <div class="buffet-counter">
+            <div class="buffet-counter-rail"></div>
+            <div class="card-cuba-grid" id="card-buffet_principal-list"></div>
           </div>
         </div>
-        <input class="small-input" id="card-catalogo-busca" type="text" placeholder="Buscar no catálogo..." oninput="carregarCatalogoPratos(this.value)" autocomplete="off" style="margin-top:10px">
-        <div class="card-catalogo-grid" id="card-catalogo-grid"></div>
+
+        <div class="real-card">
+          <div class="real-card-title">
+            <span class="buffet-section-icon buffet-icon-redondo">🍲</span>
+            Rechaud redondo <span class="sheet-muted">(R1-R3)</span>
+            <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_redondo')">+ cuba</button>
+          </div>
+          <div class="buffet-counter buffet-counter-rechaud">
+            <div class="buffet-counter-rail"></div>
+            <div class="card-cuba-grid rechaud-redondo" id="card-rechaud_redondo-list"></div>
+          </div>
+        </div>
+
+        <div class="real-card">
+          <div class="real-card-title">
+            <span class="buffet-section-icon buffet-icon-retangular">🍱</span>
+            Rechaud retangular <span class="sheet-muted">(R4-R5)</span>
+            <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_retangular')">+ cuba</button>
+          </div>
+          <div class="buffet-counter buffet-counter-rechaud">
+            <div class="buffet-counter-rail"></div>
+            <div class="card-cuba-grid rechaud-retangular" id="card-rechaud_retangular-list"></div>
+          </div>
+        </div>
+
+        <div class="real-card">
+          <div class="real-form-actions">
+            <button class="btn-sm" onclick="imprimirCardapio()">🖨️ Imprimir</button>
+            <button class="btn-sm danger" id="card-btn-excluir" onclick="excluirCardapioAtual()" style="display:none">🗑️ Excluir este cardápio</button>
+          </div>
+          <button class="btn-export btn-primary" id="card-btn-atualizar" onclick="atualizarCardapioAtual()" style="display:none">Atualizar "<span id="card-nome-atualizar"></span>"</button>
+          <button class="btn-export btn-success" id="card-btn-salvar" onclick="salvarComoNovoCardapio()">Salvar cardápio (novo nome)</button>
+          <div class="sheet-muted" id="card-atualizado" style="margin-top:6px"></div>
+        </div>
+
+        <div class="real-card">
+          <div class="real-card-title">📸 Catálogo de pratos <button class="btn-sm" onclick="toggleFormNovoPrato()">+ cadastrar prato</button></div>
+          <div id="card-prato-form" style="display:none">
+            <div class="real-card-title" id="card-prato-form-titulo" style="margin-bottom:8px">Cadastrar prato novo</div>
+            <div class="real-form-actions">
+              <input class="small-input" id="card-prato-nome" type="text" maxlength="120" placeholder="Nome do prato">
+              <input class="small-input" id="card-prato-produto-busca" type="text" placeholder="Produto do estoque (opcional)" oninput="buscaCardPratoProduto(this.value)" autocomplete="off">
+            </div>
+            <div class="ac-list" id="card-prato-produto-ac"></div>
+            <input type="file" id="card-prato-foto-input" accept="image/*" style="margin-top:8px">
+            <div id="card-prato-foto-preview"></div>
+            <div class="real-form-actions" style="margin-top:8px">
+              <button class="btn-sm" onclick="fecharFormPrato()">Cancelar</button>
+              <button class="btn-sm success" id="card-prato-btn-salvar" onclick="salvarPratoCatalogo()">Salvar prato no catálogo</button>
+            </div>
+          </div>
+          <input class="small-input" id="card-catalogo-busca" type="text" placeholder="Buscar no catálogo..." oninput="carregarCatalogoPratos(this.value)" autocomplete="off" style="margin-top:10px">
+          <div class="card-catalogo-grid" id="card-catalogo-grid"></div>
+        </div>
+
       </div>
+
+      <aside class="cardapio-aside">
+        <div class="real-card buffet-resumo-card">
+          <div class="real-card-title">📋 Resumo do cardápio</div>
+          <div class="buffet-resumo-grid">
+            <div class="buffet-resumo-stat">
+              <b id="card-resumo-pratos">0</b>
+              <span>pratos</span>
+            </div>
+            <div class="buffet-resumo-stat">
+              <b id="card-resumo-cubas">0</b>
+              <span>cubas principais</span>
+            </div>
+            <div class="buffet-resumo-stat">
+              <b id="card-resumo-rechauds">0</b>
+              <span>rechauds</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="real-card" id="card-alerta-card" style="display:none">
+          <div class="real-card-title">⚠️ Estoque baixo neste cardápio</div>
+          <div class="card-alert-list" id="card-alerta-list"></div>
+        </div>
+      </aside>
     </div>
   </div>
 
@@ -1459,7 +1550,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v88</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v89</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3464,13 +3555,18 @@ function cubaFotoHtml(item) {
 
 function cubaItemHtml(secao, item, idx) {
   const baixo = item.estoque_baixo ? ' estoque-baixo' : '';
-  return `<div class="card-cuba-item${baixo}" onclick="abrirSeletorPrato('${secao}', ${idx})">
-    <div class="card-cuba-badge">${idx + 1}</div>
-    <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
-    ${cubaFotoHtml(item)}
-    <div class="card-cuba-nome">${escapeHtml(item.nome || '')}</div>
-    ${item.cubas > 1 ? `<div class="card-cuba-cubas-badge">${item.cubas} cubas</div>` : ''}
-    ${item.estoque_baixo ? `<div class="card-cuba-warn">⚠️</div>` : ''}
+  const tituloWarn = item.estoque_baixo ? `Estoque baixo: ${item.estoque_atual ?? '?'} ${escapeHtml(item.estoque_unidade || '')}` : '';
+  return `<div class="pan-slot">
+    <div class="pan-header">
+      <span class="pan-num">${idx + 1}</span>
+      <span class="pan-name">${escapeHtml(item.nome || '')}</span>
+    </div>
+    <div class="card-cuba-item${baixo}" onclick="abrirSeletorPrato('${secao}', ${idx})">
+      <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
+      <div class="pan-tray-inner">${cubaFotoHtml(item)}</div>
+      ${item.cubas > 1 ? `<div class="card-cuba-cubas-badge">${item.cubas} cubas</div>` : ''}
+      ${item.estoque_baixo ? `<div class="card-cuba-warn" title="${tituloWarn}">⚠️</div>` : ''}
+    </div>
   </div>`;
 }
 
@@ -3479,7 +3575,22 @@ function renderCardapioSecao(secao) {
   if (!el) return;
   const itens = cardapioEstado[secao] || [];
   el.innerHTML = itens.map((item, idx) => cubaItemHtml(secao, item, idx)).join('')
-    + `<div class="card-cuba-item vazia" onclick="abrirSeletorPrato('${secao}')">+</div>`;
+    + `<div class="pan-slot"><div class="pan-header">&nbsp;</div><div class="card-cuba-item vazia" onclick="abrirSeletorPrato('${secao}')">+</div></div>`;
+}
+
+function atualizarResumoCardapio() {
+  const buffet = cardapioEstado.buffet_principal || [];
+  const redondo = cardapioEstado.rechaud_redondo || [];
+  const retangular = cardapioEstado.rechaud_retangular || [];
+  const totalPratos = buffet.length + redondo.length + retangular.length;
+  const totalCubas = buffet.reduce((s, i) => s + Number(i.cubas || 1), 0);
+  const totalRechauds = redondo.length + retangular.length;
+  const elP = document.getElementById('card-resumo-pratos');
+  const elC = document.getElementById('card-resumo-cubas');
+  const elR = document.getElementById('card-resumo-rechauds');
+  if (elP) elP.textContent = totalPratos;
+  if (elC) elC.textContent = totalCubas;
+  if (elR) elR.textContent = totalRechauds;
 }
 
 function renderTodasCubas() {
@@ -3488,6 +3599,7 @@ function renderTodasCubas() {
   renderCardapioSecao('rechaud_retangular');
   atualizarCardCubasTotal();
   atualizarCardAlerta();
+  atualizarResumoCardapio();
 }
 
 function removerCuba(secao, idx) {
