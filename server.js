@@ -6444,13 +6444,14 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
 
     // Itens parados: tem estoque mas NENHUMA saída (venda/consumo) há N dias — giro
     // zero, é dinheiro/estoque parado (diferente de crítico, que é estoque baixo).
-    // Pedido do Rubens 11/08: separar "vai faltar" de "não roda". Embalagens e Descartáveis
-    // fora daqui — pote/cumbuca, etiqueta, bobina etc. não têm "giro" no mesmo sentido de
-    // comida (compradas em lote, ficam paradas por natureza). Escritório (caneta, folha,
-    // grampeador) NÃO entra nessa exclusão — é outro tipo de item, continua no controle normal.
+    // Pedido do Rubens 11/08: separar "vai faltar" de "não roda". Fora do giro:
+    // - Embalagens/Descartáveis: pote/cumbuca, etiqueta, bobina etc. não têm "giro" no
+    //   mesmo sentido de comida (compradas em lote, ficam paradas por natureza).
+    // - Escritório: caneta, folha, grampeador etc. não passam por saída de estoque —
+    //   entram direto como despesa/conta em outro lugar do sistema, não faz sentido cobrar giro aqui.
     // Itens substitutos (ex: paleta bovina x coxão duro, compra o mais barato do momento)
     // continuam aparecendo normalmente — isso é esperado, não é bug pra filtrar.
-    const CATEGORIAS_SEM_GIRO = ['Embalagens', 'Descartáveis', ...CATEGORIAS_TESTE];
+    const CATEGORIAS_SEM_GIRO = ['Embalagens', 'Descartáveis', 'Escritório', ...CATEGORIAS_TESTE];
     const DIAS_PARADO_MIN = 10;
     let parados = [];
     const dataParaGiro = data.filter(p => !CATEGORIAS_SEM_GIRO.includes(p.categoria));
