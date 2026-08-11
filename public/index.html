@@ -421,6 +421,16 @@ select.big-input { font-size: 14px; }
 .card-catalogo-item img, .card-catalogo-item .card-cuba-sem-foto { width: 100%; aspect-ratio: 1; object-fit: cover; display: block; }
 .card-catalogo-nome { font-size: 10px; font-weight: 700; color: var(--text); padding: 5px 6px; text-align: center; line-height: 1.25; }
 .card-catalogo-item.excluir-mode { position: relative; }
+/* Prato sem foto — sem ela, o nome tem que carregar o card sozinho (senão fica tudo
+   igual: um prato genérico e um textinho ilegível embaixo, ninguém acha nada procurando). */
+.card-cuba-sem-foto-nome {
+  width: 100%; aspect-ratio: 1; background: var(--s2);
+  display: flex; align-items: center; justify-content: center;
+  padding: 8px; text-align: center; overflow: hidden;
+  font-size: 12px; font-weight: 800; color: var(--text); line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical;
+}
+.card-catalogo-item.sem-foto:hover .card-cuba-sem-foto-nome { background: var(--s1); }
 .card-catalogo-del { position: absolute; top: 4px; right: 4px; width: 18px; height: 18px; border-radius: 50%; background: rgba(239,68,68,0.85); color: #fff; border: none; font-size: 10px; font-weight: 800; cursor: pointer; z-index: 2; }
 #card-prato-foto-preview img { max-width: 120px; border-radius: 10px; margin-top: 8px; display: block; }
 
@@ -1550,7 +1560,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v89</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v90</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3651,10 +3661,13 @@ function renderSeletorPrato(q) {
   const termo = (q || '').toLowerCase().trim();
   const filtrados = termo ? catalogoPratos.filter(p => p.nome.toLowerCase().includes(termo)) : catalogoPratos;
   if (!filtrados.length) { el.innerHTML = '<div class="sheet-muted" style="padding:10px 2px">Nenhum prato no catálogo ainda. Cadastre um lá embaixo.</div>'; return; }
-  el.innerHTML = filtrados.map(p => `
-    <div class="card-catalogo-item" onclick="escolherPratoNoSeletor(${p.id})">
-      ${p.foto_url ? `<img src="${escapeHtml(p.foto_url)}" alt="">` : '<div class="card-cuba-sem-foto">🍽️</div>'}
+  el.innerHTML = filtrados.map(p => p.foto_url ? `
+    <div class="card-catalogo-item" title="${escapeHtml(p.nome)}" onclick="escolherPratoNoSeletor(${p.id})">
+      <img src="${escapeHtml(p.foto_url)}" alt="">
       <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
+    </div>` : `
+    <div class="card-catalogo-item sem-foto" title="${escapeHtml(p.nome)}" onclick="escolherPratoNoSeletor(${p.id})">
+      <div class="card-cuba-sem-foto-nome">${escapeHtml(p.nome)}</div>
     </div>`).join('');
 }
 
@@ -3691,10 +3704,14 @@ async function carregarCatalogoPratos(q = '') {
     catalogoPratos = d.pratos || [];
     const el = document.getElementById('card-catalogo-grid');
     if (!catalogoPratos.length) { el.innerHTML = '<div class="sheet-muted" style="padding:6px 2px">Nenhum prato cadastrado ainda.</div>'; return; }
-    el.innerHTML = catalogoPratos.map(p => `
-      <div class="card-catalogo-item" onclick="abrirEdicaoPrato(${p.id})">
-        ${p.foto_url ? `<img src="${escapeHtml(p.foto_url)}" alt="">` : '<div class="card-cuba-sem-foto">🍽️</div>'}
+    el.innerHTML = catalogoPratos.map(p => p.foto_url ? `
+      <div class="card-catalogo-item" title="${escapeHtml(p.nome)}" onclick="abrirEdicaoPrato(${p.id})">
+        <img src="${escapeHtml(p.foto_url)}" alt="">
         <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
+        <button class="card-catalogo-del" onclick="event.stopPropagation();excluirPratoCatalogo(${p.id})" title="Excluir do catálogo">✕</button>
+      </div>` : `
+      <div class="card-catalogo-item sem-foto" title="${escapeHtml(p.nome)}" onclick="abrirEdicaoPrato(${p.id})">
+        <div class="card-cuba-sem-foto-nome">${escapeHtml(p.nome)}</div>
         <button class="card-catalogo-del" onclick="event.stopPropagation();excluirPratoCatalogo(${p.id})" title="Excluir do catálogo">✕</button>
       </div>`).join('');
   } catch(e) { handleApiError(e, true); }
