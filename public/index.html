@@ -410,6 +410,7 @@ select.big-input { font-size: 14px; }
 
 /* Arrastar e soltar — reordenar cubas / trocar pratos entre fatias da Cuba Tripla */
 .card-cuba-item[data-drag], .tripla-fatia[data-drag] { touch-action: none; }
+.card-cuba-item[data-drag] img, .tripla-fatia[data-drag] img { -webkit-user-drag: none; user-select: none; }
 .card-cuba-item.cuba-dragging, .tripla-fatia.cuba-dragging { opacity: 0.35; }
 .card-cuba-item.drop-target, .tripla-fatia.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
 .drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
@@ -1576,7 +1577,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v95</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v96</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3576,7 +3577,11 @@ async function carregarCardapioSalvo(id) {
 
 // ---- Cubas (grade do dia) ----
 function cubaFotoHtml(item) {
-  if (item.foto_url) return `<img class="card-cuba-foto" src="${escapeHtml(item.foto_url)}" alt="">`;
+  // draggable="false" é essencial aqui: sem isso o navegador ativa o arraste NATIVO de
+  // imagem assim que o ponteiro se move sobre a foto, sequestrando o gesto antes do nosso
+  // drag-and-drop customizado conseguir captar o movimento (cubas sem foto, que renderizam
+  // uma div em vez de <img>, nunca tiveram esse problema).
+  if (item.foto_url) return `<img class="card-cuba-foto" src="${escapeHtml(item.foto_url)}" alt="" draggable="false">`;
   return `<div class="card-cuba-sem-foto">🍽️</div>`;
 }
 
@@ -3586,7 +3591,7 @@ function fatiaTriplaHtml(secao, idx, slot, fatia) {
   if (!fatia || !fatia.prato_id) {
     return `<div class="tripla-fatia vazia" data-drag="fatia" data-secao="${secao}" data-idx="${idx}" data-slot="${slot}" onpointerdown="iniciarDragCardapio(event,'fatia','${secao}',${idx},${slot})" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">+</div>`;
   }
-  const foto = fatia.foto_url ? `<img src="${escapeHtml(fatia.foto_url)}" alt="">` : `<div class="card-cuba-sem-foto">🍽️</div>`;
+  const foto = fatia.foto_url ? `<img src="${escapeHtml(fatia.foto_url)}" alt="" draggable="false">` : `<div class="card-cuba-sem-foto">🍽️</div>`;
   const tituloWarn = fatia.estoque_baixo ? ` — estoque baixo: ${fatia.estoque_atual ?? '?'} ${escapeHtml(fatia.estoque_unidade || '')}` : '';
   return `<div class="tripla-fatia" data-drag="fatia" data-secao="${secao}" data-idx="${idx}" data-slot="${slot}" title="${escapeHtml(fatia.nome || '')}${tituloWarn} · arraste pra trocar de lado" onpointerdown="iniciarDragCardapio(event,'fatia','${secao}',${idx},${slot})" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">
     ${foto}
