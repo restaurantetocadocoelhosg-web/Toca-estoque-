@@ -7,6 +7,7 @@ const rateLimit = require('express-rate-limit');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const sharp = require('sharp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -3895,11 +3896,29 @@ app.post('/api/pratos-cardapio/foto', auth, requirePerm('cardapio'), async (req,
   try {
     const imagemB64 = req.body?.imagem;
     if (!imagemB64) return res.status(400).json({ erro: 'Envie a imagem.' });
-    const mediaType = sanitizeText(req.body?.mediaType || 'image/jpeg', 40);
-    const ext = mediaType.includes('png') ? 'png' : (mediaType.includes('webp') ? 'webp' : 'jpg');
+    const mediaTypeOriginal = sanitizeText(req.body?.mediaType || 'image/jpeg', 40);
+    const bufferOriginal = Buffer.from(imagemB64, 'base64');
+    if (bufferOriginal.length > 6 * 1024 * 1024) return res.status(413).json({ erro: 'Imagem muito grande (máx. 6MB).' });
+
+    // Fotos de prato só aparecem em miniatura (catálogo/seletor com 100+ itens de uma vez),
+    // então redimensiona/comprime pra JPEG antes de subir — foto de celular direto vinha
+    // passando de 2MB e travava a abertura do seletor. Se o sharp falhar por algum motivo,
+    // cai pro buffer original em vez de bloquear o cadastro.
+    let buffer = bufferOriginal;
+    let mediaType = mediaTypeOriginal;
+    let ext = mediaType.includes('png') ? 'png' : (mediaType.includes('webp') ? 'webp' : 'jpg');
+    try {
+      buffer = await sharp(bufferOriginal).rotate()
+        .resize({ width: 640, height: 640, fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 78, mozjpeg: true })
+        .toBuffer();
+      mediaType = 'image/jpeg';
+      ext = 'jpg';
+    } catch (imgErr) {
+      console.error('Falha ao comprimir foto de prato, usando original:', imgErr.message);
+    }
+
     const nomeArquivo = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const buffer = Buffer.from(imagemB64, 'base64');
-    if (buffer.length > 6 * 1024 * 1024) return res.status(413).json({ erro: 'Imagem muito grande (máx. 6MB).' });
     const { error } = await supabase.storage.from('pratos-fotos').upload(nomeArquivo, buffer, { contentType: mediaType, upsert: false });
     if (error) throw error;
     const { data: pub } = supabase.storage.from('pratos-fotos').getPublicUrl(nomeArquivo);
