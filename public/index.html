@@ -430,9 +430,18 @@ select.big-input { font-size: 14px; }
 /* Cuba Tripla — 1 slot em pé (2 cubas de altura) dividido em 3 fatias EMPILHADAS, cada
    uma com um prato — como 3 bandejas pequenas de frente uma pra outra, na vertical. */
 .card-cuba-item.tripla { display: flex; flex-direction: column; gap: 4px; cursor: default; padding: 4px; aspect-ratio: 1 / 2.15; }
-.tripla-fatia { position: relative; flex: 1; min-width: 0; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
-.tripla-fatia img, .tripla-fatia .card-cuba-sem-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
-.tripla-fatia.vazia { display: flex; align-items: center; justify-content: center; border: 1px dashed rgba(255,255,255,0.32); color: rgba(255,255,255,0.55); font-size: 14px; background: rgba(255,255,255,0.05); }
+/* Cada fatia é uma mini-cuba própria — moldura prateada (igual .card-cuba-item) por fora,
+   bandeja escura (igual .pan-tray-inner) por dentro. Sem isso as 3 fatias ficavam "coladas",
+   sem a separação de inox que toda cuba de verdade tem entre uma e outra. */
+.tripla-fatia {
+  position: relative; flex: 1; min-width: 0; min-height: 0; cursor: pointer;
+  border-radius: 8px; padding: 3px;
+  background: linear-gradient(150deg, #e4e8ec, #aab2bb);
+  box-shadow: 0 2px 5px rgba(0,0,0,0.3), inset 0 1px 1px rgba(255,255,255,0.6), inset 0 -1px 1px rgba(0,0,0,0.12);
+}
+.tripla-fatia-tray { position: relative; width: 100%; height: 100%; border-radius: 6px; overflow: hidden; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
+.tripla-fatia-tray img, .tripla-fatia-tray .card-cuba-sem-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
+.tripla-fatia.vazia { display: flex; align-items: center; justify-content: center; border: 1px dashed rgba(255,255,255,0.32); color: rgba(255,255,255,0.55); font-size: 14px; background: rgba(255,255,255,0.05); padding: 0; }
 .tripla-fatia-nome { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, rgba(0,0,0,.78), transparent); color: #fff; font-size: 8px; font-weight: 800; padding: 2px 4px 1px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tripla-fatia-warn { position: absolute; top: 1px; right: 2px; font-size: 8px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.8)); z-index: 2; }
 
@@ -1596,7 +1605,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v100</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v101</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3612,10 +3621,14 @@ function fatiaTriplaHtml(secao, idx, slot, fatia) {
   }
   const foto = fatia.foto_url ? `<img src="${escapeHtml(fatia.foto_url)}" alt="" draggable="false">` : `<div class="card-cuba-sem-foto">🍽️</div>`;
   const tituloWarn = fatia.estoque_baixo ? ` — estoque baixo: ${fatia.estoque_atual ?? '?'} ${escapeHtml(fatia.estoque_unidade || '')}` : '';
+  // Cada fatia é uma mini-cuba própria (moldura prateada + bandeja escura por dentro), igual
+  // a uma cuba normal — sem isso as 3 ficavam "coladas" sem separação de inox entre elas.
   return `<div class="tripla-fatia" data-drag="fatia" data-secao="${secao}" data-idx="${idx}" data-slot="${slot}" title="${escapeHtml(fatia.nome || '')}${tituloWarn} · arraste pra trocar de lado" onpointerdown="iniciarDragCardapio(event,'fatia','${secao}',${idx},${slot})" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">
-    ${foto}
-    <div class="tripla-fatia-nome">${escapeHtml(fatia.nome || '')}</div>
-    ${fatia.estoque_baixo ? `<div class="tripla-fatia-warn">⚠️</div>` : ''}
+    <div class="tripla-fatia-tray">
+      ${foto}
+      <div class="tripla-fatia-nome">${escapeHtml(fatia.nome || '')}</div>
+      ${fatia.estoque_baixo ? `<div class="tripla-fatia-warn">⚠️</div>` : ''}
+    </div>
   </div>`;
 }
 
