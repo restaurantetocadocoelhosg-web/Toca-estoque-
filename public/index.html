@@ -379,11 +379,16 @@ select.big-input { font-size: 14px; }
 
 /* Grade de cubas — cada slot tem um cabeçalho (nº + nome) e a "cuba" de inox embaixo */
 .card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 14px 12px; position: relative; z-index: 1; }
-.pan-slot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* display:block (não flex) de propósito: um .pan-slot flex-column espremia a "cuba" filha
+   pra virar quadrada mesmo com aspect-ratio explícito — o Chrome resolve mal aspect-ratio de
+   flex item cujo cross-axis (largura) vem de um grid-column:span>1 dentro de flex-direction:
+   column, e a altura acaba igualando a largura em vez de vir da proporção. Bug confirmado
+   isolando o elemento fora do flex; fora dele o aspect-ratio funciona exatamente como devia. */
+.pan-slot { display: block; min-width: 0; }
 /* Cuba Tripla e Cuba Única ocupam 2 colunas — do tamanho de duas cubas normais lado a
    lado, igual bancada real de buffet self-service (pedido do Rubens 12/08). */
 .pan-slot-largo { grid-column: span 2; }
-.pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 6px; }
 .pan-num {
   flex-shrink: 0; width: 19px; height: 19px; border-radius: 50%;
   background: linear-gradient(135deg, #e9c874, #ad7f2e);
@@ -1589,7 +1594,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v98</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v99</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3854,11 +3859,13 @@ function onCardDragEnd(e) {
   cardDragState = null;
 }
 
+// Troca só as duas cubas de lugar (swap) — NÃO usa splice-remove-e-reinserir, que
+// empurraria todo mundo entre origem e destino uma casa pra frente/trás (reordenar a
+// prateleira inteira). Mover uma cuba não pode mexer em nenhuma outra além do alvo.
 function moverCuba(secao, origem, destino) {
   const arr = cardapioEstado[secao];
-  if (!arr || origem === destino || destino < 0) return;
-  const [item] = arr.splice(origem, 1);
-  arr.splice(destino, 0, item);
+  if (!arr || origem === destino || destino < 0 || destino >= arr.length) return;
+  [arr[origem], arr[destino]] = [arr[destino], arr[origem]];
   renderTodasCubas();
 }
 
