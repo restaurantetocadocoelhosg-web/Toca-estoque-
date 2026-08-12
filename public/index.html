@@ -385,9 +385,9 @@ select.big-input { font-size: 14px; }
    column, e a altura acaba igualando a largura em vez de vir da proporção. Bug confirmado
    isolando o elemento fora do flex; fora dele o aspect-ratio funciona exatamente como devia. */
 .pan-slot { display: block; min-width: 0; }
-/* Cuba Tripla e Cuba Única ocupam 2 colunas — do tamanho de duas cubas normais lado a
-   lado, igual bancada real de buffet self-service (pedido do Rubens 12/08). */
-.pan-slot-largo { grid-column: span 2; }
+/* Cuba Tripla e Cuba Única ocupam 2 linhas — do tamanho de duas cubas normais em pé
+   (vertical), igual bancada real de buffet self-service (pedido do Rubens 12/08). */
+.pan-slot-largo { grid-row: span 2; }
 .pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 6px; }
 .pan-num {
   flex-shrink: 0; width: 19px; height: 19px; border-radius: 50%;
@@ -423,12 +423,13 @@ select.big-input { font-size: 14px; }
 .card-cuba-item.drop-target, .tripla-fatia.drop-target, .pan-header.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
 .drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
 
-/* Cuba Única — 1 prato só, mas na largura de 2 cubas (bandeja grande de self-service) */
-.card-cuba-item.grande { aspect-ratio: 2.15 / 1; }
+/* Cuba Única — 1 prato só, mas em pé (vertical) na altura de 2 cubas (bandeja grande de
+   self-service, tipo leitão/peixe inteiro). */
+.card-cuba-item.grande { aspect-ratio: 1 / 2.15; }
 
-/* Cuba Tripla — 1 slot largo (2 cubas) dividido em 3 fatias LADO A LADO (uma de frente
-   pra outra), cada uma com um prato — como 3 bandejas pequenas encostadas de verdade. */
-.card-cuba-item.tripla { display: flex; flex-direction: row; gap: 4px; cursor: default; padding: 4px; aspect-ratio: 2.15 / 1; }
+/* Cuba Tripla — 1 slot em pé (2 cubas de altura) dividido em 3 fatias EMPILHADAS, cada
+   uma com um prato — como 3 bandejas pequenas de frente uma pra outra, na vertical. */
+.card-cuba-item.tripla { display: flex; flex-direction: column; gap: 4px; cursor: default; padding: 4px; aspect-ratio: 1 / 2.15; }
 .tripla-fatia { position: relative; flex: 1; min-width: 0; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
 .tripla-fatia img, .tripla-fatia .card-cuba-sem-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
 .tripla-fatia.vazia { display: flex; align-items: center; justify-content: center; border: 1px dashed rgba(255,255,255,0.32); color: rgba(255,255,255,0.55); font-size: 14px; background: rgba(255,255,255,0.05); }
@@ -440,9 +441,10 @@ select.big-input { font-size: 14px; }
 .rechaud-redondo .card-cuba-remove { top: 2px; right: 2px; }
 .rechaud-retangular .card-cuba-item { aspect-ratio: 4/3; border-radius: 10px; }
 .rechaud-retangular .pan-tray-inner { border-radius: 6px; }
-/* Cuba Tripla/Única no rechaud retangular também são largas (2 cubas) — sobrescreve o 4:3
-   padrão do rechaud, senão a bandeja grande ficava espremida de volta ao tamanho normal. */
-.rechaud-retangular .card-cuba-item.tripla, .rechaud-retangular .card-cuba-item.grande { aspect-ratio: 2.15 / 1; }
+/* Cuba Tripla/Única no rechaud retangular também ficam em pé (2 cubas de altura) —
+   sobrescreve o 4:3 padrão do rechaud, senão a bandeja grande ficava espremida de volta
+   ao tamanho normal. */
+.rechaud-retangular .card-cuba-item.tripla, .rechaud-retangular .card-cuba-item.grande { aspect-ratio: 1 / 2.15; }
 
 /* Catálogo de pratos — galeria de cadastro */
 .card-catalogo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -1594,7 +1596,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v99</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v100</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3627,8 +3629,8 @@ function panHeaderHtml(secao, idx, nome) {
   </div>`;
 }
 
-// Cuba Tripla e Cuba Única ocupam 2 posições de largura no grid (pan-slot-largo) — do
-// tamanho de duas cubas normais lado a lado, como bancadas reais de buffet self-service.
+// Cuba Tripla e Cuba Única ocupam 2 posições de altura no grid (pan-slot-largo) — em pé,
+// do tamanho de duas cubas normais, como bancadas reais de buffet self-service.
 function cubaItemTriplaHtml(secao, item, idx) {
   const fatias = item.fatias || [null, null, null];
   return `<div class="pan-slot pan-slot-largo">
