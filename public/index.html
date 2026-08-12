@@ -409,10 +409,10 @@ select.big-input { font-size: 14px; }
 .card-cuba-cubas-badge { position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.55); color: #fff; font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
 
 /* Arrastar e soltar — reordenar cubas / trocar pratos entre fatias da Cuba Tripla */
-.card-cuba-item[data-drag], .tripla-fatia[data-drag] { touch-action: none; }
+.card-cuba-item[data-drag], .tripla-fatia[data-drag], .pan-header[data-drag] { touch-action: none; cursor: grab; }
 .card-cuba-item[data-drag] img, .tripla-fatia[data-drag] img { -webkit-user-drag: none; user-select: none; }
-.card-cuba-item.cuba-dragging, .tripla-fatia.cuba-dragging { opacity: 0.35; }
-.card-cuba-item.drop-target, .tripla-fatia.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
+.card-cuba-item.cuba-dragging, .tripla-fatia.cuba-dragging, .pan-header.cuba-dragging { opacity: 0.35; }
+.card-cuba-item.drop-target, .tripla-fatia.drop-target, .pan-header.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
 .drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
 
 /* Cuba Tripla — 1 slot de buffet dividido em 3 fatias empilhadas, cada uma com um prato */
@@ -1577,7 +1577,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v96</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v97</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3600,13 +3600,20 @@ function fatiaTriplaHtml(secao, idx, slot, fatia) {
   </div>`;
 }
 
+// O cabeçalho (nº + nome) é sempre um "cabo de arrasto" pra mover a cuba inteira de posição —
+// essencial na Cuba Tripla, onde as 3 fatias tomam quase toda a área do card pra trocar prato
+// entre si e não sobra praticamente nenhum espaço "neutro" pra pegar a cuba como um todo.
+function panHeaderHtml(secao, idx, nome) {
+  return `<div class="pan-header" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})" title="arraste pra trocar de posição">
+    <span class="pan-num">${idx + 1}</span>
+    <span class="pan-name">${escapeHtml(nome || '')}</span>
+  </div>`;
+}
+
 function cubaItemTriplaHtml(secao, item, idx) {
   const fatias = item.fatias || [null, null, null];
   return `<div class="pan-slot">
-    <div class="pan-header">
-      <span class="pan-num">${idx + 1}</span>
-      <span class="pan-name">Cuba Tripla</span>
-    </div>
+    ${panHeaderHtml(secao, idx, 'Cuba Tripla')}
     <div class="card-cuba-item tripla" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
       ${[0, 1, 2].map(slot => fatiaTriplaHtml(secao, idx, slot, fatias[slot])).join('')}
@@ -3619,10 +3626,7 @@ function cubaItemHtml(secao, item, idx) {
   const baixo = item.estoque_baixo ? ' estoque-baixo' : '';
   const tituloWarn = item.estoque_baixo ? `Estoque baixo: ${item.estoque_atual ?? '?'} ${escapeHtml(item.estoque_unidade || '')}` : '';
   return `<div class="pan-slot">
-    <div class="pan-header">
-      <span class="pan-num">${idx + 1}</span>
-      <span class="pan-name">${escapeHtml(item.nome || '')}</span>
-    </div>
+    ${panHeaderHtml(secao, idx, item.nome)}
     <div class="card-cuba-item${baixo}" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})" onclick="abrirSeletorPrato('${secao}', ${idx})" title="arraste pra trocar de posição">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
       <div class="pan-tray-inner">${cubaFotoHtml(item)}</div>
