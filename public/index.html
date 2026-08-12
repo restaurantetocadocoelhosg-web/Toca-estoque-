@@ -1570,7 +1570,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v92</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v93</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3726,9 +3726,12 @@ function renderSeletorPrato(q) {
   const termo = (q || '').toLowerCase().trim();
   const filtrados = termo ? catalogoPratos.filter(p => p.nome.toLowerCase().includes(termo)) : catalogoPratos;
   if (!filtrados.length) { el.innerHTML = '<div class="sheet-muted" style="padding:10px 2px">Nenhum prato no catálogo ainda. Cadastre um lá embaixo.</div>'; return; }
+  // loading="lazy": com 100+ pratos no catálogo, carregar as fotos todas de uma vez trava
+  // a abertura do seletor (fica "um monte de linhas" até as fotos aparecerem). Lazy faz o
+  // navegador só baixar a foto quando ela realmente entra na área visível/rolagem.
   el.innerHTML = filtrados.map(p => p.foto_url ? `
     <div class="card-catalogo-item" title="${escapeHtml(p.nome)}" onclick="escolherPratoNoSeletor(${p.id})">
-      <img src="${escapeHtml(p.foto_url)}" alt="">
+      <img src="${escapeHtml(p.foto_url)}" alt="" loading="lazy" decoding="async">
       <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
     </div>` : `
     <div class="card-catalogo-item sem-foto" title="${escapeHtml(p.nome)}" onclick="escolherPratoNoSeletor(${p.id})">
@@ -3785,7 +3788,7 @@ async function carregarCatalogoPratos(q = '') {
     if (!catalogoPratos.length) { el.innerHTML = '<div class="sheet-muted" style="padding:6px 2px">Nenhum prato cadastrado ainda.</div>'; return; }
     el.innerHTML = catalogoPratos.map(p => p.foto_url ? `
       <div class="card-catalogo-item" title="${escapeHtml(p.nome)}" onclick="abrirEdicaoPrato(${p.id})">
-        <img src="${escapeHtml(p.foto_url)}" alt="">
+        <img src="${escapeHtml(p.foto_url)}" alt="" loading="lazy" decoding="async">
         <div class="card-catalogo-nome">${escapeHtml(p.nome)}</div>
         <button class="card-catalogo-del" onclick="event.stopPropagation();excluirPratoCatalogo(${p.id})" title="Excluir do catálogo">✕</button>
       </div>` : `
