@@ -4008,16 +4008,19 @@ function normalizarSecaoCardapio(value, max = 20) {
     const tipo = row?.tipo === 'tripla' ? 'tripla' : (row?.tipo === 'grande' ? 'grande' : 'normal');
     const cubas = parseNonNegativeInteger(row?.cubas ?? 1) || 1;
     const obs = sanitizeText(row?.obs || '', 160);
+    // Cuba Tripla/Única podem ficar em pé ou deitadas — o usuário escolhe por cuba (botão de
+    // girar), não é fixo por seção. Só grava pra quem realmente usa (tripla/grande).
+    const orientacao = row?.orientacao === 'horizontal' ? 'horizontal' : 'vertical';
     if (tipo === 'tripla') {
       const bruto = Array.isArray(row?.pratos_tripla) ? row.pratos_tripla : [];
       const pratosTripla = [0, 1, 2].map(i => {
         const v = Number(bruto[i]);
         return Number.isInteger(v) && v > 0 ? v : null;
       });
-      return { tipo, prato_id: null, pratos_tripla: pratosTripla, cubas, obs };
+      return { tipo, prato_id: null, pratos_tripla: pratosTripla, cubas, obs, orientacao };
     }
     const pratoId = Number.isInteger(Number(row?.prato_id)) && Number(row?.prato_id) > 0 ? Number(row.prato_id) : null;
-    return { tipo, prato_id: pratoId, cubas, obs };
+    return tipo === 'grande' ? { tipo, prato_id: pratoId, cubas, obs, orientacao } : { tipo, prato_id: pratoId, cubas, obs };
   }).filter(row => row.tipo === 'tripla' ? row.pratos_tripla.some(Boolean) : row.prato_id);
 }
 
