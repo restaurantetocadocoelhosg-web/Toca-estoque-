@@ -408,6 +408,12 @@ select.big-input { font-size: 14px; }
 .card-cuba-warn { position: absolute; bottom: 5px; right: 5px; font-size: 12px; z-index: 2; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.6)); }
 .card-cuba-cubas-badge { position: absolute; bottom: 5px; left: 5px; background: rgba(0,0,0,0.55); color: #fff; font-size: 8px; font-weight: 700; padding: 1px 5px; border-radius: 6px; z-index: 2; }
 
+/* Arrastar e soltar — reordenar cubas / trocar pratos entre fatias da Cuba Tripla */
+.card-cuba-item[data-drag], .tripla-fatia[data-drag] { touch-action: none; }
+.card-cuba-item.cuba-dragging, .tripla-fatia.cuba-dragging { opacity: 0.35; }
+.card-cuba-item.drop-target, .tripla-fatia.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
+.drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
+
 /* Cuba Tripla — 1 slot de buffet dividido em 3 fatias empilhadas, cada uma com um prato */
 .card-cuba-item.tripla { display: flex; flex-direction: column; gap: 3px; cursor: default; padding: 4px; }
 .tripla-fatia { position: relative; flex: 1; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
@@ -1570,7 +1576,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v94</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v95</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3578,11 +3584,11 @@ function cubaFotoHtml(item) {
 // diferente (fatias). Ocupa 1 posição na sequência numerada igual uma cuba normal.
 function fatiaTriplaHtml(secao, idx, slot, fatia) {
   if (!fatia || !fatia.prato_id) {
-    return `<div class="tripla-fatia vazia" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">+</div>`;
+    return `<div class="tripla-fatia vazia" data-drag="fatia" data-secao="${secao}" data-idx="${idx}" data-slot="${slot}" onpointerdown="iniciarDragCardapio(event,'fatia','${secao}',${idx},${slot})" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">+</div>`;
   }
   const foto = fatia.foto_url ? `<img src="${escapeHtml(fatia.foto_url)}" alt="">` : `<div class="card-cuba-sem-foto">🍽️</div>`;
   const tituloWarn = fatia.estoque_baixo ? ` — estoque baixo: ${fatia.estoque_atual ?? '?'} ${escapeHtml(fatia.estoque_unidade || '')}` : '';
-  return `<div class="tripla-fatia" title="${escapeHtml(fatia.nome || '')}${tituloWarn}" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">
+  return `<div class="tripla-fatia" data-drag="fatia" data-secao="${secao}" data-idx="${idx}" data-slot="${slot}" title="${escapeHtml(fatia.nome || '')}${tituloWarn} · arraste pra trocar de lado" onpointerdown="iniciarDragCardapio(event,'fatia','${secao}',${idx},${slot})" onclick="event.stopPropagation();editarFatiaTripla('${secao}', ${idx}, ${slot})">
     ${foto}
     <div class="tripla-fatia-nome">${escapeHtml(fatia.nome || '')}</div>
     ${fatia.estoque_baixo ? `<div class="tripla-fatia-warn">⚠️</div>` : ''}
@@ -3596,7 +3602,7 @@ function cubaItemTriplaHtml(secao, item, idx) {
       <span class="pan-num">${idx + 1}</span>
       <span class="pan-name">Cuba Tripla</span>
     </div>
-    <div class="card-cuba-item tripla">
+    <div class="card-cuba-item tripla" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
       ${[0, 1, 2].map(slot => fatiaTriplaHtml(secao, idx, slot, fatias[slot])).join('')}
     </div>
@@ -3612,7 +3618,7 @@ function cubaItemHtml(secao, item, idx) {
       <span class="pan-num">${idx + 1}</span>
       <span class="pan-name">${escapeHtml(item.nome || '')}</span>
     </div>
-    <div class="card-cuba-item${baixo}" onclick="abrirSeletorPrato('${secao}', ${idx})">
+    <div class="card-cuba-item${baixo}" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})" onclick="abrirSeletorPrato('${secao}', ${idx})" title="arraste pra trocar de posição">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
       <div class="pan-tray-inner">${cubaFotoHtml(item)}</div>
       ${item.cubas > 1 ? `<div class="card-cuba-cubas-badge">${item.cubas} cubas</div>` : ''}
@@ -3626,7 +3632,7 @@ function renderCardapioSecao(secao) {
   if (!el) return;
   const itens = cardapioEstado[secao] || [];
   el.innerHTML = itens.map((item, idx) => cubaItemHtml(secao, item, idx)).join('')
-    + `<div class="pan-slot"><div class="pan-header">&nbsp;</div><div class="card-cuba-item vazia" onclick="abrirSeletorPrato('${secao}')">+</div></div>`;
+    + `<div class="pan-slot"><div class="pan-header">&nbsp;</div><div class="card-cuba-item vazia" data-drag="fim-cuba" data-secao="${secao}" onclick="abrirSeletorPrato('${secao}')">+</div></div>`;
 }
 
 function atualizarResumoCardapio() {
@@ -3702,6 +3708,141 @@ function editarFatiaTripla(secao, idx, slot) {
   document.getElementById('card-seletor-busca').value = '';
   document.getElementById('card-seletor-overlay').style.display = 'flex';
   renderSeletorPrato('');
+}
+
+// ---- Arrastar e soltar: reordenar cubas / trocar pratos entre fatias da Cuba Tripla ----
+// Usa pointer events (não HTML5 drag nativo) porque o app roda em tablet na cozinha
+// e o drag nativo não é confiável em touch. Um limiar de movimento distingue "arrastar"
+// de "toque" (que continua abrindo o seletor de prato normalmente).
+const CARD_DRAG_LIMIAR = 10; // px
+let cardDragState = null;
+let cardDragAcabouDeSoltar = false;
+
+// Engole o click sintético que o navegador dispara logo após um arraste real,
+// senão o toque final do drag também abriria o seletor de prato.
+document.addEventListener('click', (e) => {
+  if (cardDragAcabouDeSoltar) { e.preventDefault(); e.stopPropagation(); }
+}, true);
+
+function iniciarDragCardapio(e, tipo, secao, idx, slot) {
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
+  if (tipo === 'fatia') {
+    const item = cardapioEstado[secao] && cardapioEstado[secao][idx];
+    const fatia = item && item.fatias && item.fatias[slot];
+    if (!fatia || !fatia.prato_id) return; // fatia vazia: nada pra arrastar, deixa o clique abrir o seletor
+    e.stopPropagation(); // não deixa o pointerdown "borbulhar" e também iniciar o arraste da cuba tripla inteira
+  }
+  const el = e.currentTarget;
+  cardDragState = { tipo, secao, idx, slot, el, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, moved: false, ghost: null, dropTarget: null };
+  // Ouve no document (não no elemento de origem) — assim o arraste continua sendo
+  // rastreado mesmo depois que o ponteiro sai de cima do card de origem. Tentar usar
+  // setPointerCapture no elemento de origem é frágil (lança NotFoundError em vários
+  // cenários) e derrubava o resto do gesto no meio do arraste.
+  document.addEventListener('pointermove', onCardDragMove);
+  document.addEventListener('pointerup', onCardDragEnd);
+  document.addEventListener('pointercancel', onCardDragEnd);
+}
+
+function onCardDragMove(e) {
+  const st = cardDragState;
+  if (!st || e.pointerId !== st.pointerId) return;
+  const dx = e.clientX - st.startX, dy = e.clientY - st.startY;
+  if (!st.moved) {
+    if (Math.hypot(dx, dy) < CARD_DRAG_LIMIAR) return;
+    st.moved = true;
+    iniciarGhostCardapio(e);
+  }
+  e.preventDefault();
+  moverGhostCardapio(e.clientX, e.clientY);
+  atualizarDropTargetCardapio(e.clientX, e.clientY);
+}
+
+function iniciarGhostCardapio(e) {
+  const st = cardDragState;
+  st.el.classList.add('cuba-dragging');
+  const rect = st.el.getBoundingClientRect();
+  const ghost = st.el.cloneNode(true);
+  ghost.classList.add('drag-ghost');
+  ghost.style.width = rect.width + 'px';
+  ghost.style.height = rect.height + 'px';
+  document.body.appendChild(ghost);
+  st.ghost = ghost;
+  st.offsetX = e.clientX - rect.left;
+  st.offsetY = e.clientY - rect.top;
+  moverGhostCardapio(e.clientX, e.clientY);
+}
+
+function moverGhostCardapio(x, y) {
+  const st = cardDragState;
+  if (!st || !st.ghost) return;
+  st.ghost.style.left = (x - st.offsetX) + 'px';
+  st.ghost.style.top = (y - st.offsetY) + 'px';
+}
+
+function atualizarDropTargetCardapio(x, y) {
+  const st = cardDragState;
+  if (!st || !st.ghost) return;
+  if (st.dropTarget) st.dropTarget.classList.remove('drop-target');
+  st.ghost.style.display = 'none';
+  const sob = document.elementFromPoint(x, y);
+  st.ghost.style.display = '';
+  const seletor = st.tipo === 'cuba' ? '[data-drag="cuba"],[data-drag="fim-cuba"]' : '[data-drag="fatia"]';
+  const alvo = sob && sob.closest(seletor);
+  st.dropTarget = (alvo && alvo !== st.el) ? alvo : null;
+  if (st.dropTarget) st.dropTarget.classList.add('drop-target');
+}
+
+function onCardDragEnd(e) {
+  const st = cardDragState;
+  if (!st || e.pointerId !== st.pointerId) return;
+  document.removeEventListener('pointermove', onCardDragMove);
+  document.removeEventListener('pointerup', onCardDragEnd);
+  document.removeEventListener('pointercancel', onCardDragEnd);
+  st.el.classList.remove('cuba-dragging');
+  if (st.ghost) st.ghost.remove();
+  if (st.dropTarget) st.dropTarget.classList.remove('drop-target');
+
+  if (st.moved && st.dropTarget) {
+    if (st.tipo === 'cuba') {
+      const secaoAlvo = st.dropTarget.dataset.secao;
+      if (secaoAlvo === st.secao) {
+        const destino = st.dropTarget.dataset.drag === 'fim-cuba' ? cardapioEstado[st.secao].length - 1 : Number(st.dropTarget.dataset.idx);
+        moverCuba(st.secao, st.idx, destino);
+      } else {
+        toast('Só dá pra reordenar cubas dentro da mesma bancada', 'err');
+      }
+    } else {
+      trocarFatiasCardapio(st.secao, st.idx, st.slot, st.dropTarget.dataset.secao, Number(st.dropTarget.dataset.idx), Number(st.dropTarget.dataset.slot));
+    }
+  }
+  if (st.moved) {
+    cardDragAcabouDeSoltar = true;
+    setTimeout(() => { cardDragAcabouDeSoltar = false; }, 60);
+  }
+  cardDragState = null;
+}
+
+function moverCuba(secao, origem, destino) {
+  const arr = cardapioEstado[secao];
+  if (!arr || origem === destino || destino < 0) return;
+  const [item] = arr.splice(origem, 1);
+  arr.splice(destino, 0, item);
+  renderTodasCubas();
+}
+
+function trocarFatiasCardapio(secaoA, idxA, slotA, secaoB, idxB, slotB) {
+  if (secaoA !== secaoB) { toast('Só dá pra trocar pratos dentro da mesma bancada', 'err'); return; }
+  const itemA = cardapioEstado[secaoA] && cardapioEstado[secaoA][idxA];
+  const itemB = cardapioEstado[secaoB] && cardapioEstado[secaoB][idxB];
+  if (!itemA || !itemB || itemA.tipo !== 'tripla' || itemB.tipo !== 'tripla') return;
+  if (itemA === itemB && slotA === slotB) return;
+  const fa = itemA.fatias || (itemA.fatias = [null, null, null]);
+  const fb = itemB.fatias || (itemB.fatias = [null, null, null]);
+  const pa = itemA.pratos_tripla || (itemA.pratos_tripla = [null, null, null]);
+  const pb = itemB.pratos_tripla || (itemB.pratos_tripla = [null, null, null]);
+  [fa[slotA], fb[slotB]] = [fb[slotB], fa[slotA]];
+  [pa[slotA], pb[slotB]] = [pb[slotB], pa[slotA]];
+  renderTodasCubas();
 }
 
 // ---- Seletor de prato (modal) ----
