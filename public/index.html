@@ -380,6 +380,9 @@ select.big-input { font-size: 14px; }
 /* Grade de cubas — cada slot tem um cabeçalho (nº + nome) e a "cuba" de inox embaixo */
 .card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 14px 12px; position: relative; z-index: 1; }
 .pan-slot { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+/* Cuba Tripla e Cuba Única ocupam 2 colunas — do tamanho de duas cubas normais lado a
+   lado, igual bancada real de buffet self-service (pedido do Rubens 12/08). */
+.pan-slot-largo { grid-column: span 2; }
 .pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .pan-num {
   flex-shrink: 0; width: 19px; height: 19px; border-radius: 50%;
@@ -415,12 +418,16 @@ select.big-input { font-size: 14px; }
 .card-cuba-item.drop-target, .tripla-fatia.drop-target, .pan-header.drop-target { outline: 3px dashed var(--accent); outline-offset: 2px; }
 .drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
 
-/* Cuba Tripla — 1 slot de buffet dividido em 3 fatias empilhadas, cada uma com um prato */
-.card-cuba-item.tripla { display: flex; flex-direction: column; gap: 3px; cursor: default; padding: 4px; }
-.tripla-fatia { position: relative; flex: 1; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
+/* Cuba Única — 1 prato só, mas na largura de 2 cubas (bandeja grande de self-service) */
+.card-cuba-item.grande { aspect-ratio: 2.15 / 1; }
+
+/* Cuba Tripla — 1 slot largo (2 cubas) dividido em 3 fatias LADO A LADO (uma de frente
+   pra outra), cada uma com um prato — como 3 bandejas pequenas encostadas de verdade. */
+.card-cuba-item.tripla { display: flex; flex-direction: row; gap: 4px; cursor: default; padding: 4px; aspect-ratio: 2.15 / 1; }
+.tripla-fatia { position: relative; flex: 1; min-width: 0; min-height: 0; border-radius: 6px; overflow: hidden; cursor: pointer; background: #14100a; box-shadow: inset 0 2px 6px rgba(0,0,0,0.5); }
 .tripla-fatia img, .tripla-fatia .card-cuba-sem-foto { width: 100%; height: 100%; object-fit: cover; display: block; }
 .tripla-fatia.vazia { display: flex; align-items: center; justify-content: center; border: 1px dashed rgba(255,255,255,0.32); color: rgba(255,255,255,0.55); font-size: 14px; background: rgba(255,255,255,0.05); }
-.tripla-fatia-nome { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, rgba(0,0,0,.78), transparent); color: #fff; font-size: 7px; font-weight: 800; padding: 2px 4px 1px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tripla-fatia-nome { position: absolute; left: 0; right: 0; bottom: 0; background: linear-gradient(0deg, rgba(0,0,0,.78), transparent); color: #fff; font-size: 8px; font-weight: 800; padding: 2px 4px 1px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tripla-fatia-warn { position: absolute; top: 1px; right: 2px; font-size: 8px; filter: drop-shadow(0 1px 1px rgba(0,0,0,.8)); z-index: 2; }
 
 /* Rechauds — pratos redondos e retangulares, visualmente diferentes das cubas do buffet */
@@ -428,6 +435,9 @@ select.big-input { font-size: 14px; }
 .rechaud-redondo .card-cuba-remove { top: 2px; right: 2px; }
 .rechaud-retangular .card-cuba-item { aspect-ratio: 4/3; border-radius: 10px; }
 .rechaud-retangular .pan-tray-inner { border-radius: 6px; }
+/* Cuba Tripla/Única no rechaud retangular também são largas (2 cubas) — sobrescreve o 4:3
+   padrão do rechaud, senão a bandeja grande ficava espremida de volta ao tamanho normal. */
+.rechaud-retangular .card-cuba-item.tripla, .rechaud-retangular .card-cuba-item.grande { aspect-ratio: 2.15 / 1; }
 
 /* Catálogo de pratos — galeria de cadastro */
 .card-catalogo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -1083,6 +1093,7 @@ select.big-input { font-size: 14px; }
             Buffet principal <span id="card-cubas-total" class="sheet-muted"></span>
             <button class="btn-sm" onclick="abrirSeletorPrato('buffet_principal')">+ cuba</button>
             <button class="btn-sm" onclick="adicionarCubaTripla('buffet_principal')">+ tripla</button>
+            <button class="btn-sm" onclick="adicionarCubaUnica('buffet_principal')">+ única</button>
           </div>
           <div class="buffet-counter">
             <div class="buffet-counter-rail"></div>
@@ -1108,6 +1119,7 @@ select.big-input { font-size: 14px; }
             Rechaud retangular <span class="sheet-muted">(R4-R5)</span>
             <button class="btn-sm" onclick="abrirSeletorPrato('rechaud_retangular')">+ cuba</button>
             <button class="btn-sm" onclick="adicionarCubaTripla('rechaud_retangular')">+ tripla</button>
+            <button class="btn-sm" onclick="adicionarCubaUnica('rechaud_retangular')">+ única</button>
           </div>
           <div class="buffet-counter buffet-counter-rechaud">
             <div class="buffet-counter-rail"></div>
@@ -1577,7 +1589,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v97</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v98</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3610,9 +3622,11 @@ function panHeaderHtml(secao, idx, nome) {
   </div>`;
 }
 
+// Cuba Tripla e Cuba Única ocupam 2 posições de largura no grid (pan-slot-largo) — do
+// tamanho de duas cubas normais lado a lado, como bancadas reais de buffet self-service.
 function cubaItemTriplaHtml(secao, item, idx) {
   const fatias = item.fatias || [null, null, null];
-  return `<div class="pan-slot">
+  return `<div class="pan-slot pan-slot-largo">
     ${panHeaderHtml(secao, idx, 'Cuba Tripla')}
     <div class="card-cuba-item tripla" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
@@ -3623,11 +3637,12 @@ function cubaItemTriplaHtml(secao, item, idx) {
 
 function cubaItemHtml(secao, item, idx) {
   if (item.tipo === 'tripla') return cubaItemTriplaHtml(secao, item, idx);
+  const largo = item.tipo === 'grande';
   const baixo = item.estoque_baixo ? ' estoque-baixo' : '';
   const tituloWarn = item.estoque_baixo ? `Estoque baixo: ${item.estoque_atual ?? '?'} ${escapeHtml(item.estoque_unidade || '')}` : '';
-  return `<div class="pan-slot">
+  return `<div class="pan-slot${largo ? ' pan-slot-largo' : ''}">
     ${panHeaderHtml(secao, idx, item.nome)}
-    <div class="card-cuba-item${baixo}" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})" onclick="abrirSeletorPrato('${secao}', ${idx})" title="arraste pra trocar de posição">
+    <div class="card-cuba-item${baixo}${largo ? ' grande' : ''}" data-drag="cuba" data-secao="${secao}" data-idx="${idx}" onpointerdown="iniciarDragCardapio(event,'cuba','${secao}',${idx})" onclick="abrirSeletorPrato('${secao}', ${idx})" title="arraste pra trocar de posição">
       <button class="card-cuba-remove" onclick="event.stopPropagation();removerCuba('${secao}', ${idx})">✕</button>
       <div class="pan-tray-inner">${cubaFotoHtml(item)}</div>
       ${item.cubas > 1 ? `<div class="card-cuba-cubas-badge">${item.cubas} cubas</div>` : ''}
@@ -3699,7 +3714,7 @@ function atualizarCardAlerta() {
 function coletarCardapioSecao(secao) {
   return (cardapioEstado[secao] || []).map(i => i.tipo === 'tripla'
     ? { tipo: 'tripla', pratos_tripla: i.pratos_tripla || [null, null, null], cubas: i.cubas || 1, obs: i.obs || '' }
-    : { prato_id: i.prato_id, cubas: i.cubas || 1, obs: i.obs || '' });
+    : { tipo: i.tipo === 'grande' ? 'grande' : 'normal', prato_id: i.prato_id, cubas: i.cubas || 1, obs: i.obs || '' });
 }
 
 // ---- Cuba Tripla: adiciona uma nova (vazia) e já abre o seletor na 1ª fatia ----
@@ -3708,6 +3723,14 @@ function adicionarCubaTripla(secao) {
   const idx = cardapioEstado[secao].length - 1;
   renderTodasCubas();
   editarFatiaTripla(secao, idx, 0);
+}
+
+// ---- Cuba Única: 1 prato só, mas ocupa o espaço de 2 cubas no buffet (bandeja grande) ----
+function adicionarCubaUnica(secao) {
+  cardapioEstado[secao].push({ tipo: 'grande', prato_id: null, cubas: 1, obs: '' });
+  const idx = cardapioEstado[secao].length - 1;
+  renderTodasCubas();
+  abrirSeletorPrato(secao, idx);
 }
 
 function editarFatiaTripla(secao, idx, slot) {
@@ -3913,8 +3936,11 @@ function escolherPratoNoSeletor(pratoId) {
   // recarregar — nesta escolha ainda não-salva, mostra só nome/foto (sem alerta de estoque).
   const novoItem = { prato_id: prato.id, nome: prato.nome, foto_url: prato.foto_url, cubas: 1, obs: '', estoque_baixo: false, estoque_atual: null, estoque_unidade: null };
   if (idx !== null && idx !== undefined) {
-    const cubasAntigas = cardapioEstado[secao][idx]?.cubas || 1;
-    novoItem.cubas = cubasAntigas;
+    const itemAntigo = cardapioEstado[secao][idx];
+    novoItem.cubas = itemAntigo?.cubas || 1;
+    // Preserva tipo:'grande' (Cuba Única) ao trocar o prato — senão a cuba "encolhia"
+    // de volta pro tamanho normal só porque você mudou o prato escolhido nela.
+    if (itemAntigo?.tipo === 'grande') novoItem.tipo = 'grande';
     cardapioEstado[secao][idx] = novoItem;
   } else {
     cardapioEstado[secao].push(novoItem);

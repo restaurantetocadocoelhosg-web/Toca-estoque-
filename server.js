@@ -4003,7 +4003,9 @@ function isTabelaCardapiosSalvosMissing(error) {
 function normalizarSecaoCardapio(value, max = 20) {
   const rows = arrayFromMaybeJson(value);
   return rows.slice(0, max).map(row => {
-    const tipo = row?.tipo === 'tripla' ? 'tripla' : 'normal';
+    // 'grande' = Cuba Única: 1 prato só (mesma forma de 'normal'), mas ocupa visualmente o
+    // espaço de 2 cubas no buffet (pedido do Rubens 12/08, tipo bandeja grande de self-service).
+    const tipo = row?.tipo === 'tripla' ? 'tripla' : (row?.tipo === 'grande' ? 'grande' : 'normal');
     const cubas = parseNonNegativeInteger(row?.cubas ?? 1) || 1;
     const obs = sanitizeText(row?.obs || '', 160);
     if (tipo === 'tripla') {
