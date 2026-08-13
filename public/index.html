@@ -380,12 +380,8 @@ select.big-input { font-size: 14px; }
 /* Grade de cubas — cada slot tem um cabeçalho (nº + nome) e a "cuba" de inox embaixo */
 .card-cuba-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 14px 12px; position: relative; z-index: 1; }
 /* .pan-slot é flex-column: o cabeçalho tem altura fixa (flex-shrink:0) e a cuba ocupa o
-   resto. Cuba normal usa aspect-ratio:1 pra virar quadrada (isso funciona bem em flex — o
-   bug do Chrome com aspect-ratio só aparece quando o item TAMBÉM tem grid-row/column:span,
-   por isso a Cuba Tripla/Única abaixo usa flex:1 em vez de aspect-ratio: preenche a altura
-   real que o grid deu (2 linhas + gap), sem tentar adivinhar essa altura por uma proporção
-   fixa — que nunca bate 100% porque o espaço de "2 linhas" inclui o gap entre elas E o
-   cabeçalho que a 2ª cuba teria teoricamente, algo que uma proporção pura não sabe calcular. */
+   resto. Nenhuma cuba (normal ou larga) usa aspect-ratio — dimensionarCubas() calcula e
+   aplica a altura de todas via JS, ver o comentário longo perto dessa função. */
 .pan-slot { display: flex; flex-direction: column; min-width: 0; }
 .pan-header { display: flex; align-items: center; gap: 6px; min-width: 0; margin-bottom: 6px; flex-shrink: 0; }
 /* Cuba Tripla e Cuba Única ocupam 2 linhas — do tamanho de duas cubas normais em pé
@@ -402,7 +398,11 @@ select.big-input { font-size: 14px; }
 .pan-name { font-size: 11px; font-weight: 800; color: #f3ead3; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .card-cuba-item {
-  position: relative; cursor: pointer; aspect-ratio: 1;
+  /* SEM aspect-ratio de propósito: o Chrome "vaza" o bug de aspect-ratio+grid-row-span pros
+     itens VIZINHOS na mesma linha do grid (mesmo sem span!) — confirmado isolando (cuba
+     normal fica 4:3 certinha sozinha, mas quadrada quando tem uma Cuba Única do lado). A
+     altura de TODA cuba (normal e larga) é calculada e aplicada via JS — ver dimensionarCubas(). */
+  position: relative; cursor: pointer;
   border-radius: 13px;
   background: linear-gradient(150deg, #e4e8ec, #aab2bb);
   padding: 4px;
@@ -429,14 +429,14 @@ select.big-input { font-size: 14px; }
 .drag-ghost { position: fixed; top: 0; left: 0; z-index: 9999; pointer-events: none; opacity: 0.92; transform: scale(1.06); box-shadow: 0 14px 28px rgba(0,0,0,0.5); }
 
 /* Cuba Única — 1 prato só, mas em pé (vertical) na altura de 2 cubas (bandeja grande de
-   self-service, tipo leitão/peixe inteiro). flex:1 (não aspect-ratio) preenche exatamente
-   a altura que o .pan-slot recebeu do grid — alinha certinho com 2 cubas normais empilhadas
-   mais o espaço entre elas, em vez de chutar uma proporção que sempre ficava um pouco curta. */
-.card-cuba-item.grande { aspect-ratio: unset; flex: 0 0 auto; min-height: 0; }
+   self-service, tipo leitão/peixe inteiro). flex:0 0 auto (a altura vem 100% de JS, via
+   dimensionarCubas() — style.height inline) alinha certinho com 2 cubas normais empilhadas
+   mais o espaço entre elas, sem depender de aspect-ratio (que aqui provou não ser confiável). */
+.card-cuba-item.grande { flex: 0 0 auto; min-height: 0; }
 
 /* Cuba Tripla — 1 slot em pé (2 cubas de altura) dividido em 3 fatias EMPILHADAS, cada
    uma com um prato — como 3 bandejas pequenas de frente uma pra outra, na vertical. */
-.card-cuba-item.tripla { display: flex; flex-direction: column; gap: 4px; cursor: default; padding: 4px; aspect-ratio: unset; flex: 0 0 auto; min-height: 0; }
+.card-cuba-item.tripla { display: flex; flex-direction: column; gap: 4px; cursor: default; padding: 4px; flex: 0 0 auto; min-height: 0; }
 /* Cada fatia é uma mini-cuba própria — moldura prateada (igual .card-cuba-item) por fora,
    bandeja escura (igual .pan-tray-inner) por dentro. Sem isso as 3 fatias ficavam "coladas",
    sem a separação de inox que toda cuba de verdade tem entre uma e outra. */
@@ -455,15 +455,13 @@ select.big-input { font-size: 14px; }
 /* Rechauds — pratos redondos e retangulares, visualmente diferentes das cubas do buffet */
 .rechaud-redondo .card-cuba-item, .rechaud-redondo .pan-tray-inner { border-radius: 50%; }
 .rechaud-redondo .card-cuba-remove { top: 2px; right: 2px; }
-.rechaud-retangular .card-cuba-item { aspect-ratio: 4/3; border-radius: 10px; }
+.rechaud-retangular .card-cuba-item { border-radius: 10px; }
 .rechaud-retangular .pan-tray-inner { border-radius: 6px; }
 /* Cuba larga DEITADA (o usuário gira com o botão ⤢) — sobrescreve o span:2-linhas padrão
    pra span:2-colunas, e a Cuba Tripla passa as fatias pra lado a lado (fazia sentido
-   empilhado em pé; deitada, lado a lado é o que cabe). aspect-ratio:unset segue valendo pra
-   não brigar com o 4:3 padrão do rechaud retangular. */
+   empilhado em pé; deitada, lado a lado é o que cabe). */
 .pan-slot-largo.orientacao-h { grid-row: span 1; grid-column: span 2; }
 .pan-slot-largo.orientacao-h .card-cuba-item.tripla { flex-direction: row; }
-.rechaud-retangular .card-cuba-item.grande, .rechaud-retangular .card-cuba-item.tripla { aspect-ratio: unset; }
 
 /* Catálogo de pratos — galeria de cadastro */
 .card-catalogo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); gap: 10px; margin-top: 10px; }
@@ -1615,7 +1613,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v102</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v103</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3721,28 +3719,39 @@ function renderTodasCubas() {
   atualizarCardCubasTotal();
   atualizarCardAlerta();
   atualizarResumoCardapio();
-  alinharCubasLargas();
+  dimensionarCubas();
 }
 
-// Mede o tamanho REAL de uma cuba normal (que o grid já calcula certinho, sem chute) e aplica
-// a altura exata na Cuba Tripla/Única — em vez de tentar prever isso com aspect-ratio, que
-// nunca batia 100%: o espaço de "2 linhas" inclui o gap entre elas e o cabeçalho que a 2ª
-// cuba teria, coisas que uma proporção pura não sabe calcular. O "+" de adicionar cuba no
-// fim de cada seção sempre existe, então sempre tem uma referência pra medir.
-function alinharCubasLargas() {
+// Calcula e aplica a altura de TODA cuba via JS (nenhuma usa aspect-ratio) — descoberto na
+// prática que o Chrome "vaza" o bug de aspect-ratio+grid-row-span pros itens VIZINHOS na
+// MESMA LINHA do grid, mesmo sem o próprio item ter span: uma cuba normal do lado de uma
+// Cuba Única virava quadrada mesmo com aspect-ratio:4/3 aplicado e confirmado no computed
+// style — só sozinha (sem vizinho com span) ela ficava certa. Isolado e comprovado antes de
+// trocar de abordagem. Por isso a LARGURA da coluna (que o grid sempre acerta) é a única
+// coisa que se mede com confiança; a altura de tudo — cuba normal e cuba larga — vem daí.
+function dimensionarCubas() {
   document.querySelectorAll('.card-cuba-grid').forEach(grid => {
-    const refSlot = grid.querySelector('.pan-slot:not(.pan-slot-largo)');
-    if (!refSlot) return;
+    const proporcaoAltura = grid.classList.contains('rechaud-retangular') ? 3 / 4 : 1; // altura = largura × isso
+    const itensNormais = [...grid.querySelectorAll('.pan-slot:not(.pan-slot-largo) .card-cuba-item')];
+    if (!itensNormais.length) return;
+    const largura = itensNormais[0].getBoundingClientRect().width;
+    if (!largura) return;
+    const alturaNormal = largura * proporcaoAltura;
+    itensNormais.forEach(el => { el.style.height = alturaNormal + 'px'; });
+
+    const refSlot = itensNormais[0].closest('.pan-slot');
+    const refHeader = refSlot.querySelector('.pan-header');
+    const alturaHeaderRef = refHeader.getBoundingClientRect().height + (parseFloat(getComputedStyle(refHeader).marginBottom) || 0);
+    const alturaSlotNormal = alturaHeaderRef + alturaNormal;
     const rowGap = parseFloat(getComputedStyle(grid).rowGap) || 0;
-    const rowHeight = refSlot.getBoundingClientRect().height;
-    if (!rowHeight) return;
+
     grid.querySelectorAll('.pan-slot-largo').forEach(slot => {
       const cuba = slot.querySelector('.card-cuba-item');
       const header = slot.querySelector('.pan-header');
       if (!cuba || !header) return;
       const alturaHeader = header.getBoundingClientRect().height + (parseFloat(getComputedStyle(header).marginBottom) || 0);
       const horizontal = slot.classList.contains('orientacao-h');
-      const alturaDesejada = horizontal ? (rowHeight - alturaHeader) : (rowHeight * 2 + rowGap - alturaHeader);
+      const alturaDesejada = horizontal ? alturaNormal : (alturaSlotNormal * 2 + rowGap - alturaHeader);
       cuba.style.height = Math.max(alturaDesejada, 40) + 'px';
     });
   });
