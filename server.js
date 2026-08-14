@@ -1936,7 +1936,10 @@ function inferirContaPagamentoPorTexto(texto) {
     // Nome de operadora PRECISA de \b: sem isso "inves-TIM-ento" caía em Telefone (achado
     // 14/08 testando a legenda "outdoor - investimento em divulgação"), e "claro"/"vivo"
     // são palavras comuns em qualquer texto.
-    [/telefone|celular|\bvivo\b|\bclaro\b|\btim\b|\boi\b/, 'Telefone'],
+    // "oi" saiu de vez: é o cumprimento mais comum do WhatsApp brasileiro e, desde que a
+    // legenda passou a auto-lançar (v105), "oi, segue o boleto" ia direto pra Telefone.
+    // A operadora ainda é pega por "oi fibra"/"oi telefonia"/"oi movel".
+    [/telefon|celular|\bvivo\b|\bclaro\b|\btim\b|oi fibra|oi telefonia|oi movel|oi móvel/, 'Telefone'],
     [/\bgas\b|botijao|botijão/, 'Gás'],
     [/\bgelo\b/, 'Gelo'],
     [/higiene|limpeza|detergente|sanit|desinfet|papel/, 'Higiene, Limpeza'],
@@ -1948,7 +1951,9 @@ function inferirContaPagamentoPorTexto(texto) {
     // "Treinamento"/"diária"/"extra" no caixa é pagamento a freelance (Rubens, 01/08:
     // "denis, leandro, pessoas em treinamento" são freelance). Vem antes de Retirada
     // porque "RETIRADA ... TREINAMENTO" é pagamento, não distribuição.
-    [/freela|freelance|treinamento|diarista|\bdiaria\b|\bextra\b/, 'Freelance'],
+    // "extra" sozinho pegava "compra extra de hoje" — agora só quando é pagamento a
+    // pessoa (dia extra / diária extra / funcionário extra), que é o sentido original.
+    [/freela|freelance|treinamento|diarista|\bdiaria\b|dia extra|diaria extra|funcionario extra|funcionário extra/, 'Freelance'],
     [/gratific|gorjeta|caixinha/, 'Gorjeta / Gratificação'],
     [/pro labore|pro-labore|pró-labore/, 'Pró-labore'],
     [/\binss\b/, 'INSS'],
@@ -1980,7 +1985,8 @@ function inferirContaPagamentoPorTexto(texto) {
     // Compra avulsa paga pelo caixa do dia (o Rubens anota assim no fechamento): é insumo,
     // tem que cair no CMV e não no balde "Outros".
     [/\bpao\b|\bpaes\b|padaria/, 'Estoque Seco (Farinha)'],
-    [/mercado|feira|quitanda|atacad/, 'Hortifruti'],
+    // \b em "mercado": sem isso "uber pra buscar MERCADOria" virava Hortifruti.
+    [/\bmercado\b|\bmercadinho\b|\bfeira\b|quitanda|atacad/, 'Hortifruti'],
     [/uva passa|uvas passa|fruta seca/, 'Estoque Seco (Farinha)'],
     [/descartavel|descartáveis|kit|embalagem descartavel/, 'Kit (descartáveis)'],
     [/leite|lacteo|lácteo|queijo|mussarela|manteiga/, 'Lácteos'],
@@ -1994,9 +2000,11 @@ function inferirContaPagamentoPorTexto(texto) {
     [/destilado|vodka|whisky|gin|cachaca|cachaça/, 'Destilados'],
     [/refrigerante|suco|agua mineral|água mineral|nao alcoolico|não alcoólico/, 'Não Alcoólicos'],
     [/vinho/, 'Vinho'],
-    // Outdoor/placa/panfleto são divulgação paga — não existiam aqui e caíam no balde
-    // errado (14/08: outdoor de R$100 virou "Salários" e saiu do custo).
-    [/outdoor|out door|busdoor|placa|painel|banner|faixa|panfleto|folheto|flyer|impulsionam|patrocin/, 'Anúncios'],
+    // Outdoor/panfleto são divulgação paga — não existiam aqui e caíam no balde errado
+    // (14/08: outdoor de R$100 virou "Salários" e saiu do custo).
+    // "placa", "painel" e "faixa" saíram: roubavam de Veículo ("multa do carro - placa
+    // ABC1234") e de Manutenção ("troca da placa da geladeira"), que vêm DEPOIS na lista.
+    [/outdoor|out door|busdoor|banner|panfleto|folheto|flyer|impulsionam|patrocin|placa de rua|painel publicitario|painel publicitário/, 'Anúncios'],
     [/anuncio|anúncio|trafego|tráfego|google ads|meta ads|adwords/, 'Anúncios'],
     [/marketing|divulgac|divulgaç|propagand|publicidad/, 'Ações de Marketing'],
     [/guia/, 'Guia'],
@@ -5030,6 +5038,21 @@ Se não conseguir ler: {"erro":"descrição do problema"}`;
   }
 }
 
+// Tira o cumprimento do começo da legenda antes de classificar. Mensagem de WhatsApp
+// brasileiro quase sempre começa com "oi"/"bom dia" — e uma saudação não diz nada sobre
+// o gasto. Se sobrar só a saudação, devolve vazio (não classifica no cumprimento).
+const SAUDACOES = /^(?:\s*(?:oi+|ol[aá]+|e a[ií]|opa|eae|salve|fala|bom dia|boa tarde|boa noite|blz|beleza|tudo bem|td bem|por favor|pfv|obrigad[oa])\b[\s,.!;:-]*)+/i;
+// Contas que não classificam nada — servem de estacionamento, não de resposta.
+const GENERICAS = ['Outros', 'Boleto / Conta avulsa'];
+function limparSaudacao(texto) {
+  let s = String(texto || '').trim();
+  if (!s) return '';
+  let anterior;
+  do { anterior = s; s = s.replace(SAUDACOES, '').trim(); } while (s !== anterior && s);
+  // Sobrou só nome próprio + pontuação? Não dá pra classificar nada com isso.
+  return s.replace(/^[\s,.!;:-]+/, '').trim();
+}
+
 // Decide a conta com 3 níveis de confiança. A memória (fornecedor já visto e
 // confirmado) é a única que auto-lança — o resto vai pra confirmação, igual as
 // pendências de nota. Sem isso o financeiro entra errado e ninguém percebe.
@@ -5038,8 +5061,18 @@ async function classificarConta({ fornecedor, grupo, categoria, descricao, legen
   // a memória sabe o que aquele fornecedor costuma ser, a legenda diz o que ESTE
   // pagamento é. Quando o Rubens escreve "outdoor" junto com o comprovante, isso não é
   // palpite — é a resposta. Só a legenda e a memória auto-lançam; o resto vai conferir.
-  const daLegenda = legenda ? inferirContaPagamentoPorTexto(legenda) : null;
-  if (daLegenda && daLegenda.categoria !== 'Outros') {
+  const legendaLimpa = limparSaudacao(legenda);
+  const daLegenda = legendaLimpa ? inferirContaPagamentoPorTexto(legendaLimpa) : null;
+  // 'Outros' e 'Boleto / Conta avulsa' são baldes genéricos: dizer "segue o boleto" não
+  // classifica nada, só empurra pra um canto onde o gasto não aparece em índice nenhum.
+  // Vale mais mandar conferir do que enterrar num balde.
+  if (daLegenda && !GENERICAS.includes(daLegenda.categoria)) {
+    // Conta que SAI do custo (retirada/pró-labore) nunca entra no automático: se a
+    // classificação errar pra cá, o gasto desaparece dos índices sem deixar pista — foi
+    // exatamente o estrago do outdoor. Vai pra conferência.
+    if (ehNaoOperacional(daLegenda.grupo, daLegenda.categoria)) {
+      return { ...daLegenda, confianca: 'texto' };
+    }
     return { ...daLegenda, confianca: 'legenda' };
   }
   const termo = normalizeSearch(fornecedor || '');
