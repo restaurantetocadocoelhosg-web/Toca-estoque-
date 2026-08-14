@@ -1209,11 +1209,13 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo,
     ...(quando.retroativo ? { retroativo: true, data_lancada: String(quando.ts).slice(0, 10), dias_atras: quando.dias } : {}),
   }, req.user, getClientIp(req));
+  let avisoContas = null;
   if (tipo === 'Entrada' && motivo === 'Compra') {
-    await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movIns?.id });
+    const rc = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movIns?.id });
+    avisoContas = rc.aviso;
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-  res.json({ ok: true, produto: prodAtualizado });
+  res.json({ ok: true, produto: prodAtualizado, ...(avisoContas ? { aviso: avisoContas } : {}) });
 });
 
 // Grava o lote já conferido na tela. Vai item a item de propósito: se um falhar (estoque
@@ -1636,13 +1638,74 @@ const TAXA_POR_FORMA = {
   pix:     { taxa: 0.75, conta: 'Taxa Pix',        ref: 'Pix' },
 };
 
+// Lançamento financeiro que falha calado é pior que erro na tela: o número fica errado
+// e ninguém vai procurar. Estes dois helpers existem pra que NENHUM caminho automático
+// (taxa, caixa, estoque, WhatsApp) possa "confirmar" o que não salvou. Tenta 2x (falha
+// de rede momentânea é o caso comum) e devolve o erro pra quem chamou decidir o que
+// dizer. Deixa rastro em ia_agenda + auditoria pra dar pra achar depois.
+// O cliente do Supabase NÃO lança em falha de rede: devolve {error}. Então "gravou e a
+// resposta se perdeu na volta" chega aqui idêntico a "não gravou" — e repetir às cegas
+// duplicaria o lançamento (o erro pior, e o que já aconteceu neste sistema).
+// Antes de repetir, confere se a linha já está lá pela identidade do lote.
+async function pagamentoJaGravado(linha) {
+  try {
+    const { data } = await supabase.from('pagamentos_comprovantes')
+      .select('id')
+      .eq('created_at', linha.created_at)
+      .eq('origem', linha.origem)
+      .eq('valor_bruto', linha.valor_bruto)
+      .eq('descricao', linha.descricao)
+      .limit(1);
+    return !!(data && data.length);
+  } catch (_) { return false; }   // não deu pra conferir: assume que não gravou
+}
+
+async function inserirPagamentos(linhas, contexto) {
+  const lista = (Array.isArray(linhas) ? linhas : [linhas]).filter(Boolean);
+  if (!lista.length) return { ok: true, n: 0, erro: null };
+  let ultimoErro = null;
+  for (let tentativa = 1; tentativa <= 2; tentativa++) {
+    if (tentativa > 1 && await pagamentoJaGravado(lista[0])) {
+      return { ok: true, n: lista.length, erro: null };   // tinha gravado; só a resposta se perdeu
+    }
+    const { error } = await supabase.from('pagamentos_comprovantes').insert(lista);
+    if (!error) return { ok: true, n: lista.length, erro: null };
+    ultimoErro = error;
+    if (tentativa < 2) await new Promise(r => setTimeout(r, 400));
+  }
+  const msg = String(ultimoErro?.message || ultimoErro || 'erro desconhecido').slice(0, 300);
+  const total = lista.reduce((s, l) => s + Number(l.valor_bruto || 0), 0);
+  console.error(`[${contexto}] LANÇAMENTO NÃO SALVO (${lista.length} linha(s), ${fmtBRL(total)}):`, msg);
+  await logErroAgenda(`${contexto}-nao-salvou`, ultimoErro, null);
+  try {
+    await audit('lancamento_nao_salvo', {
+      contexto, linhas: lista.length, valor: Number(total.toFixed(2)), erro: msg,
+    }, null, '');
+  } catch (_) { /* auditoria não pode mascarar o erro original */ }
+  return { ok: false, n: 0, erro: msg };
+}
+
+// Apagar-e-regravar é a estratégia de idempotência das origens automáticas do dia. O
+// risco real: delete passa, insert falha, e o dia fica SEM o lançamento que já tinha.
+// Por isso o delete também é conferido — delete que falhou aborta a regravação (senão
+// duplicaria), e insert que falhou grita em vez de sumir.
+async function limparPagamentosAuto(dataDia, origens, contexto, categorias = null) {
+  let q = supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', origens);
+  if (categorias && categorias.length) q = q.in('categoria', categorias);
+  const { error } = await q;
+  if (!error) return { ok: true, erro: null };
+  const msg = String(error?.message || error).slice(0, 300);
+  console.error(`[${contexto}] limpeza do dia ${dataDia} falhou:`, msg);
+  await logErroAgenda(`${contexto}-limpeza`, error, null);
+  return { ok: false, erro: msg };
+}
+
 // Lança as taxas do dia em Despesas Financeiras. Idempotente: apaga as do mesmo dia
 // antes de gravar, então re-salvar o fechamento não duplica. Dinheiro não paga taxa.
+// As linhas são montadas ANTES de apagar: se o cálculo estourar, o que já estava
+// lançado continua lá em vez de virar buraco.
 async function lancarTaxasDoDia(dataDia, formas, responsavel) {
   try {
-    // Limpa também a origem do backfill: sem isso, re-salvar um dia de julho deixaria a
-    // linha do backfill E criaria a nova = custo duplicado naquele dia.
-    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['taxa-auto', 'taxa-backfill']);
     const linhas = [];
     // Cada restaurante negocia a taxa dele com a maquininha — usar a taxa de outro
     // faria o custo sair errado todo mês. A config do restaurante manda; a constante
@@ -1671,9 +1734,18 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
         created_at: nowSP(), updated_at: nowSP(),
       });
     }
-    if (linhas.length) await supabase.from('pagamentos_comprovantes').insert(linhas);
-    return linhas.length;
-  } catch (e) { console.error('taxa-auto:', e.message); return 0; }
+    // Limpa também a origem do backfill: sem isso, re-salvar um dia de julho deixaria a
+    // linha do backfill E criaria a nova = custo duplicado naquele dia.
+    const limpeza = await limparPagamentosAuto(dataDia, ['taxa-auto', 'taxa-backfill'], 'taxa-auto');
+    if (!limpeza.ok) return { n: 0, erro: `Não consegui limpar as taxas antigas de ${dataBR(dataDia)} — as taxas do dia NÃO foram atualizadas (o que já estava lançado continua lá). Salve o dia de novo.` };
+    const r = await inserirPagamentos(linhas, 'taxa-auto');
+    if (!r.ok) return { n: 0, erro: `As taxas de cartão/Pix de ${dataBR(dataDia)} NÃO foram lançadas nas Contas. O custo do mês vai sair menor até você salvar o dia de novo.` };
+    return { n: r.n, erro: null };
+  } catch (e) {
+    console.error('taxa-auto:', e.message);
+    await logErroAgenda('taxa-auto', e, null);
+    return { n: 0, erro: `Erro ao lançar as taxas de ${dataBR(dataDia)} nas Contas: ${e.message}` };
+  }
 }
 
 // Despesa anotada no fechamento do dia (passagem, pão, sacolão, retirada) vivia só em
@@ -1685,8 +1757,6 @@ async function lancarTaxasDoDia(dataDia, formas, responsavel) {
 // pagamentos_comprovantes — nenhum total mistura as duas fontes.
 async function lancarDespesasDoCaixaNasContas(dataDia, despesas, responsavel) {
   try {
-    // Idem taxas: limpa a origem do backfill junto, senão re-salvar o dia duplica a despesa.
-    await supabase.from('pagamentos_comprovantes').delete().eq('data', dataDia).in('origem', ['caixa-auto', 'caixa-backfill']);
     const linhas = [];
     for (const d of (despesas || [])) {
       const valor = Number(d.valor || 0);
@@ -1705,9 +1775,17 @@ async function lancarDespesasDoCaixaNasContas(dataDia, despesas, responsavel) {
         created_at: nowSP(), updated_at: nowSP(),
       });
     }
-    if (linhas.length) await supabase.from('pagamentos_comprovantes').insert(linhas);
-    return linhas.length;
-  } catch (e) { console.error('caixa-auto:', e.message); return 0; }
+    // Idem taxas: limpa a origem do backfill junto, senão re-salvar o dia duplica a despesa.
+    const limpeza = await limparPagamentosAuto(dataDia, ['caixa-auto', 'caixa-backfill'], 'caixa-auto');
+    if (!limpeza.ok) return { n: 0, erro: `Não consegui limpar as despesas antigas de ${dataBR(dataDia)} — as despesas do caixa NÃO foram atualizadas nas Contas. Salve o dia de novo.` };
+    const r = await inserirPagamentos(linhas, 'caixa-auto');
+    if (!r.ok) return { n: 0, erro: `As despesas do caixa de ${dataBR(dataDia)} (passagem, pão, sacolão) NÃO foram lançadas nas Contas. Elas continuam no fechamento do dia, mas ficam fora dos Índices até você salvar o dia de novo.` };
+    return { n: r.n, erro: null };
+  } catch (e) {
+    console.error('caixa-auto:', e.message);
+    await logErroAgenda('caixa-auto', e, null);
+    return { n: 0, erro: `Erro ao lançar as despesas do caixa de ${dataBR(dataDia)} nas Contas: ${e.message}` };
+  }
 }
 
 function somarResumoFormas(destino, origem) {
@@ -1807,25 +1885,39 @@ const CONTA_COMPRA_FALLBACK = ['Despesas Variáveis - CMV', 'Estoque Congelado']
 
 // Compra que entra no estoque vira lançamento automático na aba Contas — organiza o
 // financeiro por categoria sem depender de lançamento manual. Falha aqui NUNCA derruba
-// a movimentação (best-effort). origem='estoque-auto' identifica os lançamentos
-// automáticos e os separa dos digitados na aba Contas.
+// a movimentação (a entrada no estoque é real e fica), mas TAMBÉM não pode passar calada:
+// é a maior origem de lançamento do sistema, e uma falha muda o CMV do mês sem deixar
+// pista. Devolve {ok, erro, aviso} pra quem chamou avisar quem lançou.
+// origem='estoque-auto' separa os automáticos dos digitados na aba Contas.
 async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId }) {
   try {
     const v = Number((Number(custoUnit) * Number(qtd)).toFixed(2));
-    if (!v || v <= 0) return;                          // sem preço real não polui as Contas
+    if (!v || v <= 0) return { ok: true, erro: null, aviso: null };  // sem preço real não polui as Contas
     const cat = produto.categoria || '';
-    if (/^qa robo/i.test(cat)) return;                 // produtos de teste do robô ficam fora
+    if (/^qa robo/i.test(cat)) return { ok: true, erro: null, aviso: null };  // produtos de teste do robô ficam fora
     let [grupo, conta] = MAPA_CONTA_COMPRA[cat] || CONTA_COMPRA_FALLBACK;
     if (grupo === 'CMV Bebidas') conta = contaBebida(produto.nome);
-    await supabase.from('pagamentos_comprovantes').insert({
+    const r = await inserirPagamentos({
       data: dateSP(), grupo, categoria: conta, forma: 'compra_estoque',
       valor_bruto: v, taxa: 0, valor_liquido: v, parcelas: 0,
       descricao: sanitizeText(`Compra estoque: ${produto.nome} × ${qtd}${obs ? ' — ' + obs : ''}`, 180),
       origem: 'estoque-auto', responsavel: responsavel || 'estoque',
       mov_id: movId || null,                           // vínculo: cancelou a movimentação → apaga aqui também
       created_at: nowSP(), updated_at: nowSP(),
-    });
-  } catch (e) { console.error('contas-auto:', e.message); }
+    }, 'estoque-auto');
+    if (r.ok) return { ok: true, erro: null, aviso: null };
+    return {
+      ok: false, erro: r.erro,
+      aviso: `A entrada de ${produto.nome} no estoque foi salva, mas o custo de ${fmtBRL(v)} NÃO entrou na aba Contas (${conta}). Lance essa compra manualmente em Contas, senão o CMV do mês sai menor.`,
+    };
+  } catch (e) {
+    console.error('contas-auto:', e.message);
+    await logErroAgenda('estoque-auto', e, null);
+    return {
+      ok: false, erro: e.message,
+      aviso: `A entrada de ${produto?.nome || 'produto'} no estoque foi salva, mas o custo NÃO entrou na aba Contas. Lance essa compra manualmente em Contas.`,
+    };
+  }
 }
 
 function acharContaPagamento(categoria) {
@@ -2850,7 +2942,12 @@ async function montarIndices(mesParam) {
     // Quitação (comprovante de pagamento da folha): o dinheiro saiu, mas o custo já foi
     // reconhecido pela folha na competência. Contar de novo dobraria o CMO.
     if (p.quitacao) {
-      if (noMes(p.data)) { quitacoes.mes += v; quitacoes.n_mes++; }
+      // Confronto tem que ser competência × competência. A folha de julho é paga no 5º
+      // dia útil de agosto: comparar pelo DIA do pagamento acusaria "pago sem custo" em
+      // agosto todo mês, sem nada estar errado. Quitação antiga não tem competência
+      // gravada (campo nasceu depois) — nesse caso o mês do pagamento é o que dá.
+      const compQuit = /^\d{4}-\d{2}$/.test(p.competencia || '') ? p.competencia : String(p.data || '').slice(0, 7);
+      if (compQuit === mes) { quitacoes.mes += v; quitacoes.n_mes++; }
       continue;
     }
     if (ehNaoOperacional(g, p.categoria)) {   // retirada: registrada, fora do custo
@@ -2926,14 +3023,20 @@ async function montarIndices(mesParam) {
       valor_janela: sobraJanela, pct_janela: pct(sobraJanela, vendasJanela),
     },
     // Confronto folha x pagamento: a folha diz quanto CUSTOU (competência), os
-    // comprovantes dizem quanto já SAIU. A diferença é o que ainda falta pagar.
+    // comprovantes dizem quanto já SAIU. em_aberto>0 = falta pagar custo já reconhecido.
+    // em_aberto<0 = pagou quitação de um custo que NUNCA foi reconhecido em lugar
+    // nenhum (ex.: Pix manual sem lançamento de folha correspondente) — sinal de que
+    // falta lançar o custo, não que "já tá tudo pago".
     folha: (() => {
       const custo = grupos.find(g => g.grupo === 'Despesas Fixas / CMO')?.valor_mes || 0;
       const pago = Number(quitacoes.mes.toFixed(2));
+      const emAberto = Number((custo - pago).toFixed(2));
+      const situacao = emAberto > 0.5 ? 'falta' : (emAberto < -0.5 ? 'sem_custo' : 'quitada');
       return {
         custo_mes: custo,
         pago_mes: pago,
-        em_aberto: Number((custo - pago).toFixed(2)),
+        em_aberto: emAberto,
+        situacao,
         comprovantes: quitacoes.n_mes,
       };
     })(),
@@ -3251,8 +3354,12 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
     // Taxa da maquininha entra junto com o fechamento — sem isso a conta "Taxas de Cartão"
     // fica eternamente vazia e o custo total do mês sai menor do que é.
     const quem = req.user.nome || req.user.username;
-    const taxasLancadas = await lancarTaxasDoDia(dataDia, resumoFormasPagamento(pagamentos), quem);
-    const despesasLancadas = await lancarDespesasDoCaixaNasContas(dataDia, despesas, quem);
+    const taxas = await lancarTaxasDoDia(dataDia, resumoFormasPagamento(pagamentos), quem);
+    const despesasContas = await lancarDespesasDoCaixaNasContas(dataDia, despesas, quem);
+    // O fechamento (vendas) já salvou — o dia não se perde. Mas se a parte financeira
+    // derivada falhou, quem salvou PRECISA saber: senão o mês fecha com custo a menos
+    // e ninguém procura o motivo.
+    const avisos = [taxas.erro, despesasContas.erro].filter(Boolean);
 
     await audit('realidade_dia_salvar', {
       data: dataDia,
@@ -3261,11 +3368,12 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       pagamentos: pagamentos.length,
       cortes: cortes.length,
       despesas: despesas.length,
-      taxas_lancadas: taxasLancadas,
-      despesas_lancadas: despesasLancadas,
+      taxas_lancadas: taxas.n,
+      despesas_lancadas: despesasContas.n,
+      ...(avisos.length ? { falhas_contas: avisos } : {}),
     }, req.user, getClientIp(req));
     const resumo = await montarRealidadeDia(dataDia);
-    res.json(resumo);
+    res.json(avisos.length ? { ...resumo, avisos } : resumo);
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao salvar movimento do dia.' });
@@ -4923,13 +5031,21 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
       const valor = parseNonNegativeMoney(r.valor);
       if (!valor) return res.json({ resposta: '⚠️ Não achei o valor do comprovante.' });
       const comp = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
-      await supabase.from('pagamentos_comprovantes').insert({
+      const rq = await inserirPagamentos({
         data: dateSP(), grupo: 'Despesas Fixas / CMO', categoria: 'Salários', forma: 'quitacao',
         valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
         descricao: sanitizeText(r.descricao || 'Pagamento de salário', 180),
         origem: 'quitacao-whatsapp', responsavel: remetente, quitacao: true, competencia: comp,
         created_at: nowSP(), updated_at: nowSP(),
-      });
+      }, 'quitacao-whatsapp');
+      // Nunca responder "✅ registrado" sem o banco ter confirmado: quem mandou o
+      // comprovante para de acompanhar assim que lê o ✅.
+      if (!rq.ok) {
+        return res.json({ resposta:
+          `❌ *NÃO consegui registrar* o pagamento de ${fmtBRL(valor)}.\n\n` +
+          `Manda de novo em alguns minutos, ou lance no app em *Contas*. ` +
+          `_Não registrei nada — não conte como pago._` });
+      }
       const { data: pagos } = await supabase.from('pagamentos_comprovantes')
         .select('valor_bruto').eq('quitacao', true).eq('competencia', comp);
       const totalPago = (pagos || []).reduce((s, p) => s + Number(p.valor_bruto || 0), 0);
@@ -4975,11 +5091,19 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
       // Idempotência POR RUBRICA, não pela competência inteira: a folha do mês chega em
       // documentos separados (extrato, guia do FGTS, DARF). Apagar tudo da competência
       // faria a guia do FGTS derrubar o lançamento de Salários que veio antes.
-      await supabase.from('pagamentos_comprovantes').delete()
-        .eq('origem', 'folha-whatsapp').eq('data', dataLanc)
-        .in('categoria', linhas.map(l => l.categoria));
-      const { error } = await supabase.from('pagamentos_comprovantes').insert(linhas);
-      if (error) return res.json({ resposta: '❌ Erro ao lançar a folha.' });
+      const limpezaFolha = await limparPagamentosAuto(dataLanc, ['folha-whatsapp'], 'folha-whatsapp', linhas.map(l => l.categoria));
+      if (!limpezaFolha.ok) {
+        return res.json({ resposta: `❌ Não consegui atualizar a folha de ${competencia.split('-').reverse().join('/')}.\n\n_Nada foi alterado — o que já estava lançado continua lá._ Manda de novo em alguns minutos.` });
+      }
+      // As rubricas antigas já foram apagadas: se o insert falhar aqui, o custo SUMIU do
+      // CMO. É a maior linha do mês — a resposta precisa dizer isso, não um "❌ erro" seco.
+      const rf = await inserirPagamentos(linhas, 'folha-whatsapp');
+      if (!rf.ok) {
+        return res.json({ resposta:
+          `❌ *ERRO GRAVE ao lançar a folha de ${competencia.split('-').reverse().join('/')}.*\n\n` +
+          `As rubricas anteriores dessa competência (${linhas.map(l => l.categoria).join(', ')}) foram removidas e as novas *NÃO entraram*. ` +
+          `O CMO desse mês está agora sem esse custo.\n\n*Manda a folha de novo agora* pra recolocar.` });
+      }
       await audit('ler_folha_whatsapp', { remetente, competencia, rubricas: linhas.length, total: linhas.reduce((s, l) => s + l.valor_bruto, 0) }, null, '');
       const total = linhas.reduce((s, l) => s + l.valor_bruto, 0);
       return res.json({ resposta:
@@ -5000,12 +5124,23 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
     // Só auto-lança o que a memória já confirmou antes. Primeira vez de um fornecedor
     // sempre passa pela sua conferência — é assim que ele aprende sem errar sozinho.
     if (conta.confianca === 'memoria') {
-      const { data: pag } = await supabase.from('pagamentos_comprovantes').insert({
+      const { data: pag, error: errPag } = await supabase.from('pagamentos_comprovantes').insert({
         data: vencimento || dateSP(), grupo: conta.grupo, categoria: conta.categoria,
         forma: 'boleto', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
         descricao: `${descricao}${fornecedor ? ' — ' + fornecedor : ''}`,
         origem: 'whatsapp-conta', responsavel: remetente, created_at: nowSP(), updated_at: nowSP(),
       }).select('id').single();
+      // Falhou o lançamento? Então não aprende o fornecedor nem diz "✅ Lançado" — senão
+      // a conta some do financeiro e o sistema ainda passa a auto-lançar errado na próxima.
+      if (errPag || !pag?.id) {
+        const msgErr = String(errPag?.message || 'sem id retornado').slice(0, 300);
+        console.error('[whatsapp-conta] LANÇAMENTO NÃO SALVO:', msgErr);
+        await logErroAgenda('whatsapp-conta-nao-salvou', errPag || new Error(msgErr), { nome: remetente });
+        try { await audit('lancamento_nao_salvo', { contexto: 'whatsapp-conta', fornecedor, valor, erro: msgErr }, null, ''); } catch (_) {}
+        return res.json({ resposta:
+          `❌ *NÃO consegui lançar* ${fornecedor || 'a conta'} — ${fmtBRL(valor)}.\n\n` +
+          `Manda de novo em alguns minutos, ou lance no app em *Contas*. _Não lancei nada._` });
+      }
       const termoMem = normalizeSearch(fornecedor);
       const { data: memAtual } = await supabase.from('conta_memoria').select('vezes').eq('termo', termoMem).maybeSingle();
       await supabase.from('conta_memoria')
@@ -5015,11 +5150,21 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
       return res.json({ resposta: `✅ Lançado: *${conta.categoria}* — ${fmtBRL(valor)}\n${fornecedor}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\n_Já conhecia esse fornecedor._` });
     }
 
-    const { data: pend } = await supabase.from('conta_pendencias').insert({
+    const { data: pend, error: errPend } = await supabase.from('conta_pendencias').insert({
       fornecedor, documento: sanitizeText(r.documento || '', 60) || null, valor,
       vencimento, descricao, grupo_sugerido: conta.grupo, categoria_sugerida: conta.categoria,
       confianca: conta.confianca, remetente, status: 'pendente', created_at: nowSP(),
     }).select('id').single();
+    // Mandar "confirma no app em Pendentes" sem a pendência ter sido salva é o mesmo furo
+    // dos lançamentos: a pessoa vai lá, não acha nada, e a conta se perde.
+    if (errPend || !pend?.id) {
+      const msgErr = String(errPend?.message || 'sem id retornado').slice(0, 300);
+      console.error('[whatsapp-conta] PENDÊNCIA NÃO SALVA:', msgErr);
+      await logErroAgenda('whatsapp-conta-pendencia-nao-salvou', errPend || new Error(msgErr), { nome: remetente });
+      return res.json({ resposta:
+        `❌ Li *${fornecedor || 'a conta'}* — ${fmtBRL(valor)}, mas *não consegui guardar* pra você conferir.\n\n` +
+        `Não vai aparecer em Contas → Pendentes. Manda de novo, ou lance direto no app em *Contas*.` });
+    }
     await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, sugestao: conta.categoria, auto: false }, null, '');
     return res.json({
       resposta: conta.categoria
@@ -5067,10 +5212,17 @@ app.post('/api/conta-pendencias/:id/confirmar', auth, requirePerm('contas'), asy
       atualizado_em: nowSP(), criado_por: req.user.nome,
     }, { onConflict: chaveConflito('termo') });
   }
-  await supabase.from('conta_pendencias').update({
+  // Se este update falhar, a pendência CONTINUA na lista e a pessoa clica de novo — o
+  // guard de status deixa passar e a conta entra DUAS vezes. Duplicar é pior que sumir.
+  const { error: errStatus } = await supabase.from('conta_pendencias').update({
     status: 'resolvido', pagamento_id: pag.id, resolvido_em: nowSP(), resolvido_por: req.user.nome,
   }).eq('id', p.id);
-  await audit('conta_pendencia_confirmar', { id: p.id, fornecedor: p.fornecedor, conta: conta.categoria, valor }, req.user, getClientIp(req));
+  await audit('conta_pendencia_confirmar', { id: p.id, fornecedor: p.fornecedor, conta: conta.categoria, valor, ...(errStatus ? { status_nao_atualizado: true } : {}) }, req.user, getClientIp(req));
+  if (errStatus) {
+    await logErroAgenda('conta-pendencia-status', errStatus, req.user);
+    return res.json({ ok: true, aprendido: !!termo, conta: conta.categoria,
+      aviso: `A conta de ${fmtBRL(valor)} FOI lançada em ${conta.categoria}, mas a pendência não saiu da lista. NÃO confirme de novo — lançaria a mesma conta duas vezes. Atualize a página; se ela continuar aí, ignore a pendência.` });
+  }
   res.json({ ok: true, aprendido: !!termo, conta: conta.categoria });
 });
 
@@ -5095,7 +5247,9 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler a nota: ${r.erro}` });
     if (r.aviso || !r.itens.length) return res.json({ resposta: `⚠️ Não achei itens na nota. ${r.aviso || 'Tente uma foto mais nítida e inteira.'}` });
 
-    const lancados = [], confirmar = [], naoachados = [], pendencias = [];
+    // semContas: item que entrou no estoque mas cujo custo NÃO chegou na aba Contas.
+    // Vai na resposta do WhatsApp — sem isso o CMV do mês sai menor e ninguém percebe.
+    const lancados = [], confirmar = [], naoachados = [], pendencias = [], semContas = [];
     for (const item of r.itens) {
       // Auto-lança SÓ apelido/nome exato (certeza real) com unidade compatível; 'forte' é palpite — vai pra confirmação.
       // Preço muito fora do conhecido tira o item do automático e manda pra conferência.
@@ -5132,21 +5286,45 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
       }
       if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
       const custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
-      const { data: movNota } = await supabase.from('movimentacoes').insert({
+      const { data: movNota, error: errMovNota } = await supabase.from('movimentacoes').insert({
         produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
         tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
         custo: custoUnit, valor: Number((custoUnit * item.qtd).toFixed(2)),
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
         qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
       }).select('id').single();
+      // Sem movimentação o estoque muda sem histórico e o lançamento em Contas fica sem
+      // mov_id (cancelar a compra nunca limparia o financeiro). Desfaz a entrada, igual
+      // fazem os caminhos irmãos, e manda o item pra conferência em vez de dizer "lancei".
+      if (errMovNota || !movNota?.id) {
+        await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', item.produto.id).eq('qtd', novaQtd);
+        console.error('[ler-nota] movimentação não registrada:', String(errMovNota?.message || 'sem id'));
+        await logErroAgenda('ler-nota-movimentacao', errMovNota || new Error('sem id'), { nome: remetente });
+        confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} (não consegui registrar — lance no app)` });
+        continue;
+      }
       const custoAntes = Number(item.produto.custo || 0);
-      await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
+      const rc = await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
+      if (!rc.ok) semContas.push(`${item.produto.nome} — ${fmtBRL(Number((custoUnit * item.qtd).toFixed(2)))}`);
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
         convertido: item.convertido,   // "2 cx de 24 → 48 un" fica visível na resposta
         custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
     }
     // Salva os itens em dúvida como pendências (resolver no app, aba Histórico → Pendentes).
-    if (pendencias.length) { try { await supabase.from('nota_pendencias').insert(pendencias); } catch (e) { console.error('pendencias insert:', e.message); } }
+    // Mesma regra dos lançamentos: não mandar "resolva em Pendentes" se a pendência não
+    // foi salva — a pessoa vai lá, não acha nada, e o item da nota se perde de vez.
+    let pendenciasSalvas = 0, pendenciasFalharam = false;
+    if (pendencias.length) {
+      try {
+        const { error } = await supabase.from('nota_pendencias').insert(pendencias);
+        if (error) throw error;
+        pendenciasSalvas = pendencias.length;
+      } catch (e) {
+        pendenciasFalharam = true;
+        console.error('pendencias insert:', e.message);
+        await logErroAgenda('ler-nota-pendencias-nao-salvou', e, { nome: remetente });
+      }
+    }
     await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length }, null, '');
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
@@ -5162,8 +5340,12 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
     if (confirmar.length) msg += `\n⚠️ *Confira no app (${confirmar.length}) — não lancei no chute:*\n` + confirmar.map(c => `• "${c.nome_cupom}" (${c.qtd}) → seria ${c.sugestao}?`).join('\n') + '\n';
     if (naoachados.length) msg += `\n❓ *Não achei no estoque:*\n` + naoachados.map(n => `• ${n}`).join('\n') + '\n';
     if (!lancados.length && !confirmar.length && !naoachados.length) msg += 'Nada para lançar.';
-    if (pendencias.length) msg += `\n💡 Resolva no app: aba *Histórico → Pendentes* (${pendencias.length}) — escolha o produto e confirme. Marque "memorizar" que da próxima eu lanço sozinho.`;
-    res.json({ resposta: msg, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length });
+    if (pendenciasSalvas) msg += `\n💡 Resolva no app: aba *Histórico → Pendentes* (${pendenciasSalvas}) — escolha o produto e confirme. Marque "memorizar" que da próxima eu lanço sozinho.`;
+    if (pendenciasFalharam) msg += `\n\n🔴 *Não consegui guardar os ${pendencias.length} item(ns) em dúvida* — eles NÃO vão aparecer em Histórico → Pendentes. Manda a nota de novo, ou lance esses itens direto no app.`;
+    if (semContas.length) msg += `\n\n🔴 *ATENÇÃO — entrou no estoque mas NÃO entrou nas Contas (${semContas.length}):*\n` + semContas.map(s => `• ${s}`).join('\n') + `\n\n_Lance essas compras manualmente no app em *Contas*, senão o CMV do mês sai menor._`;
+    // `pendencias` mantém o significado antigo (quantas a nota gerou) porque o n8n/Brain
+    // já lê esse campo; o que foi ou não salvo vai nos campos novos.
+    res.json({ resposta: msg, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length, pendencias_salvas: pendenciasSalvas, pendencias_perdidas: pendenciasFalharam ? pendencias.length : 0, sem_contas: semContas.length });
   } catch(e) {
     console.error('Erro ler-nota webhook:', e.message);
     await logErroAgenda('ler-nota-whatsapp', e, { nome: remetente });
@@ -5224,10 +5406,15 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
-  await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
-  await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
-  await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, custo: custoUnit, memorizar }, req.user, getClientIp(req));
-  res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd, custo_aplicado: custoUnit });
+  const rcPend = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
+  // Status que não sobe = pendência volta pra lista = item entra no estoque duas vezes.
+  const { error: errStatusPend } = await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+  if (errStatusPend) await logErroAgenda('nota-pendencia-status', errStatusPend, req.user);
+  await audit('pendencia_resolver', { pendencia_id: pend.id, produto: prod.nome, qtd, custo: custoUnit, memorizar, ...(errStatusPend ? { status_nao_atualizado: true } : {}) }, req.user, getClientIp(req));
+  const avisoPend = errStatusPend
+    ? `${prod.nome} FOI lançado (+${qtd}), mas a pendência não saiu da lista. NÃO resolva de novo — entraria em dobro no estoque. Atualize a página; se continuar aí, use "ignorar".`
+    : rcPend.aviso;
+  res.json({ ok: true, produto: prod.nome, qtd, nova_qtd: novaQtd, custo_aplicado: custoUnit, ...(avisoPend ? { aviso: avisoPend } : {}) });
 });
 
 // Cadastra um produto NOVO direto da pendência (quando não existe no estoque) e lança a entrada.
@@ -5263,13 +5450,17 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
     qtd_antes: 0, qtd_depois: qtd, // produto criado agora: 0 → primeira entrada
   }).select('id').single();
-  await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
+  const rcNovo = await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
-  await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
-  await audit('pendencia_criar_produto', { pendencia_id: pend.id, produto: novo.nome, qtd, categoria, unidade }, req.user, getClientIp(req));
-  res.json({ ok: true, produto: novo.nome, qtd });
+  const { error: errStatusNovo } = await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+  if (errStatusNovo) await logErroAgenda('nota-pendencia-status', errStatusNovo, req.user);
+  await audit('pendencia_criar_produto', { pendencia_id: pend.id, produto: novo.nome, qtd, categoria, unidade, ...(errStatusNovo ? { status_nao_atualizado: true } : {}) }, req.user, getClientIp(req));
+  const avisoNovo = errStatusNovo
+    ? `${novo.nome} FOI cadastrado com ${qtd} ${unidade}, mas a pendência não saiu da lista. NÃO resolva de novo — criaria entrada em dobro. Atualize a página; se continuar aí, use "ignorar".`
+    : rcNovo.aviso;
+  res.json({ ok: true, produto: novo.nome, qtd, ...(avisoNovo ? { aviso: avisoNovo } : {}) });
 });
 
 app.post('/api/pendencias/:id/ignorar', auth, requirePerm('pendencias'), async (req, res) => {
@@ -6588,11 +6779,15 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
       qtd_antes: qtdAntesW, qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
     }).select('id').single();
     if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
-    if (tipo === 'Entrada') await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id });
+    let avisoContasW = '';
+    if (tipo === 'Entrada') {
+      const rcW = await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id });
+      if (!rcW.ok) avisoContasW = `\n\n🔴 *Mas o custo NÃO entrou nas Contas.* Lance essa compra manualmente no app em *Contas*, senão o CMV do mês sai menor.`;
+    }
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, custo_novo: custoNovoW, remetente }, null, '');
     const linhaCusto = custoNovoW !== null && Math.abs(custoNovoW - Number(prod.custo || 0)) >= 0.01
       ? `\n💲 Custo: R$${Number(prod.custo || 0).toFixed(2)} → R$${custoNovoW.toFixed(2)}` : '';
-    return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}${linhaCusto}` });
+    return res.json({ resposta: `✅ *${tipo.toUpperCase()}* registrada!\n\n📦 ${prod.nome}\n📏 ${qtd} ${prod.unidade}\n📊 Estoque agora: ${novaQtd} ${prod.unidade}${linhaCusto}${avisoContasW}` });
   }
 
   if (acao === 'compras') {

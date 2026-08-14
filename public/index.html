@@ -1613,7 +1613,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v103</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v104</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3007,7 +3007,8 @@ async function lancar(forcar = false) {
   if ((tipoAtual === 'Saída' || tipoAtual === 'Perda') && qtd > prodAtual.qtd) {
     erroModal(
       'Estoque Insuficiente',
-      `Você tentou lançar <b>${fmt(qtd)} ${prodAtual.unidade}</b> de saída de <b>${prodAtual.nome}</b>, mas o estoque atual é de apenas <b>${fmt(prodAtual.qtd)} ${prodAtual.unidade}</b>.<br><br>Corrija a quantidade ou faça primeiro um lançamento de entrada.`
+      `Você tentou lançar <b>${escapeHtml(fmt(qtd) + ' ' + prodAtual.unidade)}</b> de saída de <b>${escapeHtml(prodAtual.nome)}</b>, mas o estoque atual é de apenas <b>${escapeHtml(fmt(prodAtual.qtd) + ' ' + prodAtual.unidade)}</b>.<br><br>Corrija a quantidade ou faça primeiro um lançamento de entrada.`,
+      { html: true }
     );
     return;
   }
@@ -3047,11 +3048,14 @@ async function lancar(forcar = false) {
     if (document.getElementById('p-estoque').classList.contains('active')) await loadEstoque();
     if (document.getElementById('p-hist').classList.contains('active')) await loadHist();
     if (document.getElementById('p-realidade').classList.contains('active')) await loadRealidade();
+    // Estoque entrou, mas o custo pode não ter chegado nas Contas. Modal, não toast:
+    // é dinheiro faltando no CMV do mês e exige lançamento manual pra corrigir.
+    if (resultado.aviso) erroModal('Entrou no estoque, mas não nas Contas', resultado.aviso);
   } catch(e) {
     // Erro do servidor — mostrar modal para erros críticos
     const msg = e.message || 'Erro inesperado';
     if (msg.includes('nsuficiente') || msg.includes('stoque')) {
-      erroModal('Lançamento Não Gravado', msg + '<br><br>⚠️ Este lançamento <b>NÃO foi salvo</b>. Verifique o estoque e tente novamente.');
+      erroModal('Lançamento Não Gravado', escapeHtml(msg) + '<br><br>⚠️ Este lançamento <b>NÃO foi salvo</b>. Verifique o estoque e tente novamente.', { html: true });
     } else {
       handleApiError(e);
     }
@@ -3326,6 +3330,7 @@ async function criarProdutoPendencia(id) {
   try {
     const r = await apiPost(`/api/pendencias/${id}/criar-produto`, { nome, categoria, unidade, qtd, memorizar: memo ? memo.checked : true, ...(custo > 0 ? { custo } : {}) });
     toast(`✅ ${r.produto} cadastrado: +${fmt(r.qtd)} ${unidade}`, 'ok');
+    if (r.aviso) erroModal('Entrou no estoque, mas não nas Contas', r.aviso);
     delete pendState[id];
     await loadPendencias(); await loadHist();
   } catch(e) { handleApiError(e, true); }
@@ -3362,6 +3367,7 @@ async function resolverPendencia(id) {
   try {
     const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd, ...(custo > 0 ? { custo } : {}) });
     toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})${r.custo_aplicado > 0 ? ` · R$ ${Number(r.custo_aplicado).toFixed(2)}/un` : ''}`, 'ok');
+    if (r.aviso) erroModal('Entrou no estoque, mas não nas Contas', r.aviso);
     delete pendState[id];
     await loadPendencias();
     await loadHist();
@@ -4749,7 +4755,13 @@ async function salvarRealidade() {
     });
     realidadeCache = d;
     renderRealidade(d);
-    toast('Movimento do dia salvo', 'ok');
+    // O dia salvou, mas taxa/despesa derivada pode ter falhado. Um "salvo com sucesso"
+    // sozinho aqui esconderia custo faltando no mês — por isso o aviso é modal, não toast.
+    if (d.avisos?.length) {
+      erroModal('Dia salvo, mas faltou lançar nas Contas', d.avisos.join('\n\n'));
+    } else {
+      toast('Movimento do dia salvo', 'ok');
+    }
   } catch(e) { handleApiError(e, true); }
   finally { btn.disabled = false; btn.textContent = 'Salvar movimento'; }
 }
@@ -5326,10 +5338,14 @@ function renderIndices(d) {
       ${totalLinha('Sobra', d.sobra || {}, 'row-total')}
       ${Number(d.folha?.pago_mes || 0) > 0 ? `
       <tr class="row-muted">
-        <td><b>Folha — já pago no mês</b><div class="sheet-muted">${d.folha.comprovantes} comprovante(s) · quitação, não é custo novo</div></td>
+        <td><b>Folha — já pago no mês</b><div class="sheet-muted">${d.folha.comprovantes} comprovante(s) · quitação, não é custo novo${d.folha.situacao === 'sem_custo' ? ' · <b style="color:var(--red)">sem lançamento de folha correspondente</b>' : ''}</div></td>
         <td class="num">${fmtSheetMoney(d.folha.pago_mes)}</td>
         <td class="num">—</td><td class="num">—</td><td class="num">—</td>
-        <td><span class="sheet-status ${d.folha.em_aberto > 0.5 ? 'sem_caixa' : 'fechado'}">${d.folha.em_aberto > 0.5 ? 'falta ' + fmtBRLMoney(d.folha.em_aberto) : 'quitada'}</span></td>
+        <td><span class="sheet-status ${d.folha.situacao === 'quitada' ? 'fechado' : 'sem_caixa'}">${
+          d.folha.situacao === 'falta' ? 'falta ' + fmtBRLMoney(d.folha.em_aberto) :
+          d.folha.situacao === 'sem_custo' ? 'sem custo: ' + fmtBRLMoney(Math.abs(d.folha.em_aberto)) :
+          'quitada'
+        }</span></td>
       </tr>` : ''}
       ${Number(d.nao_operacional?.valor_mes || 0) > 0 ? `
       <tr class="row-muted">
@@ -5915,7 +5931,9 @@ function toast(msg, type='ok') {
   clearTimeout(window._toastTimer); window._toastTimer=setTimeout(()=>el.className='',duration);
 }
 
-function erroModal(titulo, msg) {
+// msg é ESCAPADA por padrão: várias chamadas passam nome de produto/fornecedor vindo do
+// banco, e o servidor não remove HTML. Quem precisa de <b>/<br> passa { html: true }.
+function erroModal(titulo, msg, { html = false } = {}) {
   const old = document.getElementById('erro-modal-overlay');
   if (old) old.remove();
   const overlay = document.createElement('div');
@@ -5924,8 +5942,8 @@ function erroModal(titulo, msg) {
   overlay.innerHTML = `
     <div style="background:var(--s1);border-radius:18px;padding:28px 24px;max-width:360px;width:100%;border:2px solid var(--red);text-align:center">
       <div style="font-size:48px;margin-bottom:12px">⛔</div>
-      <div style="font-size:18px;font-weight:800;color:var(--red);margin-bottom:10px">${titulo}</div>
-      <div style="font-size:14px;color:var(--text);margin-bottom:24px;line-height:1.5">${msg}</div>
+      <div style="font-size:18px;font-weight:800;color:var(--red);margin-bottom:10px">${escapeHtml(titulo)}</div>
+      <div style="font-size:14px;color:var(--text);margin-bottom:24px;line-height:1.5;white-space:pre-wrap;text-align:left">${html ? msg : escapeHtml(msg)}</div>
       <button onclick="document.getElementById('erro-modal-overlay').remove()" style="width:100%;padding:14px;background:var(--red);color:#fff;border:none;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;font-family:var(--font)">Entendi</button>
     </div>`;
   document.body.appendChild(overlay);
