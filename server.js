@@ -1930,10 +1930,13 @@ function inferirContaPagamentoPorTexto(texto) {
   const n = normalizeSearch(texto);
   const regras = [
     [/agua|sabesp|cedae/, 'Água'],
-    [/eletric|energia|enel|light|edp/, 'Eletricidade'],
-    [/internet|wifi|wi-fi|vivo fibra|claro net/, 'Internet'],
+    [/eletric|energia|\benel\b|\blight\b|\bedp\b|\bluz\b|copa energia/, 'Eletricidade'],
+    [/internet|wifi|wi-fi|vivo fibra|claro net|banda larga/, 'Internet'],
     [/\blixo\b|coleta/, 'Lixo'],
-    [/telefone|celular|vivo|claro|tim|oi\b/, 'Telefone'],
+    // Nome de operadora PRECISA de \b: sem isso "inves-TIM-ento" caía em Telefone (achado
+    // 14/08 testando a legenda "outdoor - investimento em divulgação"), e "claro"/"vivo"
+    // são palavras comuns em qualquer texto.
+    [/telefone|celular|\bvivo\b|\bclaro\b|\btim\b|\boi\b/, 'Telefone'],
     [/\bgas\b|botijao|botijão/, 'Gás'],
     [/\bgelo\b/, 'Gelo'],
     [/higiene|limpeza|detergente|sanit|desinfet|papel/, 'Higiene, Limpeza'],
@@ -1952,6 +1955,7 @@ function inferirContaPagamentoPorTexto(texto) {
     [/\birrf\b|imposto de renda/, 'IRRF'],
     [/\bfgts\b/, 'FGTS'],
     [/ferias|férias/, 'Férias'],
+    [/rescis|admiss|demiss|homologac|homologaç|exame admissional|aviso previo|aviso prévio/, 'Despesas com Admissão e Demissão'],
     [/decimo terceiro|decimo salario|13o salario|13 salario/, 'Décimo Terceiro Salário'],
     [/vale transporte|passagem|transporte/, 'Vale Transporte'],
     [/vale refeicao|vale refeição|vr\b/, 'Vale Refeição'],
@@ -1990,10 +1994,14 @@ function inferirContaPagamentoPorTexto(texto) {
     [/destilado|vodka|whisky|gin|cachaca|cachaça/, 'Destilados'],
     [/refrigerante|suco|agua mineral|água mineral|nao alcoolico|não alcoólico/, 'Não Alcoólicos'],
     [/vinho/, 'Vinho'],
-    [/marketing|acao|ação/, 'Ações de Marketing'],
-    [/anuncio|anúncio|trafego|tráfego/, 'Anúncios'],
+    // Outdoor/placa/panfleto são divulgação paga — não existiam aqui e caíam no balde
+    // errado (14/08: outdoor de R$100 virou "Salários" e saiu do custo).
+    [/outdoor|out door|busdoor|placa|painel|banner|faixa|panfleto|folheto|flyer|impulsionam|patrocin/, 'Anúncios'],
+    [/anuncio|anúncio|trafego|tráfego|google ads|meta ads|adwords/, 'Anúncios'],
+    [/marketing|divulgac|divulgaç|propagand|publicidad/, 'Ações de Marketing'],
     [/guia/, 'Guia'],
-    [/midia|mídia|instagram|facebook/, 'Mídias Sociais'],
+    // 'social' sozinho não entra: casaria com "razão social" em qualquer documento.
+    [/midia|mídia|instagram|facebook|tiktok|redes sociais|midias sociais/, 'Mídias Sociais'],
     [/maquina|máquina|equipamento/, 'Máquinas e Equipamentos'],
     [/predial|obra|reparo/, 'Predial'],
     [/preventiva|manutencao preventiva|manutenção preventiva/, 'Preventiva'],
@@ -4900,12 +4908,25 @@ function unidadeCompativel(uniCupom, uniProd) {
 // grupo teria dado pessoal de funcionário circulando no WhatsApp.
 // O problema que isso resolve: hoje a conta só existe se alguém lembrar de lançar,
 // e foi por isso que julho passou o mês inteiro sem água e luz.
-async function lerContaComIA(listaImg, mediaType, userLog) {
+async function lerContaComIA(listaImg, mediaType, userLog, legenda = '') {
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return { erro: 'ANTHROPIC_API_KEY não configurada no servidor.' };
   const contasDisponiveis = CONTAS_PLANILHA_PAGAMENTOS
     .map(g => `${g.grupo}: ${g.contas.join(' | ')}`).join('\n');
-  const prompt = `Você está lendo uma CONTA ou BOLETO de um restaurante brasileiro (conta de luz, água, internet, telefone, boleto de fornecedor, guia de imposto, tarifa).
+  // A legenda vem primeiro no prompt de propósito: ela é a intenção declarada por quem
+  // mandou, e ganha do que o documento aparenta ser. Um comprovante de Pix é só um Pix —
+  // quem sabe se foi outdoor, salário ou aluguel é a pessoa, não o papel.
+  const blocoLegenda = legenda ? `
+═══ O QUE A PESSOA ESCREVEU AO MANDAR ═══
+"${legenda}"
+
+Essa descrição MANDA na classificação. Se ela disser o que é (ex: "outdoor", "aluguel",
+"pagamento do contador"), use isso pra escolher grupo e categoria, mesmo que o documento
+sozinho sugerisse outra coisa. Só ignore se ela não disser nada útil sobre o gasto.
+E repita o teor dela no campo "descricao", pra ficar registrado o que era.
+` : '';
+  const prompt = `Você está lendo um COMPROVANTE, CONTA ou BOLETO de um restaurante brasileiro (conta de luz, água, internet, telefone, boleto de fornecedor, guia de imposto, tarifa, comprovante de Pix/TED).
+${blocoLegenda}
 
 Extraia:
 - fornecedor: quem está cobrando (ex: "Light", "CEDAE", "Vivo", "Prefeitura"). Nome curto e limpo.
@@ -4946,12 +4967,27 @@ Identifique QUAL dos documentos é e extraia SÓ o total indicado:
 4) CONTRACHEQUE INDIVIDUAL, folha de ponto, informativo ou previsão de férias
    → responda {"tipo":"folha","ignorar":"<que documento é>"} sem rubricas.
 
-5) COMPROVANTE DE PAGAMENTO de salário (Pix/TED para funcionário, recibo de salário)
+5) COMPROVANTE DE PAGAMENTO DE SALÁRIO (Pix/TED para funcionário, recibo de salário)
    → tipo "quitacao". É a QUITAÇÃO da folha, não um custo novo: o custo já foi
    reconhecido quando a folha do mês entrou. Extraia só o valor e a competência
    (se não disser a competência, use o mês da data do pagamento).
    NÃO inclua o nome de quem recebeu.
    {"tipo":"quitacao","competencia":"2026-07","valor":1850.00,"descricao":"Pagamento de salário"}
+
+   ⚠️ CUIDADO — SÓ use "quitacao" com PROVA de que é salário. Um comprovante de Pix,
+   sozinho, NÃO é prova: o restaurante paga outdoor, aluguel, fornecedor e contador por
+   Pix também. Um Pix classificado como salário por engano some do relatório de custo
+   (quitação não conta como despesa) — o dinheiro literalmente desaparece. Já aconteceu.
+
+   Vale como prova: a legenda dizer que é salário/pagamento de funcionário/folha; o
+   documento trazer "salário", "folha de pagamento", "rescisão", "adiantamento salarial",
+   holerite ou recibo de salário.
+   NÃO vale como prova: ser Pix/TED, ser para pessoa física, ser valor "de cara de
+   salário", ser dia de pagamento.
+
+   Se for Pix/TED e você NÃO tiver essa prova, trate como conta normal (tipo "conta"),
+   classificando pela legenda. Se a legenda também não disser, devolva grupo e categoria
+   null — alguém confirma no app. Chutar "Salários" é o pior resultado possível.
 
 Formato:
 {"tipo":"folha","competencia":"2026-07","descricao":"Folha de julho","so_segurado":false,"rubricas":[{"rubrica":"Salários","valor":30072.09}]}
@@ -4997,7 +5033,15 @@ Se não conseguir ler: {"erro":"descrição do problema"}`;
 // Decide a conta com 3 níveis de confiança. A memória (fornecedor já visto e
 // confirmado) é a única que auto-lança — o resto vai pra confirmação, igual as
 // pendências de nota. Sem isso o financeiro entra errado e ninguém percebe.
-async function classificarConta({ fornecedor, grupo, categoria, descricao }) {
+async function classificarConta({ fornecedor, grupo, categoria, descricao, legenda }) {
+  // Ordem de confiança, da maior pra menor. A LEGENDA vem antes da memória de propósito:
+  // a memória sabe o que aquele fornecedor costuma ser, a legenda diz o que ESTE
+  // pagamento é. Quando o Rubens escreve "outdoor" junto com o comprovante, isso não é
+  // palpite — é a resposta. Só a legenda e a memória auto-lançam; o resto vai conferir.
+  const daLegenda = legenda ? inferirContaPagamentoPorTexto(legenda) : null;
+  if (daLegenda && daLegenda.categoria !== 'Outros') {
+    return { ...daLegenda, confianca: 'legenda' };
+  }
   const termo = normalizeSearch(fornecedor || '');
   if (termo) {
     const { data: mem } = await supabase.from('conta_memoria').select('*').eq('termo', termo).maybeSingle();
@@ -5010,16 +5054,32 @@ async function classificarConta({ fornecedor, grupo, categoria, descricao }) {
   return { grupo: null, categoria: null, confianca: 'nenhuma' };
 }
 
+// Quitação de folha era o ÚNICO caminho automático sem porteiro: gravava direto em
+// Salários com quitacao=true (= fora do custo) sem checar nada. Um Pix de outdoor caiu
+// nele em 14/08 e sumiu R$100 do relatório. Agora exige evidência textual de que é
+// salário — do documento ou da legenda de quem mandou.
+function pareceSalario(...textos) {
+  const n = normalizeSearch(textos.filter(Boolean).join(' '));
+  if (!n) return false;
+  return /salari|folha de pagamento|holerite|contracheque|rescis|adiantamento salarial|pagamento de funcionario|pagamento do funcionario|vale salarial|13o salario|decimo terceiro|ferias/.test(n);
+}
+
 app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
   if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
   const { imagem, imagens, mediaType } = req.body;
   const remetente = sanitizeText(req.body?.remetente, 60) || 'WhatsApp';
+  // A legenda que a pessoa escreve junto com o comprovante ("outdoor, investimento") é a
+  // informação MAIS confiável que existe — um humano dizendo o que aquilo é. Até hoje ela
+  // era descartada: o webhook só lia a imagem, e o bot tinha que adivinhar. Foi assim que
+  // um Pix de outdoor virou "Salários" (14/08). Aceita os nomes que o n8n pode mandar.
+  const legenda = sanitizeText(
+    req.body?.legenda || req.body?.texto || req.body?.caption || req.body?.mensagem || req.body?.descricao || '', 300);
   const lista = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 4);
   if (!lista.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
   try {
-    const r = await lerContaComIA(lista, mediaType, { nome: remetente });
+    const r = await lerContaComIA(lista, mediaType, { nome: remetente }, legenda);
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler: ${r.erro}` });
 
     // FOLHA: entra pelos TOTAIS por rubrica. Nome, CPF e salário individual não são
@@ -5030,6 +5090,46 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
     if (r.tipo === 'quitacao') {
       const valor = parseNonNegativeMoney(r.valor);
       if (!valor) return res.json({ resposta: '⚠️ Não achei o valor do comprovante.' });
+      // TRAVA: quitação sai do custo. Marcar errado faz o gasto sumir da planilha — e o
+      // grupo existe justamente pra alimentar a planilha. Sem evidência de salário, isso
+      // aqui é uma conta como outra qualquer e segue o fluxo normal (nunca é descartado).
+      if (!pareceSalario(legenda, r.descricao)) {
+        const contaAlt = await classificarConta({
+          fornecedor: sanitizeText(r.fornecedor || '', 90), grupo: r.grupo, categoria: r.categoria,
+          descricao: r.descricao, legenda,
+        });
+        const descAlt = sanitizeText(legenda || r.descricao || 'Pagamento via Pix/TED', 180);
+        if (contaAlt.confianca === 'legenda' || contaAlt.confianca === 'memoria') {
+          const rAlt = await inserirPagamentos({
+            data: dateSP(), grupo: contaAlt.grupo, categoria: contaAlt.categoria, forma: 'Pix',
+            valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
+            descricao: descAlt, origem: 'whatsapp-conta', responsavel: remetente,
+            created_at: nowSP(), updated_at: nowSP(),
+          }, 'whatsapp-conta');
+          if (!rAlt.ok) {
+            return res.json({ resposta: `❌ *NÃO consegui lançar* ${fmtBRL(valor)}.\n\nManda de novo em alguns minutos, ou lance no app em *Contas*. _Não lancei nada._` });
+          }
+          await audit('ler_conta_whatsapp', { remetente, valor, conta: contaAlt.categoria, via: contaAlt.confianca, era_quitacao: true }, null, '');
+          return res.json({ resposta:
+            `✅ Lançado: *${contaAlt.categoria}* — ${fmtBRL(valor)}\n${contaAlt.grupo}\n\n_Já está na planilha._` });
+        }
+        const { data: pendQ, error: errPendQ } = await supabase.from('conta_pendencias').insert({
+          fornecedor: sanitizeText(r.fornecedor || '', 90), documento: null, valor,
+          vencimento: null, descricao: descAlt,
+          grupo_sugerido: contaAlt.grupo, categoria_sugerida: contaAlt.categoria,
+          confianca: contaAlt.confianca, remetente, status: 'pendente', created_at: nowSP(),
+        }).select('id').single();
+        if (errPendQ || !pendQ?.id) {
+          await logErroAgenda('quitacao-pendencia-nao-salvou', errPendQ || new Error('sem id'), { nome: remetente });
+          return res.json({ resposta: `❌ Li o comprovante de ${fmtBRL(valor)}, mas *não consegui guardar*. Lance no app em *Contas*.` });
+        }
+        await audit('ler_conta_whatsapp', { remetente, valor, sugestao: contaAlt.categoria, auto: false, era_quitacao: true }, null, '');
+        return res.json({ resposta:
+          `📄 Li um pagamento de ${fmtBRL(valor)}, mas *não deu pra saber em que conta entra*.\n\n` +
+          (contaAlt.categoria ? `Meu palpite: *${contaAlt.categoria}*. ` : '') +
+          `Escolhe no app em *Contas → Pendentes* que eu guardo pra próxima.\n\n` +
+          `_Dica: manda o comprovante com uma legenda dizendo o que é (ex: "outdoor", "aluguel", "conta do contador") que eu lanço direto._` });
+      }
       const comp = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
       const rq = await inserirPagamentos({
         data: dateSP(), grupo: 'Despesas Fixas / CMO', categoria: 'Salários', forma: 'quitacao',
@@ -5117,13 +5217,16 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
     if (!valor) return res.json({ resposta: '⚠️ Não achei o valor a pagar. Manda uma foto mais nítida e inteira.' });
 
     const fornecedor = sanitizeText(r.fornecedor || '', 90);
-    const descricao = sanitizeText(r.descricao || fornecedor || 'Conta', 180);
+    // A legenda, quando existe, é o que a pessoa disse que aquilo é — vale mais como
+    // descrição do que o palpite da IA sobre o documento.
+    const descricao = sanitizeText(legenda || r.descricao || fornecedor || 'Conta', 180);
     const vencimento = isDataISO(r.vencimento) ? r.vencimento : null;
-    const conta = await classificarConta({ fornecedor, grupo: r.grupo, categoria: r.categoria, descricao });
+    const conta = await classificarConta({ fornecedor, grupo: r.grupo, categoria: r.categoria, descricao: r.descricao, legenda });
 
-    // Só auto-lança o que a memória já confirmou antes. Primeira vez de um fornecedor
-    // sempre passa pela sua conferência — é assim que ele aprende sem errar sozinho.
-    if (conta.confianca === 'memoria') {
+    // Auto-lança em dois casos: quando a LEGENDA diz o que é (a pessoa já classificou) e
+    // quando a memória do fornecedor já foi confirmada antes. Fornecedor novo e sem
+    // legenda passa pela conferência — é assim que ele aprende sem errar sozinho.
+    if (conta.confianca === 'memoria' || conta.confianca === 'legenda') {
       const { data: pag, error: errPag } = await supabase.from('pagamentos_comprovantes').insert({
         data: vencimento || dateSP(), grupo: conta.grupo, categoria: conta.categoria,
         forma: 'boleto', valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
@@ -5141,13 +5244,21 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
           `❌ *NÃO consegui lançar* ${fornecedor || 'a conta'} — ${fmtBRL(valor)}.\n\n` +
           `Manda de novo em alguns minutos, ou lance no app em *Contas*. _Não lancei nada._` });
       }
+      // Aprende o fornecedor SÓ quando veio pela memória. Aprender pela legenda seria
+      // colar o fornecedor numa conta que valia pra este pagamento específico ("Pix pro
+      // Jorge — outdoor" não faz todo Pix pro Jorge virar Anúncios).
       const termoMem = normalizeSearch(fornecedor);
-      const { data: memAtual } = await supabase.from('conta_memoria').select('vezes').eq('termo', termoMem).maybeSingle();
-      await supabase.from('conta_memoria')
-        .update({ vezes: (memAtual?.vezes || 0) + 1, ultimo_valor: valor, atualizado_em: nowSP() })
-        .eq('termo', termoMem);
-      await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, conta: conta.categoria, auto: true }, null, '');
-      return res.json({ resposta: `✅ Lançado: *${conta.categoria}* — ${fmtBRL(valor)}\n${fornecedor}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\n_Já conhecia esse fornecedor._` });
+      if (conta.confianca === 'memoria' && termoMem) {
+        const { data: memAtual } = await supabase.from('conta_memoria').select('vezes').eq('termo', termoMem).maybeSingle();
+        await supabase.from('conta_memoria')
+          .update({ vezes: (memAtual?.vezes || 0) + 1, ultimo_valor: valor, atualizado_em: nowSP() })
+          .eq('termo', termoMem);
+      }
+      await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, conta: conta.categoria, auto: true, via: conta.confianca }, null, '');
+      return res.json({ resposta:
+        `✅ Lançado: *${conta.categoria}* — ${fmtBRL(valor)}\n${conta.grupo}${fornecedor ? '\n' + fornecedor : ''}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\n` +
+        (conta.confianca === 'legenda' ? '_Classifiquei pelo que você escreveu._' : '_Já conhecia esse fornecedor._') +
+        ' _Já está na planilha._' });
     }
 
     const { data: pend, error: errPend } = await supabase.from('conta_pendencias').insert({
@@ -5166,10 +5277,13 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
         `Não vai aparecer em Contas → Pendentes. Manda de novo, ou lance direto no app em *Contas*.` });
     }
     await audit('ler_conta_whatsapp', { remetente, fornecedor, valor, sugestao: conta.categoria, auto: false }, null, '');
+    // Sem legenda, ensina o atalho: é o que faz a conta entrar direto na planilha em vez
+    // de ficar esperando alguém abrir o app.
+    const dicaLegenda = legenda ? '' : '\n\n_Dica: manda o comprovante com uma legenda dizendo o que é (ex: "outdoor", "aluguel", "gás") que eu lanço na hora._';
     return res.json({
-      resposta: conta.categoria
+      resposta: (conta.categoria
         ? `📄 Li: *${fornecedor || 'conta'}* — ${fmtBRL(valor)}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\nAcho que é *${conta.categoria}*. Confirma no app em Contas → Pendentes que eu já aprendo pra próxima.`
-        : `📄 Li: *${fornecedor || 'conta'}* — ${fmtBRL(valor)}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\nNão sei em qual conta lançar. Escolhe no app em Contas → Pendentes que eu guardo pra próxima.`,
+        : `📄 Li: *${fornecedor || 'conta'}* — ${fmtBRL(valor)}${vencimento ? ' · vence ' + dataBR(vencimento) : ''}\n\nNão sei em qual conta lançar. Escolhe no app em Contas → Pendentes que eu guardo pra próxima.`) + dicaLegenda,
       pendencia_id: pend?.id,
     });
   } catch (e) {
