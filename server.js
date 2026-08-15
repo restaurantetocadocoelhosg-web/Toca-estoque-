@@ -1953,14 +1953,17 @@ function inferirContaPagamentoPorTexto(texto) {
     // porque "RETIRADA ... TREINAMENTO" é pagamento, não distribuição.
     // "extra" sozinho pegava "compra extra de hoje" — agora só quando é pagamento a
     // pessoa (dia extra / diária extra / funcionário extra), que é o sentido original.
-    [/freela|freelance|treinamento|diarista|\bdiaria\b|dia extra|diaria extra|funcionario extra|funcionário extra/, 'Freelance'],
+    // "\bfree\b" é como o caixa anota freelance no fechamento ("GUSTAVO FREE",
+    // "TATIANA FREE") — R$660 de junho caíam em "Outros" por causa disso.
+    [/freela|freelance|\bfree\b|treinamento|diarista|\bdiaria\b|dia extra|diaria extra|funcionario extra|funcionário extra/, 'Freelance'],
     [/gratific|gorjeta|caixinha/, 'Gorjeta / Gratificação'],
     [/pro labore|pro-labore|pró-labore/, 'Pró-labore'],
     [/\binss\b/, 'INSS'],
     [/\birrf\b|imposto de renda/, 'IRRF'],
     [/\bfgts\b/, 'FGTS'],
     [/ferias|férias/, 'Férias'],
-    [/rescis|admiss|demiss|homologac|homologaç|exame admissional|aviso previo|aviso prévio/, 'Despesas com Admissão e Demissão'],
+    // "recisao" sem o S é como aparece escrito no fechamento à mão ("RECISÃO YASMIN").
+    [/rescis|recisa|recisã|admiss|demiss|homologac|homologaç|exame admissional|aviso previo|aviso prévio/, 'Despesas com Admissão e Demissão'],
     [/decimo terceiro|decimo salario|13o salario|13 salario/, 'Décimo Terceiro Salário'],
     [/vale transporte|passagem|transporte/, 'Vale Transporte'],
     [/vale refeicao|vale refeição|vr\b/, 'Vale Refeição'],
@@ -1977,11 +1980,13 @@ function inferirContaPagamentoPorTexto(texto) {
     [/emprestimo|empréstimo|financiamento/, 'Empréstimo Bancário'],
     [/taxa.*cartao|cartao.*taxa|credito|debito|master|visa|elo|stone|pagbank/, 'Taxas de Cartão'],
     [/taxa.*pix|pix.*taxa/, 'Taxa Pix'],
-    [/condimento|tempero/, 'Condimentos'],
+    [/condimento|tempero|shoyu|shoyo|molho shoyu|vinagre|mostarda|ketchup|catchup|maionese|pimenta|colorau|oregano|orégano|louro|azeitona|alcaparra/, 'Condimentos'],
     [/embutido|presunto|mortadela|linguica|linguiça/, 'Embutidos'],
     [/congelado/, 'Estoque Congelado'],
     [/farinha|estoque seco|seco/, 'Estoque Seco (Farinha)'],
-    [/hortifruti|verdura|legume|fruta|sacolao|sacolão/, 'Hortifruti'],
+    // Nome de item avulso que o caixa anota no fechamento ("CEBOLA", "JILÓ", "AGRIÃO").
+    // Sem isso cada verdura solta caía em "Outros" e sumia do CMV.
+    [/hortifruti|verdura|legume|fruta|sacolao|sacolão|cebola|alho|tomate|batata|cenoura|abobrinha|abobora|abóbora|chuchu|jilo|jiló|quiabo|pimentao|pimentão|couve|alface|agriao|agrião|repolho|beterraba|pepino|banana|laranja|limao|limão|mamao|mamão|melancia|abacaxi|maracuja|maracujá|manga|salsa|cebolinha|coentro|milho verde|vagem|berinjela|brocolis|brócolis|espinafre|rucula|rúcula|maca\b|maçã/, 'Hortifruti'],
     // Compra avulsa paga pelo caixa do dia (o Rubens anota assim no fechamento): é insumo,
     // tem que cair no CMV e não no balde "Outros".
     [/\bpao\b|\bpaes\b|padaria/, 'Estoque Seco (Farinha)'],
@@ -1998,7 +2003,7 @@ function inferirContaPagamentoPorTexto(texto) {
     [/suina|suína|porco|linguica|linguiça/, 'Proteína Suína'],
     [/cerveja/, 'Cerveja'],
     [/destilado|vodka|whisky|gin|cachaca|cachaça/, 'Destilados'],
-    [/refrigerante|suco|agua mineral|água mineral|nao alcoolico|não alcoólico/, 'Não Alcoólicos'],
+    [/refrigerante|suco|agua mineral|água mineral|nao alcoolico|não alcoólico|\bbebida|refil|guarana|guaraná|coca cola|coca lata|\bcha\b|\bchá\b|energetico|energético|isotonic/, 'Não Alcoólicos'],
     [/vinho/, 'Vinho'],
     // Outdoor/panfleto são divulgação paga — não existiam aqui e caíam no balde errado
     // (14/08: outdoor de R$100 virou "Salários" e saiu do custo).
@@ -2016,8 +2021,9 @@ function inferirContaPagamentoPorTexto(texto) {
     [/cardapio|cardápio/, 'Cardápio'],
     [/veiculo|veículo|ipva|multa|carro/, 'Despesas com Veículo (IPVA, multas, manutenção)'],
     [/frete|entrega/, 'Frete'],
-    [/escritorio|escritório|informatica|informática|papelaria|computador/, 'Material de Escritório e Informática'],
-    [/utensilio|utensílio|panela|talher|equipamento cozinha/, 'Utensílios e Equipamentos'],
+    // "bobina" = papel da impressora do caixa; aparece bastante no fechamento.
+    [/escritorio|escritório|informatica|informática|papelaria|computador|bobina|toner|cartucho|impressora/, 'Material de Escritório e Informática'],
+    [/utensilio|utensílio|panela|talher|equipamento cozinha|coador|concha|escumadeira|assadeira|forma de bolo|tabua de corte|tábua de corte/, 'Utensílios e Equipamentos'],
     [/incendio|incêndio/, 'Taxa de Incêndio'],
     [/boleto|conta avulsa/, 'Boleto / Conta avulsa'],
     [/retirada|socio|sócio|nayara|nay/, 'Retirada'],
