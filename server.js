@@ -2906,7 +2906,7 @@ async function montarIndices(mesParam) {
     supabase.from('fechamentos_diarios').select('data, vendas')
       .gte('data', inicioJanela).lte('data', fimMes)
       .then(r => { if (r.error && !isTabelaFechamentoMissing(r.error)) throw r.error; return r.data || []; }),
-    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, grupo, categoria, valor_bruto, quitacao, competencia')
+    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, grupo, categoria, valor_bruto')
       .gte('data', inicioJanela).lte('data', fimMes).order('id', { ascending: true }))
       .catch(e => { if (isTabelaPagamentosMissing(e)) return []; throw e; }),
     fetchTodas(() => supabase.from('movimentacoes').select('created_at, tipo, valor')
@@ -2950,22 +2950,17 @@ async function montarIndices(mesParam) {
   const porGrupo = Object.fromEntries(CONTAS_PLANILHA_PAGAMENTOS.map(g => [g.grupo, zero()]));
   const dentroJanela = new Set(mesesJanela);
   const naoOperacional = { mes: 0, janela: 0, n_mes: 0 };
-  const quitacoes = { mes: 0, n_mes: 0 };
+  // REGIME DE CAIXA (decisão do Rubens, 15/08): o custo é o pagamento, no dia em que o
+  // dinheiro saiu — igual à planilha FLUXO DE CAIXA que ele mantém. Não existe mais
+  // "quitação que não conta": Pix de salário é custo de Salários, guia do FGTS é custo
+  // de FGTS, DARF é custo de INSS. Cada imposto na sua conta.
+  // O modelo anterior (folha declara o custo por competência, pagamento não conta) fazia
+  // o CMO de julho aparecer como 9,8% da receita — impossível num restaurante. Com o
+  // regime de caixa vai a 23,8%, que é o número real.
   for (const p of pagamentos) {
     const g = p.grupo || 'Outras Despesas';
     const v = Number(p.valor_bruto || 0);
     const naJanela = dentroJanela.has(String(p.data || '').slice(0, 7));
-    // Quitação (comprovante de pagamento da folha): o dinheiro saiu, mas o custo já foi
-    // reconhecido pela folha na competência. Contar de novo dobraria o CMO.
-    if (p.quitacao) {
-      // Confronto tem que ser competência × competência. A folha de julho é paga no 5º
-      // dia útil de agosto: comparar pelo DIA do pagamento acusaria "pago sem custo" em
-      // agosto todo mês, sem nada estar errado. Quitação antiga não tem competência
-      // gravada (campo nasceu depois) — nesse caso o mês do pagamento é o que dá.
-      const compQuit = /^\d{4}-\d{2}$/.test(p.competencia || '') ? p.competencia : String(p.data || '').slice(0, 7);
-      if (compQuit === mes) { quitacoes.mes += v; quitacoes.n_mes++; }
-      continue;
-    }
     if (ehNaoOperacional(g, p.categoria)) {   // retirada: registrada, fora do custo
       if (naJanela) naoOperacional.janela += v;
       if (noMes(p.data)) { naoOperacional.mes += v; naoOperacional.n_mes++; }
@@ -3038,24 +3033,8 @@ async function montarIndices(mesParam) {
       valor_mes: sobraMes, pct_mes: pct(sobraMes, vendasMes),
       valor_janela: sobraJanela, pct_janela: pct(sobraJanela, vendasJanela),
     },
-    // Confronto folha x pagamento: a folha diz quanto CUSTOU (competência), os
-    // comprovantes dizem quanto já SAIU. em_aberto>0 = falta pagar custo já reconhecido.
-    // em_aberto<0 = pagou quitação de um custo que NUNCA foi reconhecido em lugar
-    // nenhum (ex.: Pix manual sem lançamento de folha correspondente) — sinal de que
-    // falta lançar o custo, não que "já tá tudo pago".
-    folha: (() => {
-      const custo = grupos.find(g => g.grupo === 'Despesas Fixas / CMO')?.valor_mes || 0;
-      const pago = Number(quitacoes.mes.toFixed(2));
-      const emAberto = Number((custo - pago).toFixed(2));
-      const situacao = emAberto > 0.5 ? 'falta' : (emAberto < -0.5 ? 'sem_custo' : 'quitada');
-      return {
-        custo_mes: custo,
-        pago_mes: pago,
-        em_aberto: emAberto,
-        situacao,
-        comprovantes: quitacoes.n_mes,
-      };
-    })(),
+    // O confronto folha × quitação saiu junto com o regime de competência: no regime de
+    // caixa não existem dois números de folha pra reconciliar — o pagamento É o custo.
     // Fora do custo, mostrado à parte: saiu do caixa mas é distribuição, não despesa.
     nao_operacional: {
       rotulo: 'Retiradas de sócio',
@@ -4958,10 +4937,13 @@ Identifique QUAL dos documentos é e extraia SÓ o total indicado:
 
 1) EXTRATO MENSAL / FOLHA DE PAGAMENTO (várias páginas, últimas com quadro de totais)
    → rubrica "Salários" = valor de "Total Geral Proventos"
-   Esse é o custo bruto do pessoal. NÃO extraia INSS nem IRRF daqui: eles são DESCONTOS
-   que já estão dentro dos proventos, e lançá-los de novo contaria duas vezes.
+   NÃO extraia INSS nem IRRF daqui: eles são DESCONTOS que já estão dentro dos proventos,
+   e lançá-los de novo contaria duas vezes.
    Se o quadro trouxer "Valor do FGTS" e/ou "Valor FGTS Rescisório", some os dois numa
    rubrica "FGTS".
+   Obs.: o sistema trabalha em regime de CAIXA — o salário já entra no custo por cada
+   comprovante de pagamento, então a rubrica "Salários" da folha não é lançada de novo.
+   Extraia mesmo assim; quem decide o que lança é o sistema.
 
 2) GUIA DO FGTS (GFD / FGTS Digital / GRF)
    → rubrica "FGTS" = valor de "Valor a recolher" (ou "Total a recolher")
@@ -4976,16 +4958,17 @@ Identifique QUAL dos documentos é e extraia SÓ o total indicado:
    → responda {"tipo":"folha","ignorar":"<que documento é>"} sem rubricas.
 
 5) COMPROVANTE DE PAGAMENTO DE SALÁRIO (Pix/TED para funcionário, recibo de salário)
-   → tipo "quitacao". É a QUITAÇÃO da folha, não um custo novo: o custo já foi
-   reconhecido quando a folha do mês entrou. Extraia só o valor e a competência
-   (se não disser a competência, use o mês da data do pagamento).
-   NÃO inclua o nome de quem recebeu.
+   → tipo "quitacao". Extraia só o valor e a competência (se não disser, use o mês da
+   data do pagamento). NÃO inclua o nome de quem recebeu.
    {"tipo":"quitacao","competencia":"2026-07","valor":1850.00,"descricao":"Pagamento de salário"}
+   Este pagamento É o custo de pessoal do dia (regime de caixa) e entra na conta Salários
+   — ou em Férias / Décimo Terceiro Salário / Despesas com Admissão e Demissão, se a
+   legenda disser que é isso.
 
    ⚠️ CUIDADO — SÓ use "quitacao" com PROVA de que é salário. Um comprovante de Pix,
    sozinho, NÃO é prova: o restaurante paga outdoor, aluguel, fornecedor e contador por
-   Pix também. Um Pix classificado como salário por engano some do relatório de custo
-   (quitação não conta como despesa) — o dinheiro literalmente desaparece. Já aconteceu.
+   Pix também. Um Pix classificado como salário por engano infla o custo de pessoal e
+   esconde o gasto verdadeiro — em 14/08 um outdoor de R$100 virou "Salários". Já aconteceu.
 
    Vale como prova: a legenda dizer que é salário/pagamento de funcionário/folha; o
    documento trazer "salário", "folha de pagamento", "rescisão", "adiantamento salarial",
@@ -5044,6 +5027,11 @@ Se não conseguir ler: {"erro":"descrição do problema"}`;
 const SAUDACOES = /^(?:\s*(?:oi+|ol[aá]+|e a[ií]|opa|eae|salve|fala|bom dia|boa tarde|boa noite|blz|beleza|tudo bem|td bem|por favor|pfv|obrigad[oa])\b[\s,.!;:-]*)+/i;
 // Contas que não classificam nada — servem de estacionamento, não de resposta.
 const GENERICAS = ['Outros', 'Boleto / Conta avulsa'];
+// Regime de caixa: estas rubricas são pagas DIRETO ao funcionário e já entram como custo
+// pelo comprovante de cada pagamento. Se a folha do contador também as lançasse, o mesmo
+// dinheiro contaria duas vezes. FGTS/INSS/IRRF ficam de fora desta lista de propósito:
+// são pagos por guia própria, que é um pagamento à parte.
+const RUBRICAS_PAGAS_DIRETO = ['Salários', 'Férias', 'Décimo Terceiro Salário', 'Pró-labore'];
 function limparSaudacao(texto) {
   let s = String(texto || '').trim();
   if (!s) return '';
@@ -5163,12 +5151,17 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
           `Escolhe no app em *Contas → Pendentes* que eu guardo pra próxima.\n\n` +
           `_Dica: manda o comprovante com uma legenda dizendo o que é (ex: "outdoor", "aluguel", "conta do contador") que eu lanço direto._` });
       }
-      const comp = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
+      // REGIME DE CAIXA: o pagamento É o custo. A conta certa vem da legenda quando ela
+      // diz (rescisão → Admissão e Demissão, férias → Férias, 13º → Décimo Terceiro);
+      // no silêncio, salário puro é Salários.
+      const contaSal = inferirContaPagamentoPorTexto(limparSaudacao(legenda) || r.descricao || '');
+      const ehCmoValida = contaSal && contaSal.grupo === 'Despesas Fixas / CMO';
+      const catSal = ehCmoValida ? contaSal.categoria : 'Salários';
       const rq = await inserirPagamentos({
-        data: dateSP(), grupo: 'Despesas Fixas / CMO', categoria: 'Salários', forma: 'quitacao',
+        data: dateSP(), grupo: 'Despesas Fixas / CMO', categoria: catSal, forma: 'Pix',
         valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
-        descricao: sanitizeText(r.descricao || 'Pagamento de salário', 180),
-        origem: 'quitacao-whatsapp', responsavel: remetente, quitacao: true, competencia: comp,
+        descricao: sanitizeText(legenda || r.descricao || 'Pagamento de salário', 180),
+        origem: 'quitacao-whatsapp', responsavel: remetente,
         created_at: nowSP(), updated_at: nowSP(),
       }, 'quitacao-whatsapp');
       // Nunca responder "✅ registrado" sem o banco ter confirmado: quem mandou o
@@ -5179,19 +5172,9 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
           `Manda de novo em alguns minutos, ou lance no app em *Contas*. ` +
           `_Não registrei nada — não conte como pago._` });
       }
-      const { data: pagos } = await supabase.from('pagamentos_comprovantes')
-        .select('valor_bruto').eq('quitacao', true).eq('competencia', comp);
-      const totalPago = (pagos || []).reduce((s, p) => s + Number(p.valor_bruto || 0), 0);
-      const { data: folha } = await supabase.from('pagamentos_comprovantes')
-        .select('valor_bruto').eq('origem', 'folha-whatsapp').eq('data', fimMesISO(comp));
-      const custoFolha = (folha || []).reduce((s, p) => s + Number(p.valor_bruto || 0), 0);
-      await audit('quitacao_folha', { remetente, competencia: comp, valor }, null, '');
+      await audit('ler_conta_whatsapp', { remetente, valor, conta: catSal, via: 'salario' }, null, '');
       return res.json({ resposta:
-        `✅ Pagamento de ${fmtBRL(valor)} registrado (competência ${comp.split('-').reverse().join('/')}).\n\n` +
-        (custoFolha > 0
-          ? `Folha do mês: ${fmtBRL(custoFolha)}\nJá pago: ${fmtBRL(totalPago)}\nEm aberto: ${fmtBRL(custoFolha - totalPago)}`
-          : `Já pago nessa competência: ${fmtBRL(totalPago)}\n_A folha desse mês ainda não foi lançada — manda que eu fecho a conta._`) +
-        `\n\n_Não somei no custo: quem diz o custo é a folha._` });
+        `✅ Lançado: *${catSal}* — ${fmtBRL(valor)}\nDespesas Fixas / CMO\n\n_Já está na planilha._` });
     }
     if (r.tipo === 'folha' && r.ignorar) {
       return res.json({ resposta: `ℹ️ Isso é *${sanitizeText(r.ignorar, 80)}* — não tem total pra lançar.\n\nDo pacote do contador, manda só três: a *folha de pagamento*, a *guia do FGTS* e o *DARF do INSS*.` });
@@ -5207,41 +5190,64 @@ app.post('/api/webhook/ler-conta', webhookLimiter, webhookTenantDoGrupo, async (
     }
     if (r.tipo === 'folha' && Array.isArray(r.rubricas) && r.rubricas.length) {
       const competencia = /^\d{4}-\d{2}$/.test(r.competencia || '') ? r.competencia : dateSP().slice(0, 7);
-      const dataLanc = fimMesISO(competencia);
-      const linhas = [], ignoradas = [];
+      const dataLanc = dateSP();   // regime de caixa: entra no dia em que foi pago/registrado
+      const linhas = [], ignoradas = [], jaVieramPeloPix = [];
       for (const rb of r.rubricas) {
         const valor = parseNonNegativeMoney(rb.valor);
         const conta = acharContaPagamento(sanitizeText(rb.rubrica || '', 120));
         if (!valor || !conta) { ignoradas.push(rb.rubrica); continue; }
+        // No regime de caixa, o que é pago DIRETO ao funcionário (salário, férias, 13º,
+        // pró-labore) já entrou como custo quando o Pix foi lançado. Lançar de novo pela
+        // folha contaria o mesmo dinheiro duas vezes. Guia de FGTS/INSS/IRRF é diferente:
+        // é um pagamento próprio, com documento próprio, e entra normal.
+        if (RUBRICAS_PAGAS_DIRETO.includes(conta.categoria)) {
+          jaVieramPeloPix.push({ categoria: conta.categoria, valor });
+          continue;
+        }
         linhas.push({
-          data: dataLanc, grupo: conta.grupo, categoria: conta.categoria, forma: 'folha',
+          data: dataLanc, grupo: conta.grupo, categoria: conta.categoria, forma: 'guia',
           valor_bruto: valor, taxa: 0, valor_liquido: valor, parcelas: 0,
-          descricao: `Folha ${competencia.split('-').reverse().join('/')} — ${conta.categoria}`,
-          origem: 'folha-whatsapp', responsavel: remetente, created_at: nowSP(), updated_at: nowSP(),
+          descricao: `${conta.categoria} — competência ${competencia.split('-').reverse().join('/')}`,
+          origem: 'folha-whatsapp', responsavel: remetente, competencia,
+          created_at: nowSP(), updated_at: nowSP(),
         });
       }
-      if (!linhas.length) return res.json({ resposta: '⚠️ Li a folha mas não reconheci nenhuma rubrica. Manda o resumo com os totais (salários, INSS, FGTS, VT).' });
-      // Idempotência POR RUBRICA, não pela competência inteira: a folha do mês chega em
-      // documentos separados (extrato, guia do FGTS, DARF). Apagar tudo da competência
-      // faria a guia do FGTS derrubar o lançamento de Salários que veio antes.
-      const limpezaFolha = await limparPagamentosAuto(dataLanc, ['folha-whatsapp'], 'folha-whatsapp', linhas.map(l => l.categoria));
-      if (!limpezaFolha.ok) {
-        return res.json({ resposta: `❌ Não consegui atualizar a folha de ${competencia.split('-').reverse().join('/')}.\n\n_Nada foi alterado — o que já estava lançado continua lá._ Manda de novo em alguns minutos.` });
+      if (!linhas.length) {
+        if (jaVieramPeloPix.length) {
+          const tot = jaVieramPeloPix.reduce((s, x) => s + x.valor, 0);
+          return res.json({ resposta:
+            `ℹ️ Li a folha de ${competencia.split('-').reverse().join('/')} (${fmtBRL(tot)} em ${jaVieramPeloPix.map(x => x.categoria).join(', ')}), mas *não lancei de propósito*.\n\n` +
+            `Esse valor já entra no custo pelos comprovantes de pagamento que você manda um a um. ` +
+            `Lançar a folha também contaria o mesmo dinheiro duas vezes.\n\n` +
+            `_Do pacote do contador, me manda a *guia do FGTS* e o *DARF do INSS* — esses sim eu lanço._` });
+        }
+        return res.json({ resposta: '⚠️ Li a folha mas não reconheci nenhuma rubrica. Manda a guia do FGTS ou o DARF do INSS.' });
+      }
+      // Idempotência POR RUBRICA e por COMPETÊNCIA (não pela data): no regime de caixa a
+      // guia entra no dia em que chega, então reenviar a mesma guia amanhã criaria uma
+      // segunda linha se a chave fosse a data. A competência é o que identifica a guia.
+      const { error: errLimpaFolha } = await supabase.from('pagamentos_comprovantes')
+        .delete().eq('origem', 'folha-whatsapp').eq('competencia', competencia)
+        .in('categoria', linhas.map(l => l.categoria));
+      if (errLimpaFolha) {
+        await logErroAgenda('folha-whatsapp-limpeza', errLimpaFolha, { nome: remetente });
+        return res.json({ resposta: `❌ Não consegui atualizar a guia de ${competencia.split('-').reverse().join('/')}.\n\n_Nada foi alterado — o que já estava lançado continua lá._ Manda de novo em alguns minutos.` });
       }
       // As rubricas antigas já foram apagadas: se o insert falhar aqui, o custo SUMIU do
-      // CMO. É a maior linha do mês — a resposta precisa dizer isso, não um "❌ erro" seco.
+      // CMO. A resposta precisa dizer isso, não um "❌ erro" seco.
       const rf = await inserirPagamentos(linhas, 'folha-whatsapp');
       if (!rf.ok) {
         return res.json({ resposta:
-          `❌ *ERRO GRAVE ao lançar a folha de ${competencia.split('-').reverse().join('/')}.*\n\n` +
-          `As rubricas anteriores dessa competência (${linhas.map(l => l.categoria).join(', ')}) foram removidas e as novas *NÃO entraram*. ` +
-          `O CMO desse mês está agora sem esse custo.\n\n*Manda a folha de novo agora* pra recolocar.` });
+          `❌ *ERRO GRAVE ao lançar a guia de ${competencia.split('-').reverse().join('/')}.*\n\n` +
+          `O que estava lançado dessa competência (${linhas.map(l => l.categoria).join(', ')}) foi removido e o novo *NÃO entrou*. ` +
+          `O CMO desse mês está agora sem esse custo.\n\n*Manda o documento de novo agora* pra recolocar.` });
       }
       await audit('ler_folha_whatsapp', { remetente, competencia, rubricas: linhas.length, total: linhas.reduce((s, l) => s + l.valor_bruto, 0) }, null, '');
       const total = linhas.reduce((s, l) => s + l.valor_bruto, 0);
       return res.json({ resposta:
-        `✅ *Folha ${competencia.split('-').reverse().join('/')}* lançada — ${fmtBRL(total)}\n\n` +
+        `✅ Lançado — ${fmtBRL(total)} (competência ${competencia.split('-').reverse().join('/')})\n\n` +
         linhas.map(l => `• ${l.categoria}: ${fmtBRL(l.valor_bruto)}`).join('\n') +
+        (jaVieramPeloPix.length ? `\n\n_Não lancei ${jaVieramPeloPix.map(x => x.categoria).join(', ')}: já entra pelos comprovantes de pagamento, contaria duas vezes._` : '') +
         (ignoradas.length ? `\n\n⚠️ Não reconheci: ${ignoradas.filter(Boolean).join(', ')}` : '') +
         `\n\n_Só os totais foram guardados — nenhum nome ou salário individual._`,
       });
