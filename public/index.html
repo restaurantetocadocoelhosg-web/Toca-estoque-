@@ -1613,7 +1613,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v108</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v109</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4875,26 +4875,38 @@ function renderPlanilhaMensal(d) {
     configEl.style.display = 'none';
   }
 
+  const cx = d.caixa || {};
   resumoEl.innerHTML = `
     <div class="real-kpi big">
-      <div class="real-label">Resultado do mês</div>
-      <div class="real-val ${Number(t.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_dia_estimado)}</div>
-      <div class="real-sub">vendas - consumo - perdas - despesas</div>
+      <div class="real-label">Resultado do mês (caixa)</div>
+      <div class="real-val ${Number(t.resultado_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_caixa)}</div>
+      <div class="real-sub">vendas − tudo que saiu pela aba Contas</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Vendas</div>
       <div class="real-val green">${fmtBRLMoney(t.vendas)}</div>
       <div class="real-sub">${t.pratos_vendidos || 0} pratos · ticket ${fmtBRLMoney(t.ticket_medio)}</div>
     </div>
-    <div class="real-kpi">
-      <div class="real-label">Caixa</div>
-      <div class="real-val ${Number(t.fluxo_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.fluxo_caixa)}</div>
-      <div class="real-sub">vendas - despesas</div>
+    <div class="real-kpi loss">
+      <div class="real-label">Saiu no mês</div>
+      <div class="real-val red">${fmtBRLMoney(t.saida_contas)}</div>
+      <div class="real-sub">todas as contas do mês</div>
     </div>
+    <div class="real-kpi">
+      <div class="real-label">Saldo no fim do mês</div>
+      <div class="real-val ${Number(cx.saldo_final || 0) < 0 ? 'red' : ''}">${fmtBRLMoney(cx.saldo_final)}</div>
+      <div class="real-sub">${cx.ancorado ? 'abriu com ' + fmtBRLMoney(cx.saldo_inicial) : '⚠️ variação acumulada — falta informar o saldo de partida'}</div>
+    </div>
+    ${Number(t.espelho_furado || 0) > 0 ? `
+    <div class="real-kpi loss">
+      <div class="real-label">⚠️ Não chegou nas Contas</div>
+      <div class="real-val red">${fmtBRLMoney(t.espelho_furado)}</div>
+      <div class="real-sub">${t.dias_espelho_furado} dia(s) · entrou no app e não virou lançamento</div>
+    </div>` : ''}
     <div class="real-kpi warn">
       <div class="real-label">Compras</div>
       <div class="real-val accent">${fmtBRLMoney(t.compras_estoque)}</div>
-      <div class="real-sub">${fmtPct(t.compras_sobre_vendas_pct)} das vendas · investimento separado</div>
+      <div class="real-sub">${fmtPct(t.compras_sobre_vendas_pct)} das vendas · já dentro do "saiu no mês"</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Consumo</div>
@@ -4907,9 +4919,14 @@ function renderPlanilhaMensal(d) {
       <div class="real-sub">${fmtPct(t.perdas_sobre_vendas_pct)} das vendas</div>
     </div>
     <div class="real-kpi loss">
-      <div class="real-label">Despesas</div>
+      <div class="real-label">Despesas do caixa</div>
       <div class="real-val red">${fmtBRLMoney(t.despesas)}</div>
-      <div class="real-sub">${fmtPct(t.despesas_sobre_vendas_pct)} das vendas</div>
+      <div class="real-sub">${fmtPct(t.despesas_sobre_vendas_pct)} das vendas · já dentro do "saiu no mês"</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">Resultado operacional</div>
+      <div class="real-val ${Number(t.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_dia_estimado)}</div>
+      <div class="real-sub">vendas − consumo − perdas − despesas (não é caixa)</div>
     </div>
     <div class="real-kpi">
       <div class="real-label">Dias fechados</div>

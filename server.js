@@ -1929,6 +1929,11 @@ function acharContaPagamento(categoria) {
 function inferirContaPagamentoPorTexto(texto) {
   const n = normalizeSearch(texto);
   const regras = [
+    // RETIRADA vem PRIMEIRO: é a palavra mais decisiva do fechamento e não pode perder
+    // pro resto da frase. "RETIRADA NAYARA MERCADO" caía em Hortifruti só porque a regra
+    // de "mercado" vinha antes — e retirada sai do custo, então errar aqui move dinheiro
+    // de lugar. O resto dos sinais de sócio fica no fim, onde já estava.
+    [/\bretirada\b/, 'Retirada'],
     [/agua|sabesp|cedae/, 'Água'],
     [/eletric|energia|\benel\b|\blight\b|\bedp\b|\bluz\b|copa energia/, 'Eletricidade'],
     [/internet|wifi|wi-fi|vivo fibra|claro net|banda larga/, 'Internet'],
@@ -2293,12 +2298,19 @@ async function montarPagamentosMensal(mesParam) {
   const mes = validarMesISO(mesParam);
   const inicio = `${mes}-01`;
   const fim = fimMesISO(mes);
-  const { data, error } = await supabase.from('pagamentos_comprovantes')
-    .select('*')
-    .gte('data', inicio)
-    .lte('data', fim)
-    .order('data', { ascending: false })
-    .order('id', { ascending: false });
+  // PRECISA paginar: o PostgREST corta em 1000 linhas e julho/2026 já tem 809. Sem isto
+  // a aba Contas passaria a mostrar um total MENOR do que o real, em silêncio, enquanto
+  // os Índices (que já usam fetchTodas) continuariam certos — e as duas telas
+  // divergiriam do nada, sem ninguém entender por quê.
+  let data = null, error = null;
+  try {
+    data = await fetchTodas(() => supabase.from('pagamentos_comprovantes')
+      .select('*')
+      .gte('data', inicio)
+      .lte('data', fim)
+      .order('data', { ascending: false })
+      .order('id', { ascending: false }));
+  } catch (e) { error = e; }
   if (error) {
     if (isTabelaPagamentosMissing(error)) {
       return {
@@ -2681,7 +2693,7 @@ async function montarRealidadeDia(dataDiaParam) {
 function movimentoVazioDia() {
   return {
     total: 0,
-    compras: 0, consumo: 0, perdas: 0, ajustes: 0,
+    compras: 0, compras_pagas: 0, consumo: 0, perdas: 0, ajustes: 0,
     n_compras: 0, n_consumo: 0, n_perdas: 0, n_ajustes: 0,
     anomalias: 0,
   };
@@ -2703,6 +2715,28 @@ async function fetchTodas(buildQuery, pageSize = 1000) {
   return todas;
 }
 
+// SALDO DE CAIXA — a coluna que segura a planilha do Rubens:
+//   saldo_final(d) = saldo_final(d-1) + vendas(d) − saída(d)
+// Sempre CALCULADO, nunca guardado. O app permite editar dia retroativo e re-salvar
+// fechamento; um saldo congelado viraria mentira silenciosa na primeira edição. São
+// ~1,3 mil pagamentos e ~110 fechamentos no ano — recalcular tudo custa nada.
+// Sem saldo de partida informado, o número é VARIAÇÃO acumulada, e a tela diz isso.
+async function saldoAcumuladoAte(fimISO) {
+  const [fechs, pags] = await Promise.all([
+    fetchTodas(() => supabase.from('fechamentos_diarios').select('data, vendas')
+      .lte('data', fimISO).order('data', { ascending: true }))
+      .catch(e => { if (isTabelaFechamentoMissing(e)) return []; throw e; }),
+    fetchTodas(() => supabase.from('pagamentos_comprovantes').select('data, valor_bruto')
+      .lte('data', fimISO).order('id', { ascending: true }))
+      .catch(e => { if (isTabelaPagamentosMissing(e)) return []; throw e; }),
+  ]);
+  const porDia = {};
+  const toca = d => (porDia[d] = porDia[d] || { entrada: 0, saida: 0 });
+  for (const f of fechs) toca(String(f.data).slice(0, 10)).entrada += Number(f.vendas || 0);
+  for (const p of pags) toca(String(p.data).slice(0, 10)).saida += Number(p.valor_bruto || 0);
+  return porDia;
+}
+
 async function montarPlanilhaMensal(mesParam) {
   const mes = validarMesISO(mesParam);
   const inicio = `${mes}-01`;
@@ -2712,7 +2746,7 @@ async function montarPlanilhaMensal(mesParam) {
   let configuracaoPendente = false;
 
   const movimentos = await fetchTodas(() => supabase.from('movimentacoes')
-    .select('created_at, tipo, valor, obs')
+    .select('created_at, tipo, motivo, valor, obs')
     .gte('created_at', inicio + 'T00:00:00-03:00')
     .lte('created_at', fim + 'T23:59:59-03:00')
     .order('id', { ascending: true }));
@@ -2725,13 +2759,20 @@ async function montarPlanilhaMensal(mesParam) {
     const tipo = m.tipo || '';
     mov.total++;
     if (m.obs && /anomalia/i.test(m.obs)) mov.anomalias++;
-    if (tipo === 'Entrada') { mov.compras += valor; mov.n_compras++; }
+    // `compras` = toda entrada (comportamento antigo, não mexer). `compras_pagas` = só o
+    // que é COMPRA de verdade — entrada de Produção não gera lançamento nas Contas, então
+    // comparar o espelho com o total de entradas acusaria furo onde não há.
+    if (tipo === 'Entrada') {
+      mov.compras += valor; mov.n_compras++;
+      if (m.motivo === 'Compra') mov.compras_pagas += valor;
+    }
     else if (tipo === 'Saída') { mov.consumo += valor; mov.n_consumo++; }
     else if (tipo === 'Perda') { mov.perdas += valor; mov.n_perdas++; }
     else if (tipo === 'Ajuste') { mov.ajustes += valor; mov.n_ajustes++; }
   }
   for (const mov of Object.values(movPorDia)) {
     mov.compras = Number(mov.compras.toFixed(2));
+    mov.compras_pagas = Number(mov.compras_pagas.toFixed(2));
     mov.consumo = Number(mov.consumo.toFixed(2));
     mov.perdas = Number(mov.perdas.toFixed(2));
     mov.ajustes = Number(mov.ajustes.toFixed(2));
@@ -2749,6 +2790,39 @@ async function montarPlanilhaMensal(mesParam) {
   } else {
     fechamentos = fechData || [];
   }
+
+  // A SAÍDA DE DINHEIRO vem das CONTAS, fonte única (decisão 15/08). Antes a Planilha só
+  // somava `fechamentos_diarios.despesas` — ou seja, ignorava aluguel, salário, taxa de
+  // cartão, contador e o CMV inteiro, e por isso dava um resultado e os Índices davam
+  // outro. Ler daqui resolve a dupla contagem de forma estrutural: não se subtrai nada,
+  // lê-se um lado só. `despesas` e `compras_estoque` continuam no dia como DETALHE
+  // operacional, fora da conta de caixa.
+  let pagamentosMes = [];
+  try {
+    pagamentosMes = await fetchTodas(() => supabase.from('pagamentos_comprovantes')
+      .select('data, valor_bruto, grupo, categoria, origem')
+      .gte('data', inicio).lte('data', fim).order('id', { ascending: true }));
+  } catch (e) { if (!isTabelaPagamentosMissing(e)) throw e; }
+
+  const contasPorDia = {};
+  for (const p of pagamentosMes) {
+    const dia = String(p.data || '').slice(0, 10);
+    if (!contasPorDia[dia]) contasPorDia[dia] = { saida: 0, n: 0, estoque: 0, caixa: 0, grupos: {} };
+    const v = Number(p.valor_bruto || 0);
+    const c = contasPorDia[dia];
+    c.saida += v; c.n++;
+    c.grupos[p.grupo || 'Outras Despesas'] = Number(((c.grupos[p.grupo || 'Outras Despesas'] || 0) + v).toFixed(2));
+    if (/^estoque-/.test(p.origem || '')) c.estoque += v;
+    if (/^caixa-/.test(p.origem || '')) c.caixa += v;
+  }
+
+  // Saldo que ENTRA no mês: soma tudo que houve antes do dia 1.
+  const historico = await saldoAcumuladoAte(fim);
+  let saldoCorrente = 0;
+  for (const [dia, v] of Object.entries(historico)) {
+    if (dia < inicio) saldoCorrente += v.entrada - v.saida;
+  }
+  const saldoAbertura = Number(saldoCorrente.toFixed(2));
 
   const fechPorDia = Object.fromEntries(fechamentos.map(row => [String(row.data).slice(0, 10), row]));
   const formasMes = resumoFormasPagamento([]);
@@ -2770,6 +2844,10 @@ async function montarPlanilhaMensal(mesParam) {
     lucro_bruto_estimado: 0,
     resultado_dia_estimado: 0,
     fluxo_caixa: 0,
+    saida_contas: 0,          // tudo que saiu, pela aba Contas (fonte única)
+    resultado_caixa: 0,       // vendas − saída das Contas
+    espelho_furado: 0,        // R$ que entrou no estoque/caixa e NÃO chegou nas Contas
+    dias_espelho_furado: 0,
     anomalias: 0,
     ticket_medio: null,
     lixo_buffet_g: 0, // anotação acumulada do mês (gramas) — fora das somas financeiras
@@ -2793,6 +2871,30 @@ async function montarPlanilhaMensal(mesParam) {
     const lucroBruto = Number((vendas - mov.consumo - mov.perdas).toFixed(2));
     const resultadoDia = Number((lucroBruto - despesas).toFixed(2));
     const fluxoCaixa = Number((vendas - despesas).toFixed(2));
+
+    // --- CAIXA DO DIA, pelas Contas ---
+    const conta = contasPorDia[dataDia] || { saida: 0, n: 0, estoque: 0, caixa: 0, grupos: {} };
+    const saidaContas = Number(conta.saida.toFixed(2));
+    const resultadoCaixa = Number((vendas - saidaContas).toFixed(2));
+    const saldoInicialDia = Number(saldoCorrente.toFixed(2));
+    saldoCorrente += vendas - saidaContas;
+    const saldoFinalDia = Number(saldoCorrente.toFixed(2));
+
+    // --- ESPELHO: o que entrou no app tem que ter chegado nas Contas ---
+    // Não soma nada — só compara e denuncia. Somar os dois lados seria contar duas vezes.
+    // Retirada é excluída de propósito das Contas, então sai da comparação também.
+    const retiradaDia = despesasLista
+      .filter(d => { const c = inferirContaPagamentoPorTexto(d.descricao); return c && ehNaoOperacional(c.grupo, c.categoria); })
+      .reduce((s, d) => s + Number(d.valor || 0), 0);
+    const difCompras = Number((mov.compras_pagas - conta.estoque).toFixed(2));
+    const difCaixa = Number(((despesas - retiradaDia) - conta.caixa).toFixed(2));
+    const espelho = {
+      compras_estoque: mov.compras_pagas, compras_contas: Number(conta.estoque.toFixed(2)), dif_compras: difCompras,
+      caixa_fechamento: Number((despesas - retiradaDia).toFixed(2)), caixa_contas: Number(conta.caixa.toFixed(2)), dif_caixa: difCaixa,
+      retirada: Number(retiradaDia.toFixed(2)),
+      furado: Math.abs(difCompras) > 0.01 || Math.abs(difCaixa) > 0.01,
+      falta: Number((Math.max(difCompras, 0) + Math.max(difCaixa, 0)).toFixed(2)),
+    };
     const vendaLancada = !!row;
     const temEstoque = mov.total > 0;
     const temMovimento = vendaLancada || temEstoque;
@@ -2813,6 +2915,10 @@ async function montarPlanilhaMensal(mesParam) {
     totais.lucro_bruto_estimado += lucroBruto;
     totais.resultado_dia_estimado += resultadoDia;
     totais.fluxo_caixa += fluxoCaixa;
+    totais.saida_contas += saidaContas;
+    totais.resultado_caixa += resultadoCaixa;
+    totais.espelho_furado += espelho.falta;
+    totais.dias_espelho_furado += espelho.furado ? 1 : 0;
     totais.anomalias += mov.anomalias;
     const lixoDia = row?.lixo_buffet_g != null ? Number(row.lixo_buffet_g) : null;
     if (lixoDia != null && lixoDia > 0) { totais.lixo_buffet_g += lixoDia; totais.dias_com_lixo += 1; }
@@ -2840,6 +2946,13 @@ async function montarPlanilhaMensal(mesParam) {
       lucro_bruto_estimado: lucroBruto,
       resultado_dia_estimado: resultadoDia,
       fluxo_caixa: fluxoCaixa,
+      saida_contas: saidaContas,
+      contas_lancamentos: conta.n,
+      contas_por_grupo: conta.grupos,
+      resultado_caixa: resultadoCaixa,
+      saldo_inicial: saldoInicialDia,
+      saldo_final: saldoFinalDia,
+      espelho,
       movimentos_total: mov.total,
       movimentos: mov,
       responsavel: row?.responsavel || '',
@@ -2849,7 +2962,7 @@ async function montarPlanilhaMensal(mesParam) {
     };
   });
 
-  for (const key of ['vendas','total_pagamentos','cortes','despesas','compras_estoque','consumo_estoque','perdas','ajustes','lucro_bruto_estimado','resultado_dia_estimado','fluxo_caixa']) {
+  for (const key of ['vendas','total_pagamentos','cortes','despesas','compras_estoque','consumo_estoque','perdas','ajustes','lucro_bruto_estimado','resultado_dia_estimado','fluxo_caixa','saida_contas','resultado_caixa','espelho_furado']) {
     totais[key] = Number(totais[key].toFixed(2));
   }
   totais.dias_sem_caixa = dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).length;
@@ -2874,10 +2987,23 @@ async function montarPlanilhaMensal(mesParam) {
     fim,
     configuracao_pendente: configuracaoPendente,
     totais,
+    // Espelho da fórmula I197 da planilha: (inicial + entradas) − saídas.
+    // `ancorado: false` = ninguém informou o saldo de partida, então isto é a VARIAÇÃO
+    // acumulada desde o primeiro dia lançado, não o dinheiro que existe na conta.
+    caixa: {
+      saldo_inicial: saldoAbertura,
+      entradas: totais.vendas,
+      saidas: totais.saida_contas,
+      saldo_final: Number((saldoAbertura + totais.vendas - totais.saida_contas).toFixed(2)),
+      variacao: Number((totais.vendas - totais.saida_contas).toFixed(2)),
+      ancorado: false,
+      dias_sem_caixa: totais.dias_sem_caixa,
+    },
     formas_pagamento: formasPagamento,
     pendencias: {
       sem_caixa: dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).map(d => d.data),
       vazios: dias.filter(d => !d.tem_movimento).map(d => d.data),
+      espelho_furado: dias.filter(d => d.espelho?.furado).map(d => ({ data: d.data, falta: d.espelho.falta })),
     },
     dias,
   };
@@ -3817,9 +3943,11 @@ app.get('/api/comparar', auth, requirePerm('planilha'), async (req, res) => {
       { chave: 'ticket_medio', rotulo: 'Ticket médio', tipo: 'dinheiro', subir: 'bom' },
       { chave: 'consumo_estoque', rotulo: 'Consumo de estoque', tipo: 'dinheiro', subir: 'ruim' },
       { chave: 'perdas', rotulo: 'Perdas', tipo: 'dinheiro', subir: 'ruim' },
-      { chave: 'despesas_caixa', rotulo: 'Despesas do caixa', tipo: 'dinheiro', subir: 'ruim' },
-      { chave: 'compras_estoque', rotulo: 'Compras de estoque', tipo: 'dinheiro', subir: 'neutro' },
-      { chave: 'contas_pagas', rotulo: 'Contas pagas', tipo: 'dinheiro', subir: 'neutro' },
+      // "Despesas do caixa" e "Compras de estoque" saíram: as duas JÁ estão dentro de
+      // "Contas pagas" (origem caixa-* e estoque-*), então a tela mostrava o mesmo
+      // dinheiro duas vezes — em agosto, os mesmos R$953,18 de despesa do caixa e
+      // R$20.811 de compra apareciam em duas linhas. Contas pagas é a fonte única.
+      { chave: 'contas_pagas', rotulo: 'Contas pagas (todas as saídas)', tipo: 'dinheiro', subir: 'neutro' },
       { chave: 'cortes', rotulo: 'Cortes', tipo: 'dinheiro', subir: 'ruim' },
       { chave: 'resultado_operacional', rotulo: 'Resultado operacional', tipo: 'dinheiro', subir: 'bom' },
       { chave: 'dias_com_caixa', rotulo: 'Dias com caixa lançado', tipo: 'numero', subir: 'bom' },
