@@ -1822,7 +1822,7 @@ const CONTAS_PLANILHA_PAGAMENTOS = [
   { grupo: 'Despesas com Marketing', contas: ['Ações de Marketing', 'Anúncios', 'Guia', 'Mídias Sociais'] },
   { grupo: 'Despesas de Manutenção', contas: ['Máquinas e Equipamentos', 'Predial', 'Preventiva'] },
   { grupo: 'Despesas Eventuais', contas: ['Cardápio', 'Despesas com Veículo (IPVA, multas, manutenção)', 'Frete', 'Material de Escritório e Informática', 'Utensílios e Equipamentos', 'Taxa de Incêndio'] },
-  { grupo: 'Despesas Administrativas', contas: ['Contador', 'Taxa Ifood 12%'] },
+  { grupo: 'Despesas Administrativas', contas: ['Contador', 'Taxa iFood', 'Taxa 99Food'] },
   { grupo: 'Despesas Financeiras', contas: ['Alvará', 'Parcelamento', 'Renegociação de Dívida', 'Simples / MEI', 'Tarifa Bancária', 'Taxa de Antecipação', 'Empréstimo Bancário', 'Taxas de Cartão', 'Taxa Pix'] },
   { grupo: 'Outras Despesas', contas: ['Boleto / Conta avulsa', 'Retirada', 'Outros'] },
 ];
@@ -1975,7 +1975,8 @@ function inferirContaPagamentoPorTexto(texto) {
     [/uniforme/, 'Auxílio Uniforme'],
     [/almoco funcionario|almoço funcionário|refeicao funcionario|refeição funcionário/, 'Almoço Funcionários'],
     [/contador|contabilidade/, 'Contador'],
-    [/ifood|i-food/, 'Taxa Ifood 12%'],
+    [/99\s*food|99food/, 'Taxa 99Food'],
+    [/ifood|i-food/, 'Taxa iFood'],
     [/simples|mei\b|das\b/, 'Simples / MEI'],
     [/alvara|alvará/, 'Alvará'],
     [/parcelamento/, 'Parcelamento'],
@@ -2737,6 +2738,113 @@ async function saldoAcumuladoAte(fimISO) {
   return porDia;
 }
 
+
+// ── DELIVERY: a fórmula única ────────────────────────────────────────────────
+// O Rubens pediu que o delivery apareça em TODOS os relatórios e que "entrou,
+// atualizou tudo, como uma planilha com fórmula". Então existe UMA função que lê a
+// receita, e todo relatório chama ela. Duplicar essa leitura seria criar dois
+// números que divergem sozinhos com o tempo — foi assim que os dois bots passaram a
+// cobrar preços diferentes.
+//
+// A comissão segue caminho separado, e de propósito: ela vira uma linha real em
+// `pagamentos_comprovantes`, igual às taxas de cartão. Assim ela entra sozinha em
+// todo relatório de CUSTO sem eu precisar tocar em cada um.
+const DELIVERY_CONTA = { '99food': 'Taxa 99Food', ifood: 'Taxa iFood' };
+
+function isTabelaDeliveryMissing(e) {
+  return /delivery_receitas|schema cache|does not exist|relation/i.test(String(e?.message || e || ''));
+}
+
+/**
+ * Receita de delivery de um intervalo, já separada por mês e por plataforma.
+ * Um relatório só conta quando o período dele cabe INTEIRO dentro do intervalo
+ * pedido — relatório mensal partido no meio viraria rateio por dia, e ratear é
+ * inventar número que ninguém mediu.
+ */
+async function deliveryNoPeriodo(inicioISO, fimISO) {
+  const vazio = { bruto: 0, liquido: 0, comissao: 0, por_mes: {}, por_plataforma: {}, itens: [], fora_do_periodo: [] };
+  let linhas;
+  try {
+    linhas = await fetchTodas(() => supabase.from('delivery_receitas')
+      .select('plataforma, periodo_inicio, periodo_fim, vendas_bruto, valor_liquido, parcial')
+      .lte('periodo_inicio', fimISO).gte('periodo_fim', inicioISO)
+      .order('periodo_inicio', { ascending: true }));
+  } catch (e) {
+    if (isTabelaDeliveryMissing(e)) return vazio;   // tabela ainda não criada
+    throw e;
+  }
+
+  const acc = { ...vazio, por_mes: {}, por_plataforma: {}, itens: [], fora_do_periodo: [] };
+  for (const l of (linhas || [])) {
+    const ini = String(l.periodo_inicio).slice(0, 10);
+    const fim = String(l.periodo_fim).slice(0, 10);
+    const bruto = Number(l.vendas_bruto || 0);
+    const liquido = Number(l.valor_liquido || 0);
+    const comissao = Number((bruto - liquido).toFixed(2));
+
+    if (ini < inicioISO || fim > fimISO) { acc.fora_do_periodo.push({ ...l, comissao }); continue; }
+
+    acc.bruto += bruto; acc.liquido += liquido; acc.comissao += comissao;
+    const mes = ini.slice(0, 7);
+    const m = (acc.por_mes[mes] = acc.por_mes[mes] || { bruto: 0, liquido: 0, comissao: 0 });
+    m.bruto += bruto; m.liquido += liquido; m.comissao += comissao;
+    const p = (acc.por_plataforma[l.plataforma] = acc.por_plataforma[l.plataforma] || { bruto: 0, liquido: 0, comissao: 0 });
+    p.bruto += bruto; p.liquido += liquido; p.comissao += comissao;
+    acc.itens.push({ ...l, comissao });
+  }
+  const arredonda = (o) => { for (const k of ['bruto', 'liquido', 'comissao']) o[k] = Number(o[k].toFixed(2)); };
+  arredonda(acc);
+  Object.values(acc.por_mes).forEach(arredonda);
+  Object.values(acc.por_plataforma).forEach(arredonda);
+  return acc;
+}
+
+/**
+ * Transforma a comissão da plataforma em custo nas Contas.
+ *
+ * Mesmo desenho da taxa de cartão (`taxa-auto`): apaga a linha anterior daquela
+ * plataforma/período antes de gravar, então reenviar o relatório REFAZ em vez de
+ * somar. Sem isso, mandar o agosto definitivo depois do parcial cobraria a comissão
+ * duas vezes e o mês fecharia com custo inventado.
+ */
+async function lancarComissaoDelivery(linha, responsavel) {
+  const conta = DELIVERY_CONTA[linha.plataforma];
+  if (!conta) return { n: 0, erro: 'Plataforma sem conta de custo definida.' };
+  const bruto = Number(linha.vendas_bruto || 0);
+  const comissao = Number((bruto - Number(linha.valor_liquido || 0)).toFixed(2));
+  const marca = `delivery:${linha.plataforma}:${linha.periodo_inicio}:${linha.periodo_fim}`;
+
+  try {
+    // A limpeza é pela DESCRIÇÃO, que carrega a marca do período. Limpar só por data
+    // apagaria a comissão da outra plataforma lançada no mesmo dia.
+    const { error: errDel } = await supabase.from('pagamentos_comprovantes')
+      .delete().eq('origem', 'delivery-auto').like('descricao', `%${marca}%`);
+    if (errDel) {
+      console.error('delivery-auto: limpeza falhou:', errDel.message);
+      return { n: 0, erro: `Não consegui limpar a comissão anterior de ${linha.plataforma}. Nada foi alterado.` };
+    }
+    if (comissao <= 0) return { n: 0, erro: null };   // sem comissão, nada a lançar
+
+    const pct = bruto > 0 ? (comissao / bruto * 100).toFixed(1) : '0';
+    const r = await inserirPagamentos([{
+      // A comissão é do período inteiro; ancorar no ÚLTIMO dia dele mantém o custo
+      // dentro do mês a que pertence.
+      data: String(linha.periodo_fim).slice(0, 10),
+      grupo: 'Despesas Administrativas', categoria: conta,
+      forma: 'comissao_delivery',
+      valor_bruto: comissao, taxa: 0, valor_liquido: comissao, parcelas: 0,
+      descricao: sanitizeText(`Comissão ${conta} ${pct}% sobre ${fmtBRL(bruto)} — ${marca}`, 180),
+      origem: 'delivery-auto', responsavel: responsavel || 'sistema',
+      created_at: nowSP(), updated_at: nowSP(),
+    }], 'delivery-auto');
+    if (!r.ok) return { n: 0, erro: `A comissão de ${conta} NÃO entrou nas Contas — o custo do mês vai sair menor do que é.` };
+    return { n: r.n, erro: null };
+  } catch (e) {
+    console.error('delivery-auto:', e.message);
+    return { n: 0, erro: `Erro ao lançar a comissão de ${conta}: ${e.message}` };
+  }
+}
+
 async function montarPlanilhaMensal(mesParam) {
   const mes = validarMesISO(mesParam);
   const inicio = `${mes}-01`;
@@ -2966,7 +3074,22 @@ async function montarPlanilhaMensal(mesParam) {
     totais[key] = Number(totais[key].toFixed(2));
   }
   totais.dias_sem_caixa = dias.filter(d => d.movimentos_total > 0 && !d.venda_lancada).length;
-  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas / totais.pratos_vendidos).toFixed(2)) : null;
+  // ── DELIVERY entra na receita ───────────────────────────────────────────────
+  // `vendas` vira o faturamento TOTAL da empresa (salão + delivery), porque é isso
+  // que "quanto entrou" significa. O de salão continua visível em `vendas_salao`.
+  // O ticket médio fica de fora do delivery de propósito: pratos_vendidos conta
+  // prato do buffet, e dividir a venda das plataformas por eles inflaria o ticket
+  // com pedidos que nunca passaram pela balança.
+  const delivery = await deliveryNoPeriodo(inicio, fim);
+  totais.vendas_salao = Number(totais.vendas.toFixed(2));
+  totais.vendas_delivery = delivery.bruto;
+  totais.delivery = {
+    bruto: delivery.bruto, liquido: delivery.liquido, comissao: delivery.comissao,
+    por_plataforma: delivery.por_plataforma,
+    fora_do_periodo: delivery.fora_do_periodo.length,
+  };
+  totais.vendas = Number((totais.vendas + delivery.bruto).toFixed(2));
+  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
   // Mesmos percentuais que o dia isolado já mostra (consumo/perdas/despesas/compras sobre
   // vendas), agora também pro mês inteiro — calculados a partir dos TOTAIS somados (não a
   // média dos percentuais diários, que seria matematicamente errado com dias de venda desigual).
@@ -3051,6 +3174,13 @@ async function montarIndices(mesParam) {
   for (const f of fechamentos) {
     const m = String(f.data).slice(0, 7);
     vendasPorMes[m] = (vendasPorMes[m] || 0) + Number(f.vendas || 0);
+  }
+  // O delivery é receita da empresa igual à do salão, e entra no MESMO divisor.
+  // Sem isso os índices dividem por um faturamento 8 a 12% menor do que o real e
+  // todo percentual sai pior do que é.
+  const deliveryJanela = await deliveryNoPeriodo(inicioJanela, fimMes);
+  for (const [m, v] of Object.entries(deliveryJanela.por_mes)) {
+    vendasPorMes[m] = (vendasPorMes[m] || 0) + v.bruto;
   }
   const vendasMes = Number((vendasPorMes[mes] || 0).toFixed(2));
 
@@ -3335,7 +3465,22 @@ async function montarRelatorioPeriodo(inicioParam, fimParam) {
   for (const key of ['vendas','total_pagamentos','cortes','despesas_caixa','compras_estoque','consumo_estoque','perdas','ajustes','resultado_operacional','fluxo_caixa','contas_pagas','contas_liquido','contas_taxas']) {
     totais[key] = Number(totais[key].toFixed(2));
   }
-  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas / totais.pratos_vendidos).toFixed(2)) : null;
+  // ── DELIVERY entra na receita ───────────────────────────────────────────────
+  // `vendas` vira o faturamento TOTAL da empresa (salão + delivery), porque é isso
+  // que "quanto entrou" significa. O de salão continua visível em `vendas_salao`.
+  // O ticket médio fica de fora do delivery de propósito: pratos_vendidos conta
+  // prato do buffet, e dividir a venda das plataformas por eles inflaria o ticket
+  // com pedidos que nunca passaram pela balança.
+  const delivery = await deliveryNoPeriodo(inicio, fim);
+  totais.vendas_salao = Number(totais.vendas.toFixed(2));
+  totais.vendas_delivery = delivery.bruto;
+  totais.delivery = {
+    bruto: delivery.bruto, liquido: delivery.liquido, comissao: delivery.comissao,
+    por_plataforma: delivery.por_plataforma,
+    fora_do_periodo: delivery.fora_do_periodo.length,
+  };
+  totais.vendas = Number((totais.vendas + delivery.bruto).toFixed(2));
+  totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
 
   const formasPagamento = Object.values(formasMes)
     .map(row => ({ ...row, valor: Number(Number(row.valor || 0).toFixed(2)) }))
@@ -7461,13 +7606,36 @@ app.post('/api/delivery', auth, requireRole('admin', 'gerente'), async (req, res
     }
     return res.status(500).json({ erro: 'Erro ao salvar: ' + error.message });
   }
-  res.json({ ok: true, item: enfeitarDelivery((data || [])[0] || linha) });
+
+  // A comissão vira custo nas Contas na mesma hora. Se falhar, a resposta AVISA em
+  // vez de dizer "salvo" -- receita lançada sem o custo do lado faria o mês parecer
+  // melhor do que é, exatamente o silent failure que já mordeu este app antes.
+  const custo = await lancarComissaoDelivery(linha, linha.responsavel);
+  res.json({
+    ok: true,
+    item: enfeitarDelivery((data || [])[0] || linha),
+    comissao_lancada: custo.n > 0,
+    aviso: custo.erro || null,
+  });
 });
 
 app.delete('/api/delivery/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  // Lê ANTES de apagar: sem a linha não dá para saber qual comissão tirar junto, e
+  // comissão órfã nas Contas inflaria o custo do mês para sempre, invisível.
+  const { data: alvo } = await supabase.from('delivery_receitas')
+    .select('plataforma, periodo_inicio, periodo_fim').eq('id', req.params.id).maybeSingle();
+
   const { error } = await supabase.from('delivery_receitas').delete().eq('id', req.params.id);
   if (error) return res.status(500).json({ erro: 'Erro ao apagar.' });
-  res.json({ ok: true });
+
+  let aviso = null;
+  if (alvo) {
+    const marca = `delivery:${alvo.plataforma}:${alvo.periodo_inicio}:${alvo.periodo_fim}`;
+    const { error: errC } = await supabase.from('pagamentos_comprovantes')
+      .delete().eq('origem', 'delivery-auto').like('descricao', `%${marca}%`);
+    if (errC) aviso = 'A receita saiu, mas a comissão continua nas Contas. Apague na mão para o custo do mês não ficar inflado.';
+  }
+  res.json({ ok: true, aviso });
 });
 
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
