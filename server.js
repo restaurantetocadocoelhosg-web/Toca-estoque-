@@ -6709,6 +6709,42 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
     if (!inv || inv.status !== 'aberto') return res.status(400).json({ erro: 'Inventário não está aberto.' });
     const { data: itens } = await supabase.from('inventario_itens').select('*').eq('inventario_id', invId);
     const dataBR = (inv.data || dateSP()).split('-').reverse().join('/');
+
+    // ── TRAVA DE SOBRA ABSURDA ──────────────────────────────────────────────
+    // A tela de Lancar tem mascara de balanca: digitar 10500 vira 10,500 kg. A de
+    // Inventario NAO tem. Quem conta esta treinado numa e digita na outra, e o numero
+    // entra mil vezes maior. Ja aconteceu 4 vezes: Farinha de Rosca 10 -> 10.500 kg
+    // (R$ 73.325 de estoque que nao existe), Grao de Bico 3,5 -> 500, Macarrao 3 -> 500
+    // e Pimentao Verde 3,79 -> 1.700.
+    // A conferencia roda ANTES de aplicar qualquer ajuste: aplicar metade e recusar o
+    // resto deixaria o estoque num meio-termo que ninguem sabe desfazer.
+    const absurdos = [];
+    for (const it of (itens || [])) {
+      if (it.qtd_contada === null) continue;
+      const sistemaQ = Number(it.qtd_sistema || 0);
+      const contadaQ = Number(it.qtd_contada || 0);
+      const custoQ = Number(it.custo || 0);
+      const sobraQ = contadaQ - sistemaQ;
+      if (sobraQ <= 0) continue;                     // sumico nao e erro de digitacao
+      const valorQ = sobraQ * custoQ;
+      if (valorQ < 500) continue;                    // sobra pequena nao vale o atrito
+      const salto = sistemaQ > 0 ? contadaQ / sistemaQ : (contadaQ >= 100 ? Infinity : 0);
+      if (salto < 50) continue;                      // correcao legitima passa
+      absurdos.push({
+        produto_id: it.produto_id, nome: it.produto_nome, unidade: it.unidade,
+        qtd_sistema: sistemaQ, qtd_contada: contadaQ,
+        vezes: Number.isFinite(salto) ? Math.round(salto) : null,
+        valor: Number(valorQ.toFixed(2)),
+        sugestao: Number((contadaQ / 1000).toFixed(3)),   // o valor com a virgula no lugar
+      });
+    }
+    if (absurdos.length && req.body?.confirmar_absurdos !== true) {
+      return res.status(409).json({
+        alerta: 'sobra_absurda',
+        erro: absurdos.length + ' item(ns) com sobra grande demais para ser real. Confira antes de fechar.',
+        absurdos,
+      });
+    }
     let divergentes = 0, suspeitos = 0, valorSumico = 0, valorSobra = 0;
     const topSumico = [], suspeitosList = [], errosLanc = [];
 

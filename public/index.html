@@ -1657,7 +1657,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v111</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v112</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -7319,7 +7319,28 @@ async function fecharInventario() {
   if (!await askConfirm('A contagem vira o estoque oficial (com ajustes rastreáveis). O que NÃO foi contado NÃO é zerado — fica pendente de verificação. Não dá pra desfazer.', { titulo: 'Fechar o inventário?' })) return;
   try {
     await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens: coletarContagem() });
-    const r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
+    let r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
+
+    // Sobra grande demais quase sempre e a virgula no lugar errado: esta tela nao tem
+    // mascara de balanca, entao 10500 digitado vira 10.500 kg em vez de 10,5 kg. O
+    // servidor recusa ANTES de aplicar qualquer ajuste; aqui a pessoa ve o que seria
+    // gravado e decide. Ja custou R$ 73.325 de estoque fantasma uma vez.
+    // Sem contrabarra de proposito: escape em string gerada ja colapsou 3x neste projeto.
+    if (r && r._alerta409 && r.alerta === 'sobra_absurda') {
+      const NL = String.fromCharCode(10);
+      const lista = (r.absurdos || []).map(function (a) {
+        return '- ' + a.nome + ': sistema ' + a.qtd_sistema + ' ' + a.unidade
+          + '  =>  contado ' + a.qtd_contada + ' ' + a.unidade
+          + (a.vezes ? '  (' + a.vezes + 'x)' : '')
+          + NL + '   vira ' + fmtBRLMoney(a.valor) + ' de estoque.'
+          + ' Voce quis dizer ' + a.sugestao + ' ' + a.unidade + '?';
+      }).join(NL + NL);
+      const seguir = await askConfirm(
+        lista + NL + NL + 'Se algum numero estiver errado, cancele e corrija a contagem.',
+        { titulo: 'Confira antes de fechar', perigo: true, textoOk: 'Esta certo, fechar' });
+      if (!seguir) { toast('Fechamento cancelado - corrija a contagem.', 'err'); return; }
+      r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id, confirmar_absurdos: true });
+    }
     let msg = 'Inventário fechado.\n\nDivergências: ' + r.divergentes + '\nSumiço: R$ ' + (r.valor_sumico||0).toFixed(2) +
       '\nSobra: R$ ' + (r.valor_sobra||0).toFixed(2) + '\nA verificar (não contados, estoque mantido): ' + r.suspeitos;
     if (r.suspeitos_lista && r.suspeitos_lista.length) {
