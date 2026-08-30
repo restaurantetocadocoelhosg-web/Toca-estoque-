@@ -7342,6 +7342,134 @@ app.get('/api/webhook/relatorio-diario', webhookLimiter, webhookTenant1, async (
   res.json({ mensagem: msg, zerados: zerados.length, criticos: criticos.length, valor_total: valor });
 });
 
+
+// ── DELIVERY ─────────────────────────────────────────────────────────────────
+// Receita de 99Food e iFood, por plataforma e por período.
+//
+// Fica FORA de `fechamentos_diarios` de propósito: aquilo é o caixa do salão,
+// lançado dia a dia por quem fecha. O delivery vem de relatório mensal da
+// plataforma, com comissão embutida. Misturar os dois perderia o nome da
+// plataforma -- e é justamente o nome que mostra que uma cobra 17% e a outra 56%.
+//
+// A comissão NUNCA é guardada: é sempre `vendas_bruto - valor_liquido`. Valor
+// derivado guardado vira mentira silenciosa na primeira correção retroativa.
+const DELIVERY_PLATAFORMAS = {
+  '99food': { id: '99food', nome: '99 Food' },
+  'ifood':  { id: 'ifood',  nome: 'iFood' },
+};
+
+function normalizarPlataforma(valor) {
+  const n = normalizeSearch(String(valor || ''));
+  if (/99/.test(n)) return '99food';
+  if (/ifood|i-food/.test(n)) return 'ifood';
+  return null;
+}
+
+function enfeitarDelivery(row) {
+  const bruto = Number(row.vendas_bruto || 0);
+  const liquido = Number(row.valor_liquido || 0);
+  const comissao = Number((bruto - liquido).toFixed(2));
+  const info = DELIVERY_PLATAFORMAS[row.plataforma] || { id: row.plataforma, nome: row.plataforma };
+  return {
+    ...row,
+    plataforma_nome: info.nome,
+    vendas_bruto: bruto,
+    valor_liquido: liquido,
+    comissao,
+    // Divisão por zero devolve null, não Infinity nem NaN: a tela mostra "—".
+    comissao_pct: bruto > 0 ? Number(((comissao / bruto) * 100).toFixed(2)) : null,
+    mes: String(row.periodo_inicio || '').slice(0, 7),
+  };
+}
+
+app.get('/api/delivery', auth, async (req, res) => {
+  const { data, error } = await supabase.from('delivery_receitas')
+    .select('*').order('periodo_inicio', { ascending: false }).order('plataforma');
+  if (error) {
+    if (/delivery_receitas|schema cache|does not exist|relation/i.test(error.message || '')) {
+      return res.json({ configuracao_pendente: true, itens: [], totais: null, por_mes: [] });
+    }
+    return res.status(500).json({ erro: 'Erro ao ler delivery.' });
+  }
+  const itens = (data || []).map(enfeitarDelivery);
+
+  const zerado = () => ({ vendas_bruto: 0, valor_liquido: 0, comissao: 0 });
+  const somar = (alvo, i) => {
+    alvo.vendas_bruto = Number((alvo.vendas_bruto + i.vendas_bruto).toFixed(2));
+    alvo.valor_liquido = Number((alvo.valor_liquido + i.valor_liquido).toFixed(2));
+    alvo.comissao = Number((alvo.comissao + i.comissao).toFixed(2));
+  };
+  const pct = (o) => (o.vendas_bruto > 0 ? Number(((o.comissao / o.vendas_bruto) * 100).toFixed(2)) : null);
+
+  const totais = { ...zerado(), por_plataforma: {} };
+  const porMes = {};
+  for (const i of itens) {
+    somar(totais, i);
+    const p = (totais.por_plataforma[i.plataforma] = totais.por_plataforma[i.plataforma]
+      || { ...zerado(), nome: i.plataforma_nome });
+    somar(p, i);
+    const m = (porMes[i.mes] = porMes[i.mes] || { mes: i.mes, ...zerado(), plataformas: [], parcial: false });
+    somar(m, i);
+    m.plataformas.push(i);
+    if (i.parcial) m.parcial = true;
+  }
+  totais.comissao_pct = pct(totais);
+  for (const p of Object.values(totais.por_plataforma)) p.comissao_pct = pct(p);
+  const por_mes = Object.values(porMes).sort((a, b) => b.mes.localeCompare(a.mes));
+  for (const m of por_mes) m.comissao_pct = pct(m);
+
+  res.json({ configuracao_pendente: false, itens, totais, por_mes });
+});
+
+app.post('/api/delivery', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const plataforma = normalizarPlataforma(req.body?.plataforma);
+  if (!plataforma) return res.status(400).json({ erro: 'Plataforma inválida. Use 99food ou ifood.' });
+
+  const inicio = validarDataISO(req.body?.periodo_inicio);
+  const fim = validarDataISO(req.body?.periodo_fim);
+  if (!inicio || !fim) return res.status(400).json({ erro: 'Período inválido. Use AAAA-MM-DD.' });
+  if (fim < inicio) return res.status(400).json({ erro: 'A data final é anterior à inicial.' });
+
+  const bruto = parseNonNegativeMoney(req.body?.vendas_bruto);
+  const liquido = parseNonNegativeMoney(req.body?.valor_liquido);
+  if (bruto === null || liquido === null) return res.status(400).json({ erro: 'Valores inválidos.' });
+  // Líquido acima do bruto é erro de digitação, não comissão negativa. Barrar aqui
+  // evita um "ganho" fantasma entrando na receita sem ninguém notar.
+  if (liquido > bruto) return res.status(400).json({ erro: 'O líquido não pode ser maior que o valor de vendas.' });
+
+  const linha = {
+    plataforma,
+    periodo_inicio: inicio,
+    periodo_fim: fim,
+    vendas_bruto: bruto,
+    valor_liquido: liquido,
+    parcial: req.body?.parcial === true || req.body?.parcial === 'true',
+    observacao: sanitizeText(req.body?.observacao, 200),
+    origem: sanitizeText(req.body?.origem || 'painel', 40),
+    responsavel: sanitizeText(req.user?.nome || req.user?.username || '', 60),
+    updated_at: new Date().toISOString(),
+  };
+
+  // Upsert pela chave do período: reenviar o relatório do mesmo mês ATUALIZA.
+  // Insert puro duplicaria a receita quando o parcial de agosto virasse definitivo.
+  const { data, error } = await supabase.from('delivery_receitas')
+    .upsert(linha, { onConflict: chaveConflito('plataforma,periodo_inicio,periodo_fim') })
+    .select();
+  if (error) {
+    if (/delivery_receitas|schema cache|does not exist|relation/i.test(error.message || '')) {
+      return res.status(503).json({ erro: 'Tabela delivery_receitas ainda não existe. Rode SUPABASE_DELIVERY.sql.' });
+    }
+    return res.status(500).json({ erro: 'Erro ao salvar: ' + error.message });
+  }
+  res.json({ ok: true, item: enfeitarDelivery((data || [])[0] || linha) });
+});
+
+app.delete('/api/delivery/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const { error } = await supabase.from('delivery_receitas').delete().eq('id', req.params.id);
+  if (error) return res.status(500).json({ erro: 'Erro ao apagar.' });
+  res.json({ ok: true });
+});
+
 app.get('*', (req, res) => { res.set('Cache-Control', 'no-cache, no-store, must-revalidate'); res.sendFile(path.join(__dirname, 'public', 'index.html')); });
 
 // Middleware de erro do Express (4 argumentos) -- é aqui que o next(err) do

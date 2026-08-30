@@ -1362,6 +1362,50 @@ select.big-input { font-size: 14px; }
   </div>
 
   <!-- ÍNDICES GERENCIAIS -->
+  <!-- DELIVERY -->
+  <div id="p-delivery" class="page">
+    <div class="sheet-section">
+      <div class="real-card">
+        <div class="real-card-title">🛵 Delivery — vendas por plataforma</div>
+        <div class="sheet-muted" style="margin-bottom:8px">
+          Venda é o que o cliente pagou. A comissão da plataforma é custo, e aparece separada
+          para você ver quanto cada canal fica retendo.
+        </div>
+        <div id="delivery-aviso" class="real-alert" style="display:none"></div>
+        <div id="delivery-totais"><div class="loading">Carregando...</div></div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Mês a mês</div>
+        <div class="sheet-scroll">
+          <table class="sheet-table" id="delivery-tabela"></table>
+        </div>
+      </div>
+
+      <div class="real-card">
+        <div class="real-card-title">Lançar relatório da plataforma</div>
+        <div class="sheet-muted" style="margin-bottom:8px">
+          Reenviar o mesmo período <b>atualiza</b> o que já está lá — não duplica.
+        </div>
+        <div class="sheet-head" style="flex-wrap:wrap;gap:6px">
+          <select class="small-input" id="dlv-plataforma">
+            <option value="99food">99 Food</option>
+            <option value="ifood">iFood</option>
+          </select>
+          <input class="small-input" id="dlv-inicio" type="date" title="Início do período">
+          <input class="small-input" id="dlv-fim" type="date" title="Fim do período">
+          <input class="small-input" id="dlv-bruto" type="text" inputmode="decimal" placeholder="Valor de vendas R$">
+          <input class="small-input" id="dlv-liquido" type="text" inputmode="decimal" placeholder="Líquido R$">
+          <label class="sheet-muted" style="display:flex;align-items:center;gap:4px">
+            <input type="checkbox" id="dlv-parcial"> mês em andamento
+          </label>
+          <button class="btn-sm btn-success" onclick="salvarDelivery()">Salvar</button>
+        </div>
+        <div id="delivery-form-aviso" class="sheet-muted" style="margin-top:6px"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="p-indices" class="page">
     <div class="sheet-section">
       <div class="real-card">
@@ -1613,7 +1657,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v109</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v110</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1860,6 +1904,7 @@ select.big-input { font-size: 14px; }
   <button class="nav-btn" id="nav-realidade" onclick="goPage('realidade', this)"><span class="icon">📊</span>Dia</button>
   <button class="nav-btn" id="nav-cardapio" onclick="goPage('cardapio', this)"><span class="icon">🍽️</span>Cardápio</button>
   <button class="nav-btn" id="nav-planilha" onclick="goPage('planilha', this)"><span class="icon">📈</span>Planilha</button>
+  <button class="nav-btn" id="nav-delivery" onclick="goPage('delivery', this)"><span class="icon">🛵</span>Delivery</button>
   <button class="nav-btn" id="nav-indices" onclick="goPage('indices', this)"><span class="icon">📐</span>Índices</button>
   <button class="nav-btn" id="nav-plataforma" onclick="goPage('plataforma', this)" style="display:none"><span class="icon">🏢</span>Plataforma</button>
   <button class="nav-btn" id="nav-relatorios" onclick="goPage('relatorios', this)"><span class="icon">⚖️</span>Comparar</button>
@@ -2183,6 +2228,7 @@ async function loadSession() {
   gate('nav-realidade', P.dia);
   gate('nav-cardapio', P.cardapio);
   gate('nav-planilha', P.planilha);
+  gate('nav-delivery', P.planilha);
   gate('nav-indices', P.planilha);
   gate('nav-plataforma', currentUser.role === 'superadmin');
   gate('nav-relatorios', P.planilha);
@@ -2252,6 +2298,7 @@ function goPage(id, btn) {
   if (id === 'realidade') loadRealidade();
   if (id === 'cardapio') loadCardapio();
   if (id === 'planilha') loadPlanilhaMensal();
+  if (id === 'delivery') loadDelivery();
   if (id === 'indices') loadIndices();
   if (id === 'plataforma') loadPlataforma();
   if (id === 'relatorios') loadComparar();
@@ -5268,6 +5315,119 @@ function indicesMesAtual() {
   const el = document.getElementById('indices-mes');
   if (el) { el.value = mesAtualClient(); loadIndices(); }
 }
+
+
+// ── DELIVERY ─────────────────────────────────────────────────────────────────
+// Vendas de 99Food e iFood. Venda = o que o cliente pagou (bruto); a comissão da
+// plataforma é custo e aparece separada — juntar esconderia que uma cobra ~17% e
+// a outra mais de 55%.
+async function loadDelivery() {
+  const totaisEl = document.getElementById('delivery-totais');
+  const tabelaEl = document.getElementById('delivery-tabela');
+  if (!totaisEl) return;
+  totaisEl.innerHTML = '<div class="loading">Carregando...</div>';
+  tabelaEl.innerHTML = '';
+  try {
+    renderDelivery(await api('/api/delivery'));
+  } catch (e) {
+    totaisEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar o delivery.</div></div>';
+    handleApiError(e, true);
+  }
+}
+
+function renderDelivery(d) {
+  const totaisEl = document.getElementById('delivery-totais');
+  const tabelaEl = document.getElementById('delivery-tabela');
+  const avisoEl = document.getElementById('delivery-aviso');
+
+  if (d.configuracao_pendente) {
+    avisoEl.style.display = 'block';
+    avisoEl.textContent = 'Rode SUPABASE_DELIVERY.sql no Supabase para ligar esta aba.';
+    totaisEl.innerHTML = '';
+    return;
+  }
+  avisoEl.style.display = 'none';
+
+  const t = d.totais;
+  if (!t || !d.itens.length) {
+    totaisEl.innerHTML = '<div class="empty"><div class="empty-text">Nenhum relatório lançado ainda.</div></div>';
+    tabelaEl.innerHTML = '';
+    return;
+  }
+
+  const plats = Object.values(t.por_plataforma);
+  totaisEl.innerHTML =
+    '<div class="real-total-line"><span>Vendas no delivery</span><b>' + fmtBRLMoney(t.vendas_bruto) + '</b></div>'
+    + '<div class="real-total-line"><span>Comissão das plataformas</span><b>&minus; ' + fmtBRLMoney(t.comissao)
+      + ' <span class="sheet-muted">(' + fmtPct(t.comissao_pct) + ')</span></b></div>'
+    + '<div class="real-total-line"><span>Caiu para a empresa</span><b>' + fmtBRLMoney(t.valor_liquido) + '</b></div>'
+    + '<div style="margin-top:10px">'
+    + plats.map(p =>
+        '<div class="real-total-line"><span>' + escapeHtml(p.nome) + '</span><b>'
+        + fmtBRLMoney(p.vendas_bruto) + ' <span class="sheet-muted">comissão ' + fmtPct(p.comissao_pct) + '</span></b></div>'
+      ).join('')
+    + '</div>';
+
+  const cab = '<tr><th>Mês</th><th>Plataforma</th><th>Vendas</th><th>Comissão</th><th>%</th><th>Líquido</th><th></th></tr>';
+  const linhas = d.por_mes.map(m => {
+    const dasPlataformas = m.plataformas.map(i =>
+      '<tr>'
+      + '<td class="sheet-muted">' + escapeHtml(i.periodo_inicio.split('-').reverse().join('/'))
+        + ' a ' + escapeHtml(i.periodo_fim.split('-').reverse().join('/')) + '</td>'
+      + '<td>' + escapeHtml(i.plataforma_nome) + (i.parcial ? ' <span class="sheet-muted">(parcial)</span>' : '') + '</td>'
+      + '<td>' + fmtBRLMoney(i.vendas_bruto) + '</td>'
+      + '<td>' + fmtBRLMoney(i.comissao) + '</td>'
+      + '<td>' + fmtPct(i.comissao_pct) + '</td>'
+      + '<td>' + fmtBRLMoney(i.valor_liquido) + '</td>'
+      + '<td><button class="btn-sm danger" data-dlv-del="' + i.id + '">apagar</button></td>'
+      + '</tr>'
+    ).join('');
+    const mesBr = m.mes.split('-').reverse().join('/');
+    return '<tr><td colspan="7"><b>' + escapeHtml(mesBr) + '</b>'
+      + (m.parcial ? ' <span class="sheet-muted">mês em andamento</span>' : '')
+      + ' &middot; <span class="sheet-muted">vendas ' + fmtBRLMoney(m.vendas_bruto)
+      + ' &middot; líquido ' + fmtBRLMoney(m.valor_liquido) + '</span></td></tr>' + dasPlataformas;
+  }).join('');
+  tabelaEl.innerHTML = cab + linhas;
+}
+
+async function salvarDelivery() {
+  const aviso = document.getElementById('delivery-form-aviso');
+  const bruto = moneyFromText(document.getElementById('dlv-bruto').value);
+  const liquido = moneyFromText(document.getElementById('dlv-liquido').value);
+  const corpo = {
+    plataforma: document.getElementById('dlv-plataforma').value,
+    periodo_inicio: document.getElementById('dlv-inicio').value,
+    periodo_fim: document.getElementById('dlv-fim').value,
+    vendas_bruto: bruto,
+    valor_liquido: liquido,
+    parcial: document.getElementById('dlv-parcial').checked,
+  };
+  if (!corpo.periodo_inicio || !corpo.periodo_fim) { aviso.textContent = 'Informe o período.'; return; }
+  if (!bruto) { aviso.textContent = 'Informe o valor de vendas.'; return; }
+  aviso.textContent = 'salvando...';
+  try {
+    await apiPost('/api/delivery', corpo);
+    aviso.textContent = 'Salvo.';
+    document.getElementById('dlv-bruto').value = '';
+    document.getElementById('dlv-liquido').value = '';
+    loadDelivery();
+  } catch (e) {
+    aviso.textContent = e.message;
+  }
+}
+
+// Delegação: o botão de apagar nasce dentro de innerHTML, então onclick com aspas
+// aninhadas seria frágil. Um ouvinte só na tabela resolve.
+document.addEventListener('click', async (ev) => {
+  const btn = ev.target.closest('[data-dlv-del]');
+  if (!btn) return;
+  if (!confirm('Apagar este lançamento de delivery?')) return;
+  try {
+    await apiPost('/api/delivery/' + btn.dataset.dlvDel, {}, 'DELETE');
+    loadDelivery();
+  } catch (e) { handleApiError(e, true); }
+});
 
 async function loadIndices() {
   const mesEl = document.getElementById('indices-mes');
