@@ -1352,8 +1352,62 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
     await supabase.from('pagamentos_comprovantes').delete()
       .eq('mov_id', mov.id).in('origem', ['estoque-auto', 'estoque-backfill']);
   } catch (e) { console.error('contas-auto delete:', e.message); }
-  await audit('cancelar_movimentacao', { mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd }, req.user, getClientIp(req));
-  res.json({ ok: true, novaQtd });
+  // ── O PRECO VOLTA JUNTO COM A QUANTIDADE ──────────────────────────────────
+  // Cancelar devolvia a quantidade e deixava o `custo` do produto como a entrada
+  // cancelada tinha deixado. Em 25/08 uma nota lida errado poe a Farinha de Trigo a
+  // R$ 25,00/kg; o Rubens cancelou 7 segundos depois, mas o preco ficou -- e as duas
+  // saidas seguintes sairam a R$ 25,00 o quilo em vez de R$ 2,67. R$ 89 de consumo
+  // inventado em dois dias, sem ninguem ver.
+  //
+  // Este e o pior dos erros que a auditoria de agosto achou porque age SOZINHO: nao
+  // depende de ninguem digitar errado, e contamina para frente ate a proxima compra
+  // reescrever o preco. Num produto de giro lento, ficaria meses.
+  //
+  // Nao guardo "o preco anterior" na movimentacao de proposito: precisaria de coluna
+  // nova (DDL) e so valeria para o que fosse criado dali em diante. Reler a ultima
+  // compra que SOBROU funciona tambem no que ja existe.
+  let custoRestaurado = null;
+  if (mov.tipo === 'Entrada' && Number(mov.custo) > 0) {
+    const custoAgora = Number(prodAtual.custo || 0);
+    // So desfaz se o preco do produto AINDA e o que esta entrada deixou. Se outra
+    // compra ja reescreveu depois, aquele preco e mais novo e nao e nosso para mexer.
+    if (custoAgora > 0 && Math.abs(custoAgora - Number(mov.custo)) < 0.005) {
+      try {
+        // A movimentacao ja foi apagada acima, entao ela nao entra nesta busca.
+        const { data: anterior } = await supabase.from('movimentacoes')
+          .select('custo').eq('produto_id', mov.produto_id).eq('tipo', 'Entrada')
+          .gt('custo', 0).order('id', { ascending: false }).limit(1);
+        const volta = Number(anterior?.[0]?.custo || 0);
+        // Sem compra anterior o preco fica como esta: zerar o custo faria todo o
+        // estoque daquele produto valer zero, que e pior do que o preco desatualizado.
+        if (volta > 0 && Math.abs(volta - custoAgora) >= 0.005) {
+          const { error: errCusto } = await supabase.from('produtos')
+            .update({ custo: volta }).eq('id', mov.produto_id);
+          if (errCusto) {
+            console.error('cancelar: custo nao voltou:', errCusto.message);
+            await logErroAgenda('cancelar-custo', errCusto, req.user);
+          } else {
+            custoRestaurado = { de: custoAgora, para: volta };
+          }
+        }
+      } catch (e) {
+        console.error('cancelar: custo nao voltou:', e.message);
+        await logErroAgenda('cancelar-custo', e, req.user);
+      }
+    }
+  }
+
+  await audit('cancelar_movimentacao', {
+    mov_id: mov.id, produto: mov.produto_nome, tipo: mov.tipo, qtd: mov.qtd,
+    ...(custoRestaurado ? { custo_restaurado: custoRestaurado } : {}),
+  }, req.user, getClientIp(req));
+  res.json({
+    ok: true, novaQtd,
+    ...(custoRestaurado ? {
+      custo_restaurado: custoRestaurado,
+      aviso: `O preço de ${mov.produto_nome} voltou de ${fmtBRL(custoRestaurado.de)} para ${fmtBRL(custoRestaurado.para)}.`,
+    } : {}),
+  });
 });
 
 app.get('/api/movimentacoes', auth, async (req, res) => {

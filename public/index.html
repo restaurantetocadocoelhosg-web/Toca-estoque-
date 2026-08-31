@@ -1662,7 +1662,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v113</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v114</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -5985,7 +5985,12 @@ async function histDelConfirm(id) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.erro || 'Erro ao cancelar');
     document.getElementById(`hist-${id}`)?.remove();
-    toast('✓ Lançamento cancelado e estoque estornado', 'ok');
+    // O preco tambem volta quando a entrada cancelada era a que tinha fixado ele.
+    // Dizer isso em voz alta importa: ate 31/08 o preco ficava, e o consumo dos
+    // dias seguintes saia com o valor errado sem ninguem perceber.
+    toast(data.aviso
+      ? '✓ Cancelado. ' + data.aviso
+      : '✓ Lançamento cancelado e estoque estornado', 'ok');
     await loadDash();
     if (document.getElementById('p-realidade').classList.contains('active')) await loadRealidade();
   } catch(e) { toast(e.message, 'err'); }
