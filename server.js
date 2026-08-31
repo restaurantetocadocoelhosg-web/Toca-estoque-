@@ -2789,6 +2789,15 @@ async function saldoAcumuladoAte(fimISO) {
   const toca = d => (porDia[d] = porDia[d] || { entrada: 0, saida: 0 });
   for (const f of fechs) toca(String(f.data).slice(0, 10)).entrada += Number(f.vendas || 0);
   for (const p of pags) toca(String(p.data).slice(0, 10)).saida += Number(p.valor_bruto || 0);
+  // O delivery tambem e dinheiro entrando. Sem ele aqui, o saldo do mes corrente somava
+  // o delivery (vem de totais.vendas) e o dos meses anteriores nao -- um degrau
+  // artificial na virada de cada mes. Ancorado no ULTIMO dia do periodo do relatorio,
+  // que e quando aquele faturamento fecha.
+  try {
+    const dlv = await fetchTodas(() => supabase.from('delivery_receitas')
+      .select('periodo_fim, vendas_bruto').lte('periodo_fim', fimISO).order('id', { ascending: true }));
+    for (const d of (dlv || [])) toca(String(d.periodo_fim).slice(0, 10)).entrada += Number(d.vendas_bruto || 0);
+  } catch (e) { /* tabela ainda nao criada: saldo segue so com o salao */ }
   return porDia;
 }
 
@@ -3143,6 +3152,19 @@ async function montarPlanilhaMensal(mesParam) {
     fora_do_periodo: delivery.fora_do_periodo.length,
   };
   totais.vendas = Number((totais.vendas + delivery.bruto).toFixed(2));
+
+  // `resultado_caixa` e `resultado_operacional` sao somados DIA A DIA, no laco acima,
+  // que roda antes daqui. O delivery nao tem dia -- vem em relatorio de mes -- entao
+  // ele nao passou por aquele laco e os dois ficaram so com o salao.
+  // Sem esta linha a tela mostrava "Resultado do mes -R$ 7.912,26" logo abaixo de
+  // "Vendas R$ 119.639,34" e "Saiu R$ 114.330,49", que dao +R$ 5.308,85. O numero
+  // grande contradizia os dois cards embaixo dele.
+  for (const chave of ['resultado_caixa', 'resultado_dia_estimado', 'resultado_operacional']) {
+    if (totais[chave] !== undefined) {
+      totais[chave] = Number((Number(totais[chave]) + delivery.bruto).toFixed(2));
+    }
+  }
+
   totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
   // Mesmos percentuais que o dia isolado já mostra (consumo/perdas/despesas/compras sobre
   // vendas), agora também pro mês inteiro — calculados a partir dos TOTAIS somados (não a
@@ -3534,6 +3556,19 @@ async function montarRelatorioPeriodo(inicioParam, fimParam) {
     fora_do_periodo: delivery.fora_do_periodo.length,
   };
   totais.vendas = Number((totais.vendas + delivery.bruto).toFixed(2));
+
+  // `resultado_caixa` e `resultado_operacional` sao somados DIA A DIA, no laco acima,
+  // que roda antes daqui. O delivery nao tem dia -- vem em relatorio de mes -- entao
+  // ele nao passou por aquele laco e os dois ficaram so com o salao.
+  // Sem esta linha a tela mostrava "Resultado do mes -R$ 7.912,26" logo abaixo de
+  // "Vendas R$ 119.639,34" e "Saiu R$ 114.330,49", que dao +R$ 5.308,85. O numero
+  // grande contradizia os dois cards embaixo dele.
+  for (const chave of ['resultado_caixa', 'resultado_dia_estimado', 'resultado_operacional']) {
+    if (totais[chave] !== undefined) {
+      totais[chave] = Number((Number(totais[chave]) + delivery.bruto).toFixed(2));
+    }
+  }
+
   totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
 
   const formasPagamento = Object.values(formasMes)
