@@ -599,6 +599,11 @@ select.big-input { font-size: 14px; }
 .pend-card .pc-results { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; max-height: 160px; overflow-y: auto; }
 .pend-card .pc-res { background: var(--s2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 13px; cursor: pointer; }
 .pend-card .pc-res:active { border-color: var(--accent); }
+.pend-card .pc-pac { background: var(--s2); border: 1.5px dashed var(--yellow); border-radius: 10px; padding: 9px 11px; margin: 8px 0 2px; }
+.pend-card .pc-pac-t { font-size: 12.5px; font-weight: 700; color: var(--yellow); }
+.pend-card .pc-pac-d { font-size: 11.5px; color: var(--muted); margin: 3px 0 8px; line-height: 1.45; }
+.pend-card .pc-pac-b { width: 100%; background: var(--yellow); color: #1a1a1a; border: none; border-radius: 9px; padding: 9px; font-size: 13px; font-weight: 700; cursor: pointer; }
+.pend-card .pc-pac-b:active { opacity: .8; }
 .pend-card .pc-res.sel { border-color: var(--green); background: rgba(16,185,129,0.1); }
 .pend-card .pc-memo { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--muted); margin: 10px 0; cursor: pointer; }
 .pend-card .pc-memo input { width: 17px; height: 17px; accent-color: var(--accent); }
@@ -1657,7 +1662,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v112</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v113</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -3332,13 +3337,26 @@ function renderPendCard(p) {
       <span class="pc-qtd-lbl">Preço unitário${vt > 0 ? ` (da nota: total R$ ${vt.toFixed(2)})` : ' (a nota não trouxe — informe se souber)'}:</span>
       <div class="pc-qtd-row"><span class="pc-qtd-un">R$</span><input type="number" step="0.01" min="0" class="pc-qtd" id="pc-custo-${p.id}" data-vt="${vt}" value="${precoSugerido !== null ? precoSugerido.toFixed(2) : ''}" placeholder="0,00" oninput="this.dataset.touched='1'"><span class="pc-qtd-un">/ ${uni || 'un'}</span></div>
     </div>`;
+  // A nota traz o preco do PACOTE e o estoque conta por quilo. O servidor calcula a
+  // conversao e manda pronta; aqui e so um botao. Avisar nao bastou: em agosto seis
+  // itens foram confirmados com a quantidade da nota, e a cozinha ficou com 24 kg de
+  // arroz que o sistema nao conhecia.
+  const sp = p.sugestao_pacote;
+  const pacBox = (sp && !st.criando) ? `<div class="pc-pac">
+      <div class="pc-pac-t">📦 ${escapeHtml(sp.msg)}</div>
+      <div class="pc-pac-d">A nota deu <b>R$ ${sp.custo_lido.toFixed(2)}</b> por ${escapeHtml(sp.unidade)},
+        e esse produto costuma custar <b>R$ ${Number(sp.custo_referencia).toFixed(2)}</b>.
+        Se for pacote, o certo é lançar <b>${fmt(sp.qtd_sugerida)} ${escapeHtml(sp.unidade)}</b>
+        a <b>R$ ${sp.custo_sugerido.toFixed(2)}</b>.</div>
+      <button class="pc-pac-b" onclick="aplicarPacote(${p.id}, ${sp.qtd_sugerida}, ${sp.custo_sugerido})">Usar ${fmt(sp.qtd_sugerida)} ${escapeHtml(sp.unidade)} a R$ ${sp.custo_sugerido.toFixed(2)}</button>
+    </div>` : '';
   const btnConf = st.criando
     ? `<button class="pc-conf" onclick="criarProdutoPendencia(${p.id})">➕ Cadastrar e lançar</button>`
     : `<button class="pc-conf" onclick="resolverPendencia(${p.id})">✅ Confirmar entrada</button>`;
   return `<div class="pend-card" id="pend-${p.id}">
     <div class="pc-cupom">🧾 ${escapeHtml(p.produto_cupom)}</div>
     <div class="pc-meta">Lido da nota: <b>${fmt(p.qtd)} ${uni}</b>${p.remetente?' · por '+escapeHtml(p.remetente):''}</div>
-    ${selBox}${searchBox}${criaBox}${qtdBox}${precoBox}${memo}
+    ${selBox}${searchBox}${criaBox}${pacBox}${qtdBox}${precoBox}${memo}
     <div class="pc-acoes">
       ${btnConf}
       <button class="pc-ign" onclick="ignorarPendencia(${p.id})">Ignorar</button>
@@ -3355,6 +3373,16 @@ function pendRecalcPreco(id) {
   const q = Number(String(qtdEl.value).replace(',', '.')) || 0;
   custoEl.value = vt > 0 && q > 0 ? (vt / q).toFixed(2) : '';
 }
+// Preenche quantidade e preco com a conversao sugerida. Marca o preco como 'tocado'
+// para o recalculo automatico nao sobrescrever o que acabou de ser escolhido.
+function aplicarPacote(id, qtd, custo) {
+  const q = document.getElementById('pc-qtd-' + id);
+  const c = document.getElementById('pc-custo-' + id);
+  if (q) q.value = qtd;
+  if (c) { c.value = Number(custo).toFixed(2); c.dataset.touched = '1'; }
+  toast('Convertido: ' + qtd + ' a R$ ' + Number(custo).toFixed(2) + '. Confira e confirme.', 'ok');
+}
+
 function pendPick(id, val) {
   const st = pendState[id] || (pendState[id] = {});
   st.buscando = false; st.criando = false; st.produtoId = '';

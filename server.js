@@ -5788,9 +5788,74 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
 // ==================== PENDÊNCIAS DE NOTA (resolver no app) ====================
 // Itens que a IA teve dúvida ao ler a nota no WhatsApp. Admin resolve escolhendo o
 // produto certo (ou libera a permissão 'pendencias' pra um funcionário).
+// Tamanhos de embalagem que existem de verdade no mercado. Arredondar para o mais
+// proximo evita sugerir "pacote de 4,6kg", que nao existe e faz a pessoa desconfiar
+// da sugestao inteira.
+const PACOTES_COMUNS = [2, 3, 5, 6, 10, 12, 20, 24, 25, 30, 50];
+
+/**
+ * A nota traz o preco do PACOTE e o estoque conta por quilo/litro. Quando o preco
+ * unitario vem muito acima do que o produto custa, quase sempre e isso.
+ *
+ * O sistema JA avisava ("confira se nao e preco de pacote") e mandava para Pendentes.
+ * Mas avisar nao bastou: em agosto seis itens foram resolvidos aqui com a quantidade
+ * do jeito que veio -- o Arroz Branco entrou 6 kg quando eram 6 pacotes de 5kg, e a
+ * cozinha ficou com 24 kg que o sistema nao conhece. Alem disso o custo do produto
+ * foi atualizado para R$ 18,99/kg, cinco vezes o real.
+ *
+ * Entao em vez de so avisar, agora o sistema CALCULA a conversao e oferece pronta.
+ */
+function sugerirPacote(pend, produto) {
+  if (!produto) return null;
+  const custoRef = Number(produto.custo || 0);
+  const qtd = Number(pend.qtd || 0);
+  const total = Number(pend.valor_total || 0);
+  if (custoRef <= 0 || qtd <= 0 || total <= 0) return null;
+  // So faz sentido em produto contado por peso/volume: em "un" a conversao e a
+  // embalagem fechada, que o leitor da nota ja resolve com o campo `embalagem`.
+  if (!/^(kg|quilo|g|l|lt|litro|ml)/i.test(String(produto.unidade || ''))) return null;
+
+  const custoNota = total / qtd;
+  const fator = custoNota / custoRef;
+  if (fator < 3) return null;                       // variacao normal de preco, nao mexe
+
+  const pacote = PACOTES_COMUNS.reduce((a, b) => Math.abs(b - fator) < Math.abs(a - fator) ? b : a);
+  // Se o fator nao chega perto de nenhum tamanho real, e outra coisa (produto trocado,
+  // preco que subiu mesmo). Melhor calar do que sugerir numero inventado.
+  if (Math.abs(pacote - fator) / pacote > 0.35) return null;
+
+  const qtdSugerida = Number((qtd * pacote).toFixed(3));
+  return {
+    pacote,
+    qtd_sugerida: qtdSugerida,
+    custo_sugerido: Number((total / qtdSugerida).toFixed(4)),
+    custo_lido: Number(custoNota.toFixed(2)),
+    custo_referencia: custoRef,
+    unidade: produto.unidade,
+    msg: `Parece pacote de ${pacote}${String(produto.unidade).toLowerCase()}: `
+       + `${qtd} x ${pacote} = ${qtdSugerida} ${produto.unidade}`,
+  };
+}
+
 app.get('/api/pendencias', auth, requirePerm('pendencias'), async (req, res) => {
   const { data } = await supabase.from('nota_pendencias').select('*').eq('status', 'pendente').order('id', { ascending: false }).limit(200);
-  res.json(data || []);
+  const lista = data || [];
+
+  // Uma consulta so para todos os candidatos, e nao uma por pendencia.
+  const ids = [...new Set(lista.flatMap(p => (p.candidatos || []).map(c => c.id)).filter(Boolean))];
+  let porId = {};
+  if (ids.length) {
+    const { data: prods } = await supabase.from('produtos').select('id, nome, unidade, custo').in('id', ids);
+    porId = Object.fromEntries((prods || []).map(x => [String(x.id), x]));
+  }
+  res.json(lista.map(p => {
+    const primeiro = (p.candidatos || [])[0];
+    const prod = primeiro ? porId[String(primeiro.id)] : null;
+    // Devolve o custo de cada candidato tambem: trocar o produto no select recalcula
+    // sem precisar de outra ida ao servidor.
+    const candidatos = (p.candidatos || []).map(c => ({ ...c, custo: porId[String(c.id)]?.custo ?? null }));
+    return { ...p, candidatos, sugestao_pacote: sugerirPacote(p, prod) };
+  }));
 });
 
 app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async (req, res) => {
