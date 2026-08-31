@@ -1662,7 +1662,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v115</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v116</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4951,7 +4951,19 @@ function renderPlanilhaMensal(d) {
   }
 
   const cx = d.caixa || {};
-  resumoEl.innerHTML = `
+  // O app CONFERE os proprios numeros: cada resultado e recalculado a partir dos
+  // componentes e comparado com o que foi somado dia a dia. Se der diferenca, a tela
+  // DIZ -- em vez de mostrar um numero errado com cara de certo.
+  // Isso existe porque em 31/08 o "Resultado do mes" mostrou prejuizo logo acima de
+  // dois cards que davam lucro, e nenhuma conferencia automatica pegou.
+  const divInt = t.divergencias_internas || [];
+  resumoEl.innerHTML = (divInt.length ? `
+    <div class="real-alert" style="grid-column:1/-1">
+      <b>Número fora da conta.</b> ${divInt.map(function (x) {
+        return escapeHtml(x.campo) + ': somado ' + fmtBRLMoney(x.acumulado)
+          + ', mas os componentes dão ' + fmtBRLMoney(x.derivado); }).join(' &middot; ')}
+      <div style="font-size:11.5px;margin-top:4px">A tela mostra o valor dos componentes. Avise o Claude: é sinal de que algo entrou por fora do cálculo do dia.</div>
+    </div>` : '') + `
     <div class="real-kpi big">
       <div class="real-label">Resultado do mês (caixa)</div>
       <div class="real-val ${Number(t.resultado_caixa || 0) < 0 ? 'red' : 'green'}">${fmtBRLMoney(t.resultado_caixa)}</div>

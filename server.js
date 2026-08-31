@@ -3159,11 +3159,30 @@ async function montarPlanilhaMensal(mesParam) {
   // Sem esta linha a tela mostrava "Resultado do mes -R$ 7.912,26" logo abaixo de
   // "Vendas R$ 119.639,34" e "Saiu R$ 114.330,49", que dao +R$ 5.308,85. O numero
   // grande contradizia os dois cards embaixo dele.
-  for (const chave of ['resultado_caixa', 'resultado_dia_estimado', 'resultado_operacional']) {
-    if (totais[chave] !== undefined) {
-      totais[chave] = Number((Number(totais[chave]) + delivery.bruto).toFixed(2));
+  // ── OS RESULTADOS SAO DERIVADOS, NAO ACUMULADOS ─────────────────────────
+  // Antes cada um era somado DIA A DIA, em paralelo com os proprios componentes.
+  // Duas fontes para o mesmo numero divergem sozinhas: bastou o delivery entrar em
+  // `vendas` (que fecha depois do laco) para a tela mostrar "Resultado do mes
+  // -R$ 7.912,26" logo abaixo de "Vendas R$ 119.639,34" e "Saiu R$ 114.330,49",
+  // que dao +R$ 5.308,85. O numero mais visivel do app contradizia os dois cards
+  // debaixo dele, e nenhuma conferencia automatica pegou -- foi o Rubens olhando.
+  //
+  // Derivado dos componentes, isso nao acontece mais: se um componente muda, o
+  // resultado muda junto, por construcao. E o que sobrar de divergencia entre o
+  // acumulado e o derivado vai para `divergencias_internas`, que a tela denuncia
+  // em vez de esconder.
+  totais.divergencias_internas = [];
+  const derivar = (campo, valor) => {
+    const acumulado = Number(totais[campo] || 0);
+    const certo = Number(valor.toFixed(2));
+    if (Math.abs(acumulado - certo) > 0.02) {
+      totais.divergencias_internas.push({ campo, acumulado, derivado: certo });
     }
-  }
+    totais[campo] = certo;
+  };
+  derivar('resultado_caixa', totais.vendas - totais.saida_contas);
+  derivar('resultado_dia_estimado',
+    totais.vendas - totais.consumo_estoque - totais.perdas - totais.despesas);
 
   totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
   // Mesmos percentuais que o dia isolado já mostra (consumo/perdas/despesas/compras sobre
@@ -3563,11 +3582,21 @@ async function montarRelatorioPeriodo(inicioParam, fimParam) {
   // Sem esta linha a tela mostrava "Resultado do mes -R$ 7.912,26" logo abaixo de
   // "Vendas R$ 119.639,34" e "Saiu R$ 114.330,49", que dao +R$ 5.308,85. O numero
   // grande contradizia os dois cards embaixo dele.
-  for (const chave of ['resultado_caixa', 'resultado_dia_estimado', 'resultado_operacional']) {
-    if (totais[chave] !== undefined) {
-      totais[chave] = Number((Number(totais[chave]) + delivery.bruto).toFixed(2));
+  // ── OS RESULTADOS SAO DERIVADOS, NAO ACUMULADOS ─────────────────────────
+  // Mesma razao da Planilha: somar dia a dia cria uma segunda fonte de verdade para
+  // um numero que ja existe nos componentes, e as duas divergem sozinhas.
+  totais.divergencias_internas = [];
+  const derivar = (campo, valor) => {
+    const acumulado = Number(totais[campo] || 0);
+    const certo = Number(valor.toFixed(2));
+    if (Math.abs(acumulado - certo) > 0.02) {
+      totais.divergencias_internas.push({ campo, acumulado, derivado: certo });
     }
-  }
+    totais[campo] = certo;
+  };
+  derivar('resultado_operacional',
+    totais.vendas - totais.consumo_estoque - totais.perdas - Number(totais.despesas_caixa || 0));
+  derivar('fluxo_caixa', totais.vendas - Number(totais.despesas_caixa || 0));
 
   totais.ticket_medio = totais.pratos_vendidos > 0 ? Number((totais.vendas_salao / totais.pratos_vendidos).toFixed(2)) : null;
 
