@@ -943,6 +943,14 @@ select.big-input { font-size: 14px; }
           </select>
         </div>
       </div>
+      <!-- Preço desta entrada: só aparece em Entrada. Vem preenchido com o custo do
+           produto; se o preço mudou, corrige aqui e o cadastro é atualizado junto.
+           type=text + inputmode=decimal pelo mesmo motivo do campo de quantidade. -->
+      <div class="field-group" id="f-custo-wrap">
+        <div class="field-label">Preço unitário desta entrada (R$)</div>
+        <input class="qtd-input" id="f-custo" type="text" placeholder="0,00" inputmode="decimal" autocomplete="off" oninput="previewCusto()">
+        <div id="f-custo-preview" style="font-size:11px;color:var(--muted);font-weight:600;margin-top:4px;min-height:14px"></div>
+      </div>
       <div class="field-group">
         <div class="field-label">Responsável</div>
         <div style="font-size:15px;font-weight:600;color:var(--muted);padding:12px 16px;background:var(--s2);border-radius:var(--radius);border:1.5px solid var(--border)" id="f-resp-display"></div>
@@ -1662,7 +1670,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v116</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v117</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -1965,7 +1973,8 @@ select.big-input { font-size: 14px; }
           <option value="PCT">PCT — Pacote</option>
           <option value="FD">FD — Fardo</option>
         </select>
-        <input class="small-input" id="modal-minimo" type="number" placeholder="Estoque mínimo (ex: 1)" min="0" step="0.1">
+        <input class="small-input" id="modal-minimo" type="text" inputmode="decimal" autocomplete="off" placeholder="Estoque mínimo (ex: 1)">
+        <input class="small-input" id="modal-custo" type="text" inputmode="decimal" autocomplete="off" placeholder="Preço unitário R$ (ex: 12,50)">
         <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)">
           <input type="checkbox" id="modal-sin" checked> Memorizar sinônimo automaticamente
         </label>
@@ -2015,12 +2024,20 @@ select.big-input { font-size: 14px; }
       <div class="pedit-row2" style="margin-top:10px">
         <div>
           <div class="field-label-sm">Estoque mínimo</div>
-          <input class="small-input" id="pedit-minimo" type="number" min="0" step="0.1" placeholder="1">
+          <input class="small-input" id="pedit-minimo" type="text" inputmode="decimal" autocomplete="off" placeholder="1">
         </div>
         <div>
           <div class="field-label-sm">Custo unitário (R$)</div>
-          <input class="small-input" id="pedit-custo" type="number" min="0" step="0.01" placeholder="0.00">
+          <input class="small-input" id="pedit-custo" type="text" inputmode="decimal" autocomplete="off" placeholder="0,00" oninput="peditCustoPreview()">
         </div>
+      </div>
+      <div id="pedit-custo-preview" style="font-size:11px;color:var(--muted);font-weight:600;margin-top:4px;min-height:14px"></div>
+      <!-- Quantidade inicial: só no cadastro de produto NOVO. Vira um Ajuste de
+           Inventário logo após criar, pra o estoque nascer certo numa tela só. -->
+      <div id="pedit-qtd-inicial-wrap" style="display:none;margin-top:12px">
+        <div class="field-label-sm">Quantidade que você já tem hoje <span style="color:var(--muted);font-weight:400">(opcional)</span></div>
+        <input class="small-input" id="pedit-qtd-inicial" type="text" inputmode="decimal" autocomplete="off" placeholder="0">
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">entra como ajuste de inventário — o estoque começa com esse valor</div>
       </div>
       <button class="btn-export btn-primary" style="width:100%;padding:14px;margin-top:16px" onclick="salvarProduto()">💾 Salvar alterações</button>
       <button id="pedit-btn-arquivar" class="btn-export btn-danger" style="width:100%;padding:12px;margin-top:8px" onclick="arquivarProduto()">🗄️ Arquivar produto</button>
@@ -2671,7 +2688,38 @@ function selTipo(el) {
   if (tipoAtual==='Saída') { motivo.value='Produção'; btn.className='btn-lancar saida'; btn.textContent='⬇️ LANÇAR SAÍDA'; }
   if (tipoAtual==='Perda') { motivo.value='Perda/Vencimento'; btn.className='btn-lancar perda'; btn.textContent='❌ REGISTRAR PERDA'; }
   if (tipoAtual==='Ajuste') { motivo.value='Inventário'; btn.className='btn-lancar ajuste'; btn.textContent='🔄 LANÇAR AJUSTE'; }
+  // Preço só faz sentido na Entrada (é onde o custo do produto é atualizado).
+  const custoWrap = document.getElementById('f-custo-wrap');
+  if (custoWrap) {
+    custoWrap.style.display = tipoAtual === 'Entrada' ? 'block' : 'none';
+    if (tipoAtual === 'Entrada' && prodAtual) preencherCustoEntrada();
+  }
   avisoDataLancamento();   // Ajuste + data anterior é combinação recusada — avisa na hora da troca
+}
+
+// Formata número para exibir num input de texto em pt-BR: 12.5 -> "12,50"
+function moedaInput(n) {
+  const v = Number(n || 0);
+  return v > 0 ? v.toFixed(2).replace('.', ',') : '';
+}
+
+function preencherCustoEntrada() {
+  const inp = document.getElementById('f-custo');
+  if (inp && prodAtual) { inp.value = moedaInput(prodAtual.custo); previewCusto(); }
+}
+
+function previewCusto() {
+  const el = document.getElementById('f-custo-preview');
+  if (!el) return;
+  const c = numQtd(document.getElementById('f-custo').value);
+  el.textContent = (isFinite(c) && c > 0) ? `= R$ ${c.toFixed(2).replace('.', ',')} por ${prodAtual ? prodAtual.unidade : 'un'}` : '';
+}
+
+function peditCustoPreview() {
+  const el = document.getElementById('pedit-custo-preview');
+  if (!el) return;
+  const c = numQtd(document.getElementById('pedit-custo').value);
+  el.textContent = (isFinite(c) && c > 0) ? `= R$ ${c.toFixed(2).replace('.', ',')}` : '';
 }
 
 async function buscaProd(q) {
@@ -2709,6 +2757,8 @@ function selProd(jsonStr) {
       ? `digite 1260 para 1,260 ${p.unidade} — a vírgula entra sozinha`
       : `${p.unidade}: número inteiro`;
   }
+  // Entrada: já traz o preço atual do produto no campo, pronto pra confirmar ou corrigir.
+  if (tipoAtual === 'Entrada') preencherCustoEntrada();
   closeAc(); inpQtd && inpQtd.focus();
 }
 
@@ -2716,6 +2766,10 @@ function clearProd() {
   prodAtual = null;
   const dica = document.getElementById('f-qtd-preview');
   if (dica) dica.textContent = '';
+  const fc = document.getElementById('f-custo');
+  if (fc) fc.value = '';
+  const fcp = document.getElementById('f-custo-preview');
+  if (fcp) fcp.textContent = '';
   document.getElementById('prod-sel').classList.remove('show');
   document.getElementById('busca-wrap').style.display = 'block';
   const inp = document.getElementById('f-busca');
@@ -3064,13 +3118,20 @@ async function lancar(forcar = false) {
     );
     return;
   }
+  // Preço da entrada: o campo manda; se vazio ou inválido, usa o custo do cadastro.
+  // Só a Entrada mexe no preço — nas outras o custo é sempre o do produto.
+  let custoLancamento = Number(prodAtual.custo || 0);
+  if (tipoAtual === 'Entrada') {
+    const c = numQtd(document.getElementById('f-custo').value);
+    if (isFinite(c) && c > 0) custoLancamento = c;
+  }
   const btn = document.getElementById('btn-lancar');
   btn.disabled = true; btn.textContent = '⏳ Salvando...';
   try {
     const dataEscolhida = dataLancamentoEscolhida();
     const resultado = await apiPost('/api/movimentacoes', {
       produto_id: prodAtual.id,
-      produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: prodAtual.custo,
+      produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: custoLancamento,
       motivo: document.getElementById('f-motivo').value, obs: '', forcar,
       ...(dataEscolhida ? { data: dataEscolhida } : {})
     });
@@ -3103,6 +3164,9 @@ async function lancar(forcar = false) {
     // Estoque entrou, mas o custo pode não ter chegado nas Contas. Modal, não toast:
     // é dinheiro faltando no CMV do mês e exige lançamento manual pra corrigir.
     if (resultado.aviso) erroModal('Entrou no estoque, mas não nas Contas', resultado.aviso);
+    // Saída/Perda confirmada: solta o produto e volta o cursor pra busca, pra
+    // lançar o próximo item sem ter que clicar no ✕. (Pedido do Rubens, v117.)
+    if (tipoAtual === 'Saída' || tipoAtual === 'Perda') clearProd();
   } catch(e) {
     // Erro do servidor — mostrar modal para erros críticos
     const msg = e.message || 'Erro inesperado';
@@ -6811,10 +6875,13 @@ async function confirmarCadastro() {
   const nome = document.getElementById('modal-nome').value.trim();
   const categoria = document.getElementById('modal-cat').value.trim();
   const unidade = document.getElementById('modal-unidade').value;
-  const minimo = parseFloat(document.getElementById('modal-minimo').value) || 1;
+  const minimoRaw = numQtd(document.getElementById('modal-minimo').value);
+  const minimo = isFinite(minimoRaw) && minimoRaw >= 0 ? minimoRaw : 1;
+  const custoRaw = numQtd(document.getElementById('modal-custo').value);
+  const custo = isFinite(custoRaw) && custoRaw > 0 ? custoRaw : 0;
   if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
   try {
-    const result = await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo: 0, qtd: 0 });
+    const result = await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo, qtd: 0 });
     cupomItens[modalIdx].produto = result.produto;
     cupomItens[modalIdx].candidatos = [result.produto];
     if (document.getElementById('modal-sin').checked) {
@@ -6890,8 +6957,11 @@ function abrirEditProd(jsonStr) {
   document.getElementById('pedit-nome').value = p.nome;
   document.getElementById('pedit-cat').value = p.categoria;
   document.getElementById('pedit-unidade').value = p.unidade;
-  document.getElementById('pedit-minimo').value = p.minimo;
-  document.getElementById('pedit-custo').value = Number(p.custo || 0).toFixed(2);
+  document.getElementById('pedit-minimo').value = fmt(p.minimo);
+  document.getElementById('pedit-custo').value = moedaInput(p.custo);
+  peditCustoPreview();
+  document.getElementById('pedit-qtd-inicial-wrap').style.display = 'none';
+  document.getElementById('pedit-qtd-inicial').value = '';
   document.getElementById('pedit-ajuste-qtd').value = fmt(p.qtd);
   document.getElementById('pedit-ajuste-unid').textContent = p.unidade;
   document.getElementById('pedit-ajuste-preview').textContent = '';
@@ -6916,7 +6986,10 @@ function abrirNovoProduto() {
   document.getElementById('pedit-cat').value = '';
   document.getElementById('pedit-unidade').value = 'UN';
   document.getElementById('pedit-minimo').value = '1';
-  document.getElementById('pedit-custo').value = '0.00';
+  document.getElementById('pedit-custo').value = '';
+  document.getElementById('pedit-custo-preview').textContent = '';
+  document.getElementById('pedit-qtd-inicial-wrap').style.display = 'block';
+  document.getElementById('pedit-qtd-inicial').value = '';
   document.getElementById('pedit-btn-arquivar').style.display = 'none';
   switchEditTab('editar', document.getElementById('ptab-editar'));
   document.getElementById('prod-edit-overlay').classList.add('show');
@@ -6939,8 +7012,10 @@ async function salvarProduto() {
   const nome     = document.getElementById('pedit-nome').value.trim();
   const categoria= document.getElementById('pedit-cat').value.trim();
   const unidade  = document.getElementById('pedit-unidade').value;
-  const minimo   = parseFloat(document.getElementById('pedit-minimo').value) || 0;
-  const custo    = parseFloat(document.getElementById('pedit-custo').value) || 0;
+  const minimoRaw = numQtd(document.getElementById('pedit-minimo').value);
+  const minimo   = isFinite(minimoRaw) && minimoRaw >= 0 ? minimoRaw : 0;
+  const custoRaw = numQtd(document.getElementById('pedit-custo').value);
+  const custo    = isFinite(custoRaw) && custoRaw > 0 ? custoRaw : 0;
   if (!nome || !categoria) { toast('Preencha nome e categoria', 'err'); return; }
   try {
     if (prodEditAtual) {
@@ -6951,9 +7026,23 @@ async function salvarProduto() {
       document.getElementById('pedit-sub').textContent = `${categoria} · ${fmt(prodEditAtual.qtd)} ${unidade} em estoque`;
       toast('✓ Produto atualizado', 'ok');
     } else {
-      // Novo produto
-      await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo, qtd: 0 });
-      toast(`✓ "${nome}" cadastrado!`, 'ok');
+      // Novo produto — cadastra e, se informou quanto já tem, lança o estoque
+      // inicial como Ajuste de Inventário (mantém o histórico honesto).
+      const res = await apiPost('/api/produtos', { nome, categoria, unidade, minimo, custo, qtd: 0 });
+      const qi = numQtd(document.getElementById('pedit-qtd-inicial').value);
+      if (res.produto && isFinite(qi) && qi > 0) {
+        try {
+          await apiPost('/api/movimentacoes', {
+            produto_id: res.produto.id, produto_nome: res.produto.nome,
+            tipo: 'Ajuste', qtd: qi, custo, motivo: 'Inventário', obs: 'estoque inicial no cadastro',
+          });
+          toast(`✓ "${nome}" cadastrado com ${fmt(qi)} ${unidade} em estoque`, 'ok');
+        } catch (e2) {
+          toast(`"${nome}" cadastrado, mas o estoque inicial falhou: ${e2.message}`, 'err');
+        }
+      } else {
+        toast(`✓ "${nome}" cadastrado!`, 'ok');
+      }
       fecharEditProd();
       await loadCats();
     }
