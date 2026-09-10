@@ -1062,6 +1062,7 @@ select.big-input { font-size: 14px; }
       <div class="real-head">
         <input type="date" class="small-input" id="real-data" onchange="loadRealidade()">
         <button class="btn-sm" onclick="realidadeHoje()">Hoje</button>
+        <button class="btn-sm" onclick="imprimirDia()">🖨️ Imprimir</button>
       </div>
 
       <div id="real-config" class="real-alert" style="display:none"></div>
@@ -1699,7 +1700,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v118</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v119</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4893,6 +4894,138 @@ function renderRealidade(d) {
         <div class="real-loss-val">${fmtBRLMoney(p.valor)}</div>
       </div>`).join('');
   }
+}
+
+// Folha imprimível do dia — espelha o que está na tela (edições não salvas incluídas
+// nas listas; KPIs e perdas vêm do último cálculo do servidor).
+function imprimirDia() {
+  const d = realidadeCache;
+  if (!d) { toast('Abra um dia primeiro', 'err'); return; }
+  const dataISO = document.getElementById('real-data')?.value || hojeSPClient();
+  const DOW = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira', 'quinta-feira', 'sexta-feira', 'sábado'];
+  const [a, m, dd] = dataISO.split('-').map(Number);
+  const dow = DOW[new Date(Date.UTC(a, m - 1, dd)).getUTCDay()];
+  const esc = (s) => escapeHtml(String(s ?? ''));
+  const brl = (v) => fmtBRLMoney(v);
+  const pct = (v) => (v == null ? '—' : fmtPct(v));
+
+  const pagamentos = coletarRealRows('pagamentos');
+  const cortes = coletarRealRows('cortes');
+  const despesas = coletarRealRows('despesas');
+  const somaPag = pagamentos.reduce((s, r) => s + Number(r.valor || 0), 0);
+  const somaCortes = cortes.reduce((s, r) => s + Number(r.valor || 0), 0);
+  const somaDesp = despesas.reduce((s, r) => s + Number(r.valor || 0), 0);
+  const pratos = Number(document.getElementById('real-pratos')?.value || 0);
+  const lixoRaw = document.getElementById('real-lixo')?.value;
+  const lixo = lixoRaw ? Number(lixoRaw) : null;
+  const obs = document.getElementById('real-obs')?.value.trim() || '';
+  // Lê o porcionamento COMO ESTÁ NA TELA (readonly div ou input), não o coletor
+  // do backend — que pra operador não traz "tinha".
+  const lerNum = (el) => porcInt(el ? (el.tagName === 'INPUT' ? el.value : el.dataset.v) : 0);
+  const porc = [...document.querySelectorAll('#real-porc-list .porc-item')].map(it => ({
+    item: it.dataset.item,
+    linhas: [...it.querySelectorAll('.porc-row:not(.cab)')].map(r => ({
+      peso_g: Number(r.dataset.peso),
+      tinha: lerNum(r.querySelector('.porc-tinha')),
+      porcionei: lerNum(r.querySelector('.porc-porcionei')),
+      saiu: lerNum(r.querySelector('.porc-saiu')),
+    })),
+  }));
+
+  const tabelaDin = (titulo, linhas, total) => {
+    if (!linhas.length && total == null) return '';
+    const corpo = linhas.length
+      ? linhas.map(r => `<tr><td>${esc(r.descricao || '—')}</td><td class="n">${r.qtd ? r.qtd : ''}</td><td class="n">${brl(r.valor)}</td></tr>`).join('')
+      : `<tr><td colspan="3" class="vazio">—</td></tr>`;
+    return `<h3>${esc(titulo)}</h3><table><thead><tr><th>Descrição</th><th class="n">Qtd</th><th class="n">Valor</th></tr></thead>
+      <tbody>${corpo}</tbody>
+      <tfoot><tr><td>Total</td><td></td><td class="n">${brl(total)}</td></tr></tfoot></table>`;
+  };
+
+  let porcHtml = '';
+  if (porc && porc.length) {
+    porcHtml = '<h3>🧀 Porcionamento (anotação)</h3>' + porc.map(it => {
+      const rows = it.linhas.map(l => {
+        const sob = (l.tinha || 0) + (l.porcionei || 0) - (l.saiu || 0);
+        return `<tr><td>${porcPesoLabel(l.peso_g)}</td><td class="n">${l.tinha ?? 0}</td><td class="n">${l.porcionei ?? 0}</td><td class="n">${l.saiu ?? 0}</td><td class="n">${sob}</td></tr>`;
+      }).join('');
+      return `<div class="porc-bloco"><b>${esc(it.item)}</b>
+        <table><thead><tr><th>Peso</th><th class="n">Tinha</th><th class="n">+Porc.</th><th class="n">Saíram</th><th class="n">Sobrou</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    }).join('');
+  }
+
+  const perdas = d.movimentos?.perdas_itens || [];
+  const perdasHtml = perdas.length
+    ? `<h3>🗑️ Perdas do dia</h3><table><thead><tr><th>Produto</th><th class="n">Qtd</th><th>Motivo</th><th class="n">Valor</th></tr></thead><tbody>` +
+      perdas.map(p => `<tr><td>${esc(p.produto_nome)}</td><td class="n">${fmt(p.qtd)} ${esc(p.unidade || '')}</td><td>${esc((p.motivos || []).join(', '))}</td><td class="n">${brl(p.valor)}</td></tr>`).join('') +
+      `</tbody></table>`
+    : '<h3>🗑️ Perdas do dia</h3><p class="vazio">Nenhuma perda lançada.</p>';
+
+  const kpi = (rot, val, sub) => `<tr><td>${rot}</td><td class="n"><b>${val}</b></td><td class="sub">${sub || ''}</td></tr>`;
+  const o = d.comparativo?.ontem;
+
+  const html = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8">
+  <title>Realidade do Dia — ${dataISO}</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { font: 13px/1.5 -apple-system, Segoe UI, Roboto, Arial, sans-serif; color: #111; margin: 24px; }
+    h1 { font-size: 19px; margin: 0 0 2px; }
+    h2 { font-size: 15px; margin: 22px 0 6px; border-bottom: 2px solid #111; padding-bottom: 3px; }
+    h3 { font-size: 13px; margin: 14px 0 5px; }
+    .cab { color: #444; margin-bottom: 4px; }
+    table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+    th, td { border: 1px solid #bbb; padding: 5px 8px; text-align: left; vertical-align: top; }
+    th { background: #f0f0f0; font-size: 11px; text-transform: uppercase; letter-spacing: .3px; }
+    td.n, th.n { text-align: right; white-space: nowrap; }
+    td.sub { color: #666; font-size: 11px; }
+    tfoot td { font-weight: 700; background: #f7f7f7; }
+    .vazio { color: #999; }
+    .porc-bloco { margin-bottom: 8px; }
+    .obs { border: 1px solid #bbb; padding: 8px; background: #fffdf0; white-space: pre-wrap; }
+    .rodape { margin-top: 26px; color: #888; font-size: 11px; border-top: 1px solid #ccc; padding-top: 6px; }
+    @media print { body { margin: 12mm; } h2 { break-after: avoid; } table { break-inside: avoid; } }
+  </style></head><body>
+  <h1>Realidade do Dia — Toca do Coelho</h1>
+  <div class="cab">${dow}, ${dataBRClient(dataISO)}${d.responsavel ? ' · lançado por ' + esc(d.responsavel) : ''}${d.atualizado_em ? ' · atualizado ' + new Date(d.atualizado_em).toLocaleString('pt-BR') : ''}</div>
+
+  <h2>🧾 Movimento do caixa</h2>
+  ${tabelaDin('Recebimentos', pagamentos, somaPag)}
+  ${tabelaDin('Cortes / sem cobrança', cortes, somaCortes)}
+  ${tabelaDin('Despesas do caixa', despesas, somaDesp)}
+  <table><tbody>
+    <tr><td>Pratos vendidos</td><td class="n">${pratos || '—'}</td></tr>
+    <tr><td>Ticket médio</td><td class="n">${pratos ? brl(somaPag / pratos) : '—'}</td></tr>
+    <tr><td>🥡 Lixo final do buffet</td><td class="n">${lixo != null ? (lixo >= 1000 ? (lixo / 1000).toFixed(2).replace('.', ',') + ' kg' : lixo + ' g') : '—'}</td></tr>
+  </tbody></table>
+  ${porcHtml}
+
+  <h2>📊 Realidade do dia</h2>
+  <table><tbody>
+    ${kpi('Resultado do dia', brl(d.resultado_dia_estimado), 'vendas − consumo − perdas − despesas')}
+    ${kpi('Recebido', brl(d.vendas), 'caixa / POS / dinheiro')}
+    ${kpi('Lucro estoque', brl(d.lucro_bruto_estimado), 'antes das despesas')}
+    ${kpi('Compras', brl(d.compras_estoque), 'investimento, separado do resultado')}
+    ${kpi('Consumo', brl(d.consumo_estoque), pct(d.consumo_sobre_vendas_pct) + ' das vendas')}
+    ${kpi('Perdas', brl(d.perdas), pct(d.perdas_sobre_vendas_pct) + ' das vendas')}
+    ${kpi('Despesas', brl(d.despesas), pct(d.despesas_sobre_vendas_pct) + ' das vendas')}
+    ${kpi('Cortes', brl(d.total_cortes), 'erro, tara, patrões, funcionário')}
+    ${kpi('Caixa do dia', brl(d.fluxo_caixa), 'vendas − despesas, sem compras')}
+    ${kpi('Lançamentos', (d.movimentos?.total || 0), (d.movimentos?.n_consumo || 0) + ' saídas · ' + (d.movimentos?.n_perdas || 0) + ' perdas')}
+  </tbody></table>
+  ${o && Number(o.vendas || 0) > 0 ? `<p class="cab">Contra ontem: resultado ${Number(o.dif_resultado) >= 0 ? '+' : ''}${brl(o.dif_resultado)} · perdas ${Number(o.dif_perdas) >= 0 ? '+' : ''}${brl(o.dif_perdas)} · vendas ${Number(o.dif_vendas) >= 0 ? '+' : ''}${brl(o.dif_vendas)}</p>` : ''}
+
+  ${perdasHtml}
+
+  ${obs ? `<h2>Observação</h2><div class="obs">${esc(obs)}</div>` : ''}
+
+  <div class="rodape">Toca Estoque ${document.querySelector('.app-ver')?.textContent || ''} · impresso ${new Date().toLocaleString('pt-BR')}</div>
+  <${''}script>window.onload=function(){window.print()}<${''}/script>
+  </body></html>`;
+
+  const w = window.open('', '_blank');
+  if (!w) { toast('O navegador bloqueou a janela de impressão', 'err'); return; }
+  w.document.write(html);
+  w.document.close();
 }
 
 async function salvarRealidade() {
