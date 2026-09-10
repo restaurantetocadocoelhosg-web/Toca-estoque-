@@ -59,7 +59,7 @@ if (!SUPABASE_URL || !SUPABASE_KEY) {
 // `public` COM o multi-tenant ligado. E porque é isso que dá o rollback: se algo
 // der errado depois do deploy, MULTI_TENANT=off devolve o comportamento de hoje na
 // hora — as colunas tenant_id ficam no banco, apenas ignoradas.
-const { clienteMultiTenant, comContexto, middlewareContexto } = require('./tenant');
+const { clienteMultiTenant, comContexto, middlewareContexto, tenantAtual } = require('./tenant');
 const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
 // Restaurante de referência: de onde saem as categorias ao abrir um novo.
 const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
@@ -2651,7 +2651,7 @@ async function resumoMovimentosDia(dataDia) {
 
 async function buscarFechamentoDia(dataDia) {
   const { data, error } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g')
+    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g, porcionamento')
     .eq('data', dataDia)
     .maybeSingle();
   if (error) {
@@ -2676,6 +2676,13 @@ async function montarRealidadeDia(dataDiaParam) {
   }
 
   const row = fechamento.row || null;
+
+  // Porcionamento (só anotação): config + "tinha" herdado de ontem.
+  const porcConfig = await carregarPorcionamentoConfig(tenantAtual());
+  const porcionamento = porcConfig.length
+    ? montarPorcionamentoDoDia(porcConfig, row?.porcionamento, fechamentoOntem.row?.porcionamento)
+    : [];
+
   const pagamentos = normalizarLinhasFinanceiras(row?.pagamentos || [], { comQtd: true });
   const cortes = normalizarLinhasFinanceiras(row?.cortes || [], { comQtd: true });
   const despesasLista = normalizarLinhasFinanceiras(row?.despesas || [], { comQtd: false });
@@ -2711,6 +2718,9 @@ async function montarRealidadeDia(dataDiaParam) {
     relatorio_texto: row?.relatorio_texto || '',
     // Lixo do buffet é ANOTAÇÃO (gramas): não entra em venda, despesa nem estoque.
     lixo_buffet_g: row?.lixo_buffet_g ?? null,
+    // Porcionamento de queijo/alho — ANOTAÇÃO: contagem de bolas por peso, fora das contas.
+    porcionamento,
+    porcionamento_config: porcConfig,
     configuracao_pendente: fechamento.configuracao_pendente,
     compras_estoque: mov.compras,
     consumo_estoque: mov.consumo,
@@ -2752,6 +2762,146 @@ function movimentoVazioDia() {
     n_compras: 0, n_consumo: 0, n_perdas: 0, n_ajustes: 0,
     anomalias: 0,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PORCIONAMENTO (queijo, alho...) — só anotação na Realidade do Dia.
+// Contagem de BOLAS por peso. Não encosta em movimentacoes nem produtos.
+// tinha − saiu + porcionei = sobrou. "tinha" de hoje = "sobrou" de ontem.
+// "porcionei" e editar "tinha" = só ADMIN (o operador e o gerente só mexem em "saiu").
+// ─────────────────────────────────────────────────────────────────────────────
+function isTabelaPorcionamentoMissing(error) {
+  const msg = String(error?.message || error?.details || '');
+  return error && (error.code === '42P01' || error.code === 'PGRST205'
+    || /porcionamento_config|schema cache|does not exist|relation/i.test(msg));
+}
+
+async function carregarPorcionamentoConfig(tenantId) {
+  try {
+    let q = supabaseRaw.from('porcionamento_config')
+      .select('tenant_id, item, pesos_g, unidade, ordem').eq('ativo', true);
+    q = tenantId ? q.or(`tenant_id.eq.${Number(tenantId)},tenant_id.is.null`) : q.is('tenant_id', null);
+    const { data, error } = await q;
+    if (error) { if (isTabelaPorcionamentoMissing(error)) return []; throw error; }
+    // item específico do restaurante ganha do template global (tenant nulo)
+    const porItem = new Map();
+    for (const r of (data || [])) {
+      const k = String(r.item).toLowerCase();
+      const cur = porItem.get(k);
+      if (!cur || (r.tenant_id != null && cur.tenant_id == null)) porItem.set(k, r);
+    }
+    return [...porItem.values()]
+      .map(r => ({
+        item: String(r.item),
+        pesos_g: (Array.isArray(r.pesos_g) ? r.pesos_g : []).map(n => parseNonNegativeInteger(n)).filter(Boolean),
+        unidade: r.unidade || 'bolas',
+        ordem: Number(r.ordem || 0),
+      }))
+      .filter(r => r.pesos_g.length)
+      .sort((a, b) => (a.ordem - b.ordem) || a.item.localeCompare(b.item, 'pt-BR'));
+  } catch (e) {
+    if (isTabelaPorcionamentoMissing(e)) return [];
+    throw e;
+  }
+}
+
+// mapa "item|peso" -> sobrou, a partir de um porcionamento salvo
+function sobrouPorLinha(porcSalvo) {
+  const m = new Map();
+  for (const it of (Array.isArray(porcSalvo) ? porcSalvo : [])) {
+    for (const l of (Array.isArray(it?.linhas) ? it.linhas : [])) {
+      m.set(`${String(it.item).toLowerCase()}|${Number(l.peso_g)}`, Number(l.sobrou || 0));
+    }
+  }
+  return m;
+}
+function linhaSalva(porcSalvo, item, peso) {
+  const it = (Array.isArray(porcSalvo) ? porcSalvo : []).find(x => String(x.item).toLowerCase() === item.toLowerCase());
+  return it?.linhas?.find(l => Number(l.peso_g) === Number(peso)) || null;
+}
+
+// Estrutura pronta pra tela: toda linha da config, já com "tinha" de ontem.
+function montarPorcionamentoDoDia(config, porcHoje, porcOntem) {
+  const sobrouOntem = sobrouPorLinha(porcOntem);
+  return config.map(c => ({
+    item: c.item,
+    unidade: c.unidade,
+    linhas: c.pesos_g.map(peso => {
+      const salva = linhaSalva(porcHoje, c.item, peso);
+      const tinha = salva ? Number(salva.tinha || 0) : (sobrouOntem.get(`${c.item.toLowerCase()}|${peso}`) || 0);
+      const porcionei = salva ? Number(salva.porcionei || 0) : 0;
+      const saiu = salva ? Number(salva.saiu || 0) : 0;
+      return { peso_g: peso, tinha, porcionei, saiu, sobrou: tinha + porcionei - saiu };
+    }),
+  }));
+}
+
+// Aplica o que o usuário mandou, com autoridade do servidor:
+//   saiu       -> sempre do payload
+//   tinha      -> admin: do payload | senão: "sobrou" de ontem
+//   porcionei  -> admin: do payload | senão: o que já estava salvo hoje (ou 0)
+function normalizarPorcionamentoSalvar(payload, config, porcHoje, porcOntem, ehAdmin) {
+  const sobrouOntem = sobrouPorLinha(porcOntem);
+  const mandado = new Map();
+  for (const it of (Array.isArray(payload) ? payload : [])) {
+    if (!it || typeof it.item !== 'string') continue;
+    for (const l of (Array.isArray(it.linhas) ? it.linhas : [])) {
+      mandado.set(`${it.item.toLowerCase()}|${Number(l?.peso_g)}`, l || {});
+    }
+  }
+  const out = [];
+  for (const c of config) {
+    const linhas = [];
+    for (const peso of c.pesos_g) {
+      const chave = `${c.item.toLowerCase()}|${peso}`;
+      const m = mandado.get(chave) || {};
+      const salva = linhaSalva(porcHoje, c.item, peso);
+      const saiu = parseNonNegativeInteger(m.saiu) || 0;
+      let tinha, porcionei;
+      if (ehAdmin) {
+        tinha = m.tinha != null ? (parseNonNegativeInteger(m.tinha) || 0)
+                                : (salva ? Number(salva.tinha || 0) : (sobrouOntem.get(chave) || 0));
+        porcionei = parseNonNegativeInteger(m.porcionei) || 0;
+      } else {
+        tinha = salva ? Number(salva.tinha || 0) : (sobrouOntem.get(chave) || 0);
+        porcionei = salva ? Number(salva.porcionei || 0) : 0;
+      }
+      linhas.push({ peso_g: peso, tinha, porcionei, saiu, sobrou: tinha + porcionei - saiu });
+    }
+    if (linhas.length) out.push({ item: c.item, linhas });
+  }
+  return out;
+}
+
+// Resumo da semana: soma dos "saiu" por item/peso nos últimos N dias.
+async function resumoPorcionamentoSemana(ateISO, dias = 7) {
+  const config = await carregarPorcionamentoConfig(tenantAtual());
+  if (!config.length) return { itens: [], de: ateISO, ate: ateISO };
+  const deISO = addDiasISO(ateISO, -(dias - 1));
+  let rows = [];
+  try {
+    const r = await supabase.from('fechamentos_diarios')
+      .select('data, porcionamento').gte('data', deISO).lte('data', ateISO).order('data', { ascending: true });
+    rows = r.data || [];
+  } catch (e) { if (!isTabelaPorcionamentoMissing(e)) throw e; }
+  const acc = new Map(); // item -> peso -> saiu
+  for (const row of rows) {
+    for (const it of (Array.isArray(row.porcionamento) ? row.porcionamento : [])) {
+      const chave = String(it.item);
+      if (!acc.has(chave)) acc.set(chave, new Map());
+      for (const l of (Array.isArray(it.linhas) ? it.linhas : [])) {
+        const m = acc.get(chave);
+        m.set(Number(l.peso_g), (m.get(Number(l.peso_g)) || 0) + Number(l.saiu || 0));
+      }
+    }
+  }
+  const itens = config.map(c => {
+    const m = acc.get(c.item) || new Map();
+    const pesos = c.pesos_g.map(p => ({ peso_g: p, saiu: m.get(p) || 0 }));
+    const maior = pesos.reduce((a, b) => (b.saiu > a.saiu ? b : a), { peso_g: null, saiu: -1 });
+    return { item: c.item, unidade: c.unidade, pesos, peso_mais_usado: maior.saiu > 0 ? maior.peso_g : null };
+  });
+  return { itens, de: deISO, ate: ateISO };
 }
 
 // Supabase/PostgREST corta QUALQUER select em 1000 linhas por request. Busca de
@@ -3695,7 +3845,7 @@ function montarMensagemFechamentoDia(d) {
 app.get('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
   try {
     const resumo = await montarRealidadeDia(req.query?.data);
-    res.json(resumo);
+    res.json({ ...resumo, pode_configurar_porcionamento: req.user.role === 'admin' });
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao carregar realidade do dia.' });
@@ -3721,6 +3871,22 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       : Math.min(Math.max(parseNonNegativeInteger(lixoRaw) || 0, 0), 99999);
     if (vendas === null) return res.status(400).json({ erro: 'Informe o movimento do caixa com valor válido.' });
 
+    // Porcionamento (anotação): o servidor manda em "tinha"/"porcionei" quando quem
+    // salva NÃO é admin — operador e gerente só mexem em "saiu".
+    const porcConfig = await carregarPorcionamentoConfig(tenantAtual());
+    let porcionamentoSalvar;
+    if (porcConfig.length) {
+      const ontemISO = addDiasISO(dataDia, -1);
+      const [fHoje, fOntem] = await Promise.all([
+        buscarFechamentoDia(dataDia).catch(() => ({ row: null })),
+        buscarFechamentoDia(ontemISO).catch(() => ({ row: null })),
+      ]);
+      porcionamentoSalvar = normalizarPorcionamentoSalvar(
+        req.body?.porcionamento, porcConfig,
+        fHoje.row?.porcionamento, fOntem.row?.porcionamento,
+        req.user.role === 'admin');
+    }
+
     const { error } = await supabase.from('fechamentos_diarios').upsert({
       data: dataDia,
       vendas,
@@ -3731,6 +3897,7 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       despesas,
       relatorio_texto: relatorioTexto,
       lixo_buffet_g: lixoBuffetG,
+      ...(porcionamentoSalvar ? { porcionamento: porcionamentoSalvar } : {}),
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
     }, { onConflict: chaveConflito('data') });
@@ -3837,6 +4004,63 @@ app.post('/api/realidade-dia/mover', auth, requirePerm('dia'), async (req, res) 
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao mover movimento do dia.' });
+  }
+});
+
+// ─── Porcionamento: config dos itens/pesos + resumo da semana ────────────────
+app.get('/api/porcionamento/config', auth, requirePerm('dia'), async (req, res) => {
+  try {
+    res.json({ itens: await carregarPorcionamentoConfig(tenantAtual()), pode_editar: req.user.role === 'admin' });
+  } catch (e) {
+    if (isTabelaPorcionamentoMissing(e)) return res.json({ itens: [], pode_editar: req.user.role === 'admin' });
+    console.error(e); res.status(500).json({ erro: 'Erro ao carregar porcionamento.' });
+  }
+});
+
+// Só ADMIN mexe na régua (itens, pesos das bolas). Grava override do restaurante.
+app.put('/api/porcionamento/config', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const item = sanitizeText(req.body?.item || '', 40).trim();
+    if (!item) return res.status(400).json({ erro: 'Informe o nome do item.' });
+    const pesos = [...new Set((Array.isArray(req.body?.pesos_g) ? req.body.pesos_g : [])
+      .map(n => parseNonNegativeInteger(n)).filter(n => n && n <= 100000))].sort((a, b) => a - b);
+    if (!pesos.length) return res.status(400).json({ erro: 'Informe ao menos um peso de bola.' });
+    const unidade = sanitizeText(req.body?.unidade || 'bolas', 12).trim() || 'bolas';
+    const ordem = parseNonNegativeInteger(req.body?.ordem || 0);
+    const ativo = req.body?.ativo === false ? false : true;
+    const tid = tenantAtual() || null;
+    const patch = {
+      tenant_id: tid, item, pesos_g: pesos, unidade, ordem, ativo,
+      atualizado_em: nowSP(), atualizado_por: req.user.nome || req.user.username,
+    };
+    const { error } = await supabaseRaw.from('porcionamento_config')
+      .upsert(patch, { onConflict: 'tenant_id,item' });
+    // fallback: índice de conflito é funcional (COALESCE(tenant_id,0), lower(item)),
+    // então o upsert pode não casar — tenta update+insert na mão.
+    if (error) {
+      let q = supabaseRaw.from('porcionamento_config').update(patch);
+      q = tid == null ? q.is('tenant_id', null) : q.eq('tenant_id', tid);
+      const upd = await q.ilike('item', item).select('id');
+      if (upd.error) throw upd.error;
+      if (!upd.data?.length) {
+        const ins = await supabaseRaw.from('porcionamento_config').insert(patch);
+        if (ins.error) throw ins.error;
+      }
+    }
+    await audit('porcionamento_config', { item, pesos_g: pesos, ativo }, req.user, getClientIp(req));
+    res.json({ itens: await carregarPorcionamentoConfig(tenantAtual()) });
+  } catch (e) {
+    console.error(e); res.status(500).json({ erro: 'Erro ao salvar item do porcionamento.' });
+  }
+});
+
+app.get('/api/porcionamento/semana', auth, requirePerm('dia'), async (req, res) => {
+  try {
+    const ate = isDataISO(req.query?.ate) ? String(req.query.ate) : dateSP();
+    res.json(await resumoPorcionamentoSemana(ate, 7));
+  } catch (e) {
+    if (isTabelaPorcionamentoMissing(e)) return res.json({ itens: [], de: null, ate: null });
+    console.error(e); res.status(500).json({ erro: 'Erro ao resumir a semana.' });
   }
 });
 

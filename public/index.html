@@ -277,6 +277,22 @@ select.big-input { font-size: 14px; }
 .real-money-row.no-qtd { grid-template-columns: 1fr 108px 34px; }
 .real-money-row .small-input { min-width: 0; padding: 9px 10px; }
 .real-row-del { width: 34px; height: 38px; padding: 0; display: flex; align-items: center; justify-content: center; }
+.porc-item { border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 7px; background: var(--bg); }
+.porc-item-nome { font-size: 13px; font-weight: 800; margin-bottom: 7px; }
+.porc-row { display: grid; grid-template-columns: 52px 1fr 1fr 1fr 46px; gap: 5px; align-items: center; margin-bottom: 4px; }
+.porc-row.sem-porc { grid-template-columns: 52px 1fr 1fr 46px; }
+.porc-row.cab > div { font-size: 9.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: 0.3px; text-align: center; }
+.porc-peso { font-size: 12px; font-weight: 700; text-align: center; }
+.porc-row .small-input { min-width: 0; padding: 8px 4px; text-align: center; }
+.porc-ro { font-size: 13px; font-weight: 600; text-align: center; color: var(--muted); }
+.porc-sob { font-size: 14px; font-weight: 800; text-align: center; }
+.porc-sob.neg { color: var(--red); }
+.porc-warn { font-size: 11px; color: var(--red); margin-top: 3px; line-height: 1.4; }
+.porc-sem-item { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.porc-sem-item:last-child { border-bottom: 0; }
+.porc-sem-nome { font-size: 13px; font-weight: 800; margin-bottom: 3px; }
+.porc-sem-linha { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+.porc-sem-linha b { color: var(--text); }
 .real-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .real-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 12px; min-width: 0; }
 .real-kpi.big { grid-column: 1 / -1; background: rgba(16,185,129,0.07); border-color: rgba(16,185,129,0.25); }
@@ -1085,6 +1101,14 @@ select.big-input { font-size: 14px; }
             <input class="small-input" id="real-lixo" type="number" step="1" min="0" max="99999" inputmode="numeric" placeholder="Peso em gramas (ex: 2785)">
           </div>
 
+          <div class="real-block" id="real-porc-block" hidden>
+            <div class="real-block-head">
+              <span>🧀 Porcionamento (anotação — não entra nas contas)</span>
+              <button type="button" class="btn-sm" id="real-porc-cfg-btn" hidden onclick="abrirPorcConfig()">⚙︎ itens</button>
+            </div>
+            <div id="real-porc-list"></div>
+          </div>
+
           <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
           <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar movimento</button>
           <div class="real-danger-actions">
@@ -1103,6 +1127,11 @@ select.big-input { font-size: 14px; }
       <div class="real-card">
         <div class="real-card-title">🗑️ Perdas do dia <button class="btn-sm danger" onclick="irLancarPerda()">Lançar perda</button></div>
         <div class="real-loss-list" id="real-perdas-list"></div>
+      </div>
+
+      <div class="real-card" id="real-porc-semana-card" hidden>
+        <div class="real-card-title">🧀 Porcionamento — últimos 7 dias <button class="btn-sm" onclick="carregarPorcSemana()">↻</button></div>
+        <div id="real-porc-semana"><div class="loading">Carregando...</div></div>
       </div>
     </div>
   </div>
@@ -1670,7 +1699,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v117</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v118</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -4764,6 +4793,7 @@ function renderRealidade(d) {
   obsInput.value = d.observacao || '';
   const lixoInput = document.getElementById('real-lixo');
   if (lixoInput) lixoInput.value = d.lixo_buffet_g != null ? d.lixo_buffet_g : '';
+  renderPorcionamento(d);
   const pagamentosRows = d.pagamentos?.length ? d.pagamentos : (d.venda_lancada && Number(d.vendas || 0) > 0 ? [{ descricao: 'TOTAL DO DIA', valor: d.vendas }] : []);
   renderRealMoneyRows('pagamentos', pagamentosRows);
   renderRealMoneyRows('cortes', d.cortes || []);
@@ -4877,6 +4907,8 @@ async function salvarRealidade() {
   if (!Number.isFinite(vendas) || vendas < 0) { toast('Informe o movimento do dia', 'err'); return; }
   if (relatorioTexto && !await checarDataRelatorio(relatorioTexto)) return;
   if (!await checarConferenciaCaixaAntesDeSalvar()) return;
+  const porc = coletarPorcionamento();
+  if (porc && !await checarPorcionamentoAntesDeSalvar()) return;
   const btn = document.getElementById('real-btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
   try {
@@ -4891,6 +4923,7 @@ async function salvarRealidade() {
       despesas,
       relatorio_texto: relatorioTexto,
       lixo_buffet_g: lixoRaw === '' ? null : Math.floor(Number(lixoRaw) || 0),
+      ...(porc ? { porcionamento: porc } : {}),
     });
     realidadeCache = d;
     renderRealidade(d);
@@ -4903,6 +4936,179 @@ async function salvarRealidade() {
     }
   } catch(e) { handleApiError(e, true); }
   finally { btn.disabled = false; btn.textContent = 'Salvar movimento'; }
+}
+
+// ─── Porcionamento (anotação): contagem de bolas por peso ────────────────────
+// tinha − saiu + porcionei = sobrou. Peso travado, só nº de bolas é digitável.
+// "porcionei" e editar "tinha" = só admin (via d.pode_configurar_porcionamento).
+let porcPodeConfig = false;
+
+function porcInt(v) {
+  const n = parseInt(String(v ?? '').replace(/[^\d]/g, ''), 10);
+  return Number.isFinite(n) && n >= 0 ? n : 0;
+}
+function porcPesoLabel(g) {
+  return g >= 1000 ? (g / 1000).toString().replace('.', ',') + ' kg' : g + ' g';
+}
+
+function renderPorcionamento(d) {
+  const block = document.getElementById('real-porc-block');
+  const list = document.getElementById('real-porc-list');
+  const cfgBtn = document.getElementById('real-porc-cfg-btn');
+  const semanaCard = document.getElementById('real-porc-semana-card');
+  if (!block || !list) return;
+  porcPodeConfig = !!d.pode_configurar_porcionamento;
+  const itens = Array.isArray(d.porcionamento) ? d.porcionamento : [];
+  if (!itens.length) {
+    block.hidden = true;
+    if (semanaCard) semanaCard.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  if (cfgBtn) cfgBtn.hidden = !porcPodeConfig;
+  const adm = porcPodeConfig;
+  list.innerHTML = itens.map(it => {
+    const rowCls = adm ? 'porc-row' : 'porc-row sem-porc';
+    const cab = `<div class="${rowCls} cab"><div>Peso</div><div>Tinha</div>${adm ? '<div>+ Porc.</div>' : ''}<div>Saíram</div><div>Sobrou</div></div>`;
+    const linhas = (it.linhas || []).map(l => {
+      const tinha = adm
+        ? `<input class="small-input porc-in porc-tinha" type="text" inputmode="numeric" value="${l.tinha ?? 0}" oninput="recalcPorcItem(this)">`
+        : `<div class="porc-ro porc-tinha" data-v="${l.tinha ?? 0}">${l.tinha ?? 0}</div>`;
+      const porc = adm
+        ? `<input class="small-input porc-in porc-porcionei" type="text" inputmode="numeric" value="${l.porcionei ?? 0}" oninput="recalcPorcItem(this)">`
+        : '';
+      return `<div class="${rowCls}" data-peso="${l.peso_g}">
+        <div class="porc-peso">${porcPesoLabel(l.peso_g)}</div>
+        ${tinha}
+        ${porc}
+        <input class="small-input porc-in porc-saiu" type="text" inputmode="numeric" placeholder="0" value="${l.saiu ? l.saiu : ''}" oninput="recalcPorcItem(this)">
+        <div class="porc-sob">${l.sobrou}</div>
+      </div>`;
+    }).join('');
+    return `<div class="porc-item" data-item="${escapeHtml(it.item)}">
+      <div class="porc-item-nome">${escapeHtml(it.item)}</div>
+      ${cab}${linhas}
+      <div class="porc-warn" hidden></div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.porc-item').forEach(recalcPorcItemEl);
+  if (semanaCard) { semanaCard.hidden = false; carregarPorcSemana(); }
+}
+
+function recalcPorcItem(inp) { recalcPorcItemEl(inp.closest('.porc-item')); }
+function recalcPorcItemEl(itemEl) {
+  if (!itemEl) return;
+  let alerta = '';
+  itemEl.querySelectorAll('.porc-row:not(.cab)').forEach(row => {
+    const tinhaEl = row.querySelector('.porc-tinha');
+    const tinha = porcInt(tinhaEl?.tagName === 'INPUT' ? tinhaEl.value : tinhaEl?.dataset.v);
+    const porc = porcInt(row.querySelector('.porc-porcionei')?.value || 0);
+    const saiu = porcInt(row.querySelector('.porc-saiu')?.value || 0);
+    const sobrou = tinha + porc - saiu;
+    const sobEl = row.querySelector('.porc-sob');
+    sobEl.textContent = sobrou;
+    sobEl.classList.toggle('neg', sobrou < 0);
+    if (sobrou < 0) alerta = `Saíram mais bolas do que tinha em ${porcPesoLabel(Number(row.dataset.peso))} — confere?`;
+  });
+  const warnEl = itemEl.querySelector('.porc-warn');
+  if (warnEl) { warnEl.textContent = alerta; warnEl.hidden = !alerta; }
+}
+
+// Retorna null se não há bloco de porcionamento na tela; senão o array pro backend.
+function coletarPorcionamento() {
+  const list = document.getElementById('real-porc-list');
+  const block = document.getElementById('real-porc-block');
+  if (!list || !block || block.hidden) return null;
+  const itens = [...list.querySelectorAll('.porc-item')].map(itemEl => ({
+    item: itemEl.dataset.item,
+    linhas: [...itemEl.querySelectorAll('.porc-row:not(.cab)')].map(row => {
+      const tinhaEl = row.querySelector('.porc-tinha');
+      const l = { peso_g: Number(row.dataset.peso), saiu: porcInt(row.querySelector('.porc-saiu')?.value || 0) };
+      if (tinhaEl?.tagName === 'INPUT') l.tinha = porcInt(tinhaEl.value);
+      const pEl = row.querySelector('.porc-porcionei');
+      if (pEl) l.porcionei = porcInt(pEl.value);
+      return l;
+    }),
+  }));
+  return itens.length ? itens : null;
+}
+
+// Campo "saíram" em branco não vira 0 escondido — pergunta antes.
+async function checarPorcionamentoAntesDeSalvar() {
+  const list = document.getElementById('real-porc-list');
+  if (!list) return true;
+  const vazios = [...list.querySelectorAll('.porc-saiu')].filter(i => String(i.value).trim() === '').length;
+  if (!vazios) return true;
+  return askConfirm(
+    `Tem ${vazios} linha(s) de "saíram hoje" em branco. Vou contar como 0. Confirma?`,
+    { titulo: 'Porcionamento', textoOk: 'Salvar como 0', perigo: false });
+}
+
+async function carregarPorcSemana() {
+  const el = document.getElementById('real-porc-semana');
+  if (!el) return;
+  const dataEl = document.getElementById('real-data');
+  try {
+    const d = await api('/api/porcionamento/semana?ate=' + encodeURIComponent(dataEl?.value || hojeSPClient()));
+    const itens = d.itens || [];
+    if (!itens.length) { el.innerHTML = '<div class="empty" style="padding:14px"><div class="empty-text">Sem contagem nos últimos 7 dias.</div></div>'; return; }
+    el.innerHTML = itens.map(it => {
+      const linhas = it.pesos.map(p => `<span>${porcPesoLabel(p.peso_g)}: <b>${p.saiu}</b></span>`).join(' · ');
+      const maior = it.peso_mais_usado != null ? ` — mais girou: ${porcPesoLabel(it.peso_mais_usado)}` : '';
+      return `<div class="porc-sem-item">
+        <div class="porc-sem-nome">${escapeHtml(it.item)}${maior}</div>
+        <div class="porc-sem-linha">${linhas}</div>
+      </div>`;
+    }).join('');
+  } catch (e) {
+    el.innerHTML = '<div class="empty" style="padding:14px"><div class="empty-text">Erro ao carregar.</div></div>';
+  }
+}
+
+// Config (só admin): editar itens e pesos das bolas.
+async function abrirPorcConfig() {
+  let cfg;
+  try { cfg = await api('/api/porcionamento/config'); }
+  catch (e) { handleApiError(e, true); return; }
+  const itens = cfg.itens || [];
+  const old = document.getElementById('porc-cfg-overlay');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'porc-cfg-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:20px';
+  const linhaHtml = (it = { item: '', pesos_g: [], unidade: 'bolas' }) => `
+    <div class="porc-cfg-row" style="display:grid;grid-template-columns:1fr 1.4fr auto;gap:6px;margin-bottom:8px;align-items:center">
+      <input class="small-input pc-item" placeholder="Item" value="${escapeHtml(it.item || '')}">
+      <input class="small-input pc-pesos" placeholder="Pesos em g (ex: 40, 150, 400)" value="${(it.pesos_g || []).join(', ')}">
+      <button class="btn-sm" onclick="salvarPorcItem(this)">Salvar</button>
+    </div>`;
+  ov.innerHTML = `
+    <div style="background:var(--s1);border-radius:16px;padding:22px 18px;max-width:440px;width:100%;border:1px solid var(--border);max-height:85vh;overflow:auto">
+      <div style="font-size:16px;font-weight:800;margin-bottom:4px">🧀 Itens do porcionamento</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px">Pesos das bolas em gramas, separados por vírgula. Alho: use 1000 pra 1 kg.</div>
+      <div id="porc-cfg-lista">${itens.map(linhaHtml).join('')}</div>
+      <div style="font-size:12px;color:var(--muted);margin:10px 0 6px">Novo item</div>
+      ${linhaHtml()}
+      <button onclick="document.getElementById('porc-cfg-overlay').remove()" style="width:100%;margin-top:12px;padding:12px;background:var(--s2);color:var(--text);border:1px solid var(--border);border-radius:10px;font-weight:700;cursor:pointer;font-family:var(--font)">Fechar</button>
+    </div>`;
+  document.body.appendChild(ov);
+}
+
+async function salvarPorcItem(btn) {
+  const row = btn.closest('.porc-cfg-row');
+  const item = row.querySelector('.pc-item').value.trim();
+  const pesos = row.querySelector('.pc-pesos').value.split(/[,;\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n) && n > 0);
+  if (!item) { toast('Informe o nome do item', 'err'); return; }
+  if (!pesos.length) { toast('Informe ao menos um peso', 'err'); return; }
+  const unidade = pesos.length === 1 && pesos[0] >= 1000 ? 'kg' : 'bolas';
+  btn.disabled = true;
+  try {
+    await apiPost('/api/porcionamento/config', { item, pesos_g: pesos, unidade }, 'PUT');
+    toast('Item salvo', 'ok');
+    document.getElementById('porc-cfg-overlay')?.remove();
+    loadRealidade();
+  } catch (e) { handleApiError(e, true); }
+  finally { btn.disabled = false; }
 }
 
 function dataBRClient(iso) {
