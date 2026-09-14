@@ -487,8 +487,10 @@ app.post('/api/login', loginLimiter, async (req, res) => {
   const password = String(req.body?.password || '');
   if (!username || !password) return res.status(400).json({ erro: 'Usuário e senha são obrigatórios.' });
 
-  const { data: user } = await supabase.from('users').select('*').ilike('username', username).eq('active', 1).single();
-  if (!user || !verifyPassword(password, user.password_hash))
+  const { data: user, error: userErr } = await supabase.from('users').select('*').ilike('username', username).eq('active', 1).single();
+  if (userErr) console.error('[login] erro ao buscar usuário:', username, userErr.message || userErr);
+  if (!user) return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
+  if (!verifyPassword(password, user.password_hash))
     return res.status(401).json({ erro: 'Usuário ou senha inválidos.' });
 
   // Restaurante suspenso (inadimplência, encerramento) não entra — e a mensagem diz o
