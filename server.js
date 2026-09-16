@@ -6129,6 +6129,85 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
   }
 });
 
+// ==================== GRUPO COZINHA (captura silenciosa) ====================
+// Mensagens de texto livre do grupo Cozinha (contagem de queijo/alho/batata frita/
+// garrafinha/avaliação de buffet) viram linhas em cozinha_diario. NÃO responde nada
+// no grupo — é só captura; o fechamento do dia (18h30) é um passo separado.
+async function extrairCozinhaComIA(texto) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) { const err = new Error('ANTHROPIC_API_KEY não configurada no servidor.'); err.status = 500; throw err; }
+  const prompt = `Você lê mensagens soltas de um grupo de WhatsApp de uma cozinha de restaurante e extrai contagens/dados operacionais do dia.
+Itens possíveis (use exatamente estes nomes quando reconhecer):
+- "salgado_buffet": teve salgado no buffet? valor 1 (sim) ou 0 (não), unidade "sim_nao"
+- "batata_frita": contagem de batata frita, unidade "unidades"
+- "alho": peso de alho em GRAMAS (sempre converta pra gramas: "9,5" sozinho = 9500g, "8,850g" = 8850g), unidade "gramas"
+- "queijo": tem detalhe de peso — "40g", "150g" ou "400g" — cada contagem é uma linha separada, unidade "unidades"
+- "garrafinha_venda": venda de garrafinha, unidade "unidades"
+- "freezer_batata_frita": estoque de batata frita no freezer em GRAMAS (ex: "4kg" = 4000), unidade "gramas"
+
+A mensagem pode ser só conversa (pergunta, cobrança, comentário) — nesse caso não é dado nenhum.
+Responda SOMENTE um JSON válido, sem markdown, no formato:
+{"itens":[{"item":"queijo","detalhe":"40g","valor":21,"unidade":"unidades"}, ...]}
+Se não houver nenhum dado de contagem na mensagem, responda {"itens":[]}.
+
+Mensagem:
+"""${texto.slice(0, 1000)}"""`;
+
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 512,
+      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+    }),
+  });
+  if (!response.ok) {
+    const body = (await response.text()).slice(0, 300);
+    throw new Error(`IA respondeu ${response.status}: ${body}`);
+  }
+  const data = await response.json();
+  const raw = (data.content || []).map(b => b.text || '').join('').replace(/```json|```/g, '').trim();
+  let parsed = null;
+  try { parsed = JSON.parse(raw); }
+  catch {
+    const ini = raw.indexOf('{'), fim = raw.lastIndexOf('}');
+    if (ini >= 0 && fim > ini) { try { parsed = JSON.parse(raw.slice(ini, fim + 1)); } catch {} }
+  }
+  const itens = Array.isArray(parsed?.itens) ? parsed.itens : [];
+  return itens.filter(it => it && it.item && Number.isFinite(Number(it.valor)));
+}
+
+app.post('/api/webhook/cozinha-mensagem', webhookLimiter, async (req, res) => {
+  if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
+  const secret = req.headers['x-webhook-secret'] || req.body?.secret;
+  if (secret !== WEBHOOK_SECRET) return res.status(403).json({ erro: 'Acesso negado.' });
+  const texto = sanitizeText(req.body?.texto, 1000);
+  const remetente = sanitizeText(req.body?.remetente, 60) || null;
+  if (!texto) return res.json({ ok: true, itens: 0 });
+  try {
+    const itens = await extrairCozinhaComIA(texto);
+    if (!itens.length) return res.json({ ok: true, itens: 0 });
+    const hoje = dateSP();
+    const linhas = itens.map(it => ({
+      data: hoje,
+      item: sanitizeText(String(it.item), 40),
+      detalhe: it.detalhe ? sanitizeText(String(it.detalhe), 20) : null,
+      valor: Number(it.valor),
+      unidade: sanitizeText(String(it.unidade || 'unidades'), 20),
+      remetente,
+      mensagem_original: texto,
+    }));
+    const { error } = await supabase.from('cozinha_diario').insert(linhas);
+    if (error) throw new Error(error.message);
+    res.json({ ok: true, itens: linhas.length });
+  } catch (e) {
+    console.error('Erro cozinha-mensagem webhook:', e.message);
+    await logErroAgenda('cozinha-mensagem', e, { nome: remetente });
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // ==================== PENDÊNCIAS DE NOTA (resolver no app) ====================
 // Itens que a IA teve dúvida ao ler a nota no WhatsApp. Admin resolve escolhendo o
 // produto certo (ou libera a permissão 'pendencias' pra um funcionário).
