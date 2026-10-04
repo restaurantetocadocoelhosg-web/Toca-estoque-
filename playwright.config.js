@@ -11,6 +11,15 @@ try {
   }
 } catch {}
 
+function urlE2E() {
+  const url = process.env.E2E_BASE_URL;
+  if (!url) throw new Error("Defina E2E_BASE_URL (ex.: http://127.0.0.1:3000). Os testes E2E não apontam mais para produção por padrão.");
+  if (/railway.app|toca-estoque-production/i.test(url) && process.env.E2E_PERMITIR_PRODUCAO !== "1") {
+    throw new Error("E2E_BASE_URL aponta para PRODUÇÃO. Esses testes alteram saldo real. Use E2E_PERMITIR_PRODUCAO=1 só com autorização.");
+  }
+  return url;
+}
+
 module.exports = defineConfig({
   testDir: "./tests",
   timeout: 90_000,
@@ -18,8 +27,9 @@ module.exports = defineConfig({
   retries: 1,
   reporter: [["list"]],
   use: {
-    // Aponta direto pra produção (Railway) — é onde a equipe realmente usa o app.
-    baseURL: "https://toca-estoque-production.up.railway.app",
+    // Antes apontava direto para PRODUÇÃO e alterava saldo real. Agora exige E2E_BASE_URL explícito;
+    // produção só com E2E_PERMITIR_PRODUCAO=1 (ver test/README.md).
+    baseURL: urlE2E(),
     ...devices["Pixel 7"],
     screenshot: "only-on-failure",
   },

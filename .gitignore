@@ -5,3 +5,6 @@ node_modules/
 *.log
 test-results/
 playwright-report/
+
+# Ambiente de teste descartável (banco local, binários e configs temporárias)
+test/.ambiente/

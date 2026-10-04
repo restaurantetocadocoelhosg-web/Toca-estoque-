@@ -294,7 +294,8 @@ async function deleteSession(token) {
   }
 }
 
-setInterval(async () => {
+// Em teste (NODE_ENV=test) os temporizadores não sobem: o servidor é carregado só para exercitar as rotas.
+if (process.env.NODE_ENV !== 'test') setInterval(async () => {
   if (useSupabaseSessions) {
     const cutoff = new Date(Date.now() - IDLE_TIMEOUT_MS).toISOString();
     await supabase.from('sessions').delete().lt('last_activity', cutoff);
@@ -7560,7 +7561,7 @@ async function criarBackupEstoque(motivo = 'automatico') {
 }
 
 let ultimoBackupDia = '';
-setInterval(async () => {
+if (process.env.NODE_ENV !== 'test') setInterval(async () => {
   const agora = nowSP(), hora = agora.slice(11, 16), dia = agora.slice(0, 10);
   const HORA_BACKUP = process.env.HORA_BACKUP || '18:00';
   if (hora === HORA_BACKUP && dia !== ultimoBackupDia) {
@@ -8181,7 +8182,7 @@ app.use((err, req, res, next) => {
 // restaurante, e cada um nasce com os seus (ou importa o catálogo-modelo). O erro que
 // isso dava no boot era o isolamento funcionando — consulta a tabela de dado sem
 // restaurante definido é recusada de propósito.
-(MULTI_TENANT ? Promise.resolve() : seed()).then(async () => {
+if (require.main === module) (MULTI_TENANT ? Promise.resolve() : seed()).then(async () => {
   await initSessionsBackend();
   app.listen(PORT, () => {
     console.log(`🐰 Toca do Coelho — Estoque (Supabase) rodando em http://localhost:${PORT}`);
@@ -8189,3 +8190,6 @@ app.use((err, req, res, next) => {
   });
 }).catch(err => { console.error('❌ Erro ao inicializar:', err.message); process.exit(1); });
 
+
+// Testes: carregam o app sem ligar o servidor (ver test/README.md). Em produção nada muda.
+module.exports = { app, initSessionsBackend };
