@@ -2049,9 +2049,20 @@ const CONTA_COMPRA_FALLBACK = ['Despesas Variáveis - CMV', 'Estoque Congelado']
 // é a maior origem de lançamento do sistema, e uma falha muda o CMV do mês sem deixar
 // pista. Devolve {ok, erro, aviso} pra quem chamou avisar quem lançou.
 // origem='estoque-auto' separa os automáticos dos digitados na aba Contas.
-async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId }) {
+// CENTAVOS (Onda 2): o valor de uma compra é o TOTAL DO DOCUMENTO quando ele existe (nota lida,
+// pendência). Custo unitário = total ÷ quantidade com 4 casas — é REFERÊNCIA, não a fonte do total:
+// R$ 1,00 em 600 un dá 0,0017/un e 0,0017 × 600 = R$ 1,02 (acréscimo); em 900 un, R$ 0,99 (perda).
+// Sem documento, total = custo × quantidade, arredondado a centavos.
+function valorDaCompra({ custoUnit, qtd, valorDocumento = null }) {
+  const doc = Number(valorDocumento);
+  if (Number.isFinite(doc) && doc > 0) return Math.round(doc * 100) / 100;
+  return Math.round(Number(custoUnit) * Number(qtd) * 100) / 100;
+}
+const custoUnitarioDoDocumento = (valorDocumento, qtd) => Number((Number(valorDocumento) / Number(qtd)).toFixed(4));
+
+async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId, valorDocumento = null }) {
   try {
-    const v = Number((Number(custoUnit) * Number(qtd)).toFixed(2));
+    const v = valorDaCompra({ custoUnit, qtd, valorDocumento });
     if (!v || v <= 0) return { ok: true, erro: null, aviso: null };  // sem preço real não polui as Contas
     const cat = produto.categoria || '';
     if (/^qa robo/i.test(cat)) return { ok: true, erro: null, aviso: null };  // produtos de teste do robô ficam fora
@@ -6199,10 +6210,13 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
       }
       if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
       const custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
+      // Total da linha da nota (centavos) quando o preço veio dela — ver valorDaCompra().
+      const valorDocNota = custoNovo !== null && item.valor_total > 0 ? item.valor_total : null;
+      const valorNota = valorDaCompra({ custoUnit, qtd: item.qtd, valorDocumento: valorDocNota });
       const { data: movNota, error: errMovNota } = await supabase.from('movimentacoes').insert({
         produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
         tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
-        custo: custoUnit, valor: Number((custoUnit * item.qtd).toFixed(2)),
+        custo: custoUnit, valor: valorNota,
         motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
         qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
       }).select('id').single();
@@ -6217,8 +6231,8 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
         continue;
       }
       const custoAntes = Number(item.produto.custo || 0);
-      const rc = await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id });
-      if (!rc.ok) semContas.push(`${item.produto.nome} — ${fmtBRL(Number((custoUnit * item.qtd).toFixed(2)))}`);
+      const rc = await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id, valorDocumento: valorDocNota });
+      if (!rc.ok) semContas.push(`${item.produto.nome} — ${fmtBRL(valorNota)}`);
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
         convertido: item.convertido,   // "2 cx de 24 → 48 un" fica visível na resposta
         custo_antes: custoAntes, custo_novo: custoNovo !== null && Math.abs(custoNovo - custoAntes) >= 0.01 ? custoNovo : null });
@@ -6433,8 +6447,11 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   // Custo: usa o informado pelo usuário; senão o preço da nota (valor_total ÷ qtd final).
   const custoInformado = parsePositiveNumber(req.body?.custo);
   const vtPend = Number(pend.valor_total);
-  const custoNovo = custoInformado !== null ? custoInformado
-    : (Number.isFinite(vtPend) && vtPend > 0 ? Number((vtPend / qtd).toFixed(4)) : null);
+  const temDocPend = Number.isFinite(vtPend) && vtPend > 0;
+  // Preço da nota (ou o sugerido pela tela sem alteração): o total é o da NOTA, em centavos.
+  const usaDocPend = temDocPend && (custoInformado === null || Math.abs(custoInformado - vtPend / qtd) < 0.005);
+  const custoNovo = usaDocPend ? custoUnitarioDoDocumento(vtPend, qtd) : custoInformado;
+  const valorDocPend = usaDocPend ? vtPend : null;
   // Mesmas travas do lançamento pela tela: quantidade fora do razoável e preço muito diferente
   // do cadastro precisam de confirmação de gerente/admin (antes passavam direto e iam às Contas).
   const podeForcarPend = !!req.body?.forcar && PODE_CONFIRMAR(req.user);
@@ -6463,7 +6480,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   const { data: movPend, error: movErr } = await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
     tipo: 'Entrada', qtd, unidade: prod.unidade,
-    custo: custoUnit, valor: Number((custoUnit * qtd).toFixed(2)),
+    custo: custoUnit, valor: valorDaCompra({ custoUnit, qtd, valorDocumento: valorDocPend }),
     motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
     qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
   }).select('id').single();
@@ -6473,7 +6490,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
-  const rcPend = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id });
+  const rcPend = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id, valorDocumento: valorDocPend });
   // Status que não sobe = pendência volta pra lista = item entra no estoque duas vezes.
   const { error: errStatusPend } = await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
   if (errStatusPend) await logErroAgenda('nota-pendencia-status', errStatusPend, req.user);
@@ -6498,7 +6515,11 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   if (qtd <= 0) return res.status(400).json({ erro: 'Quantidade inválida.' });
   let custo = parseNonNegativeNumber(req.body?.custo ?? 0) ?? 0;
   // Sem custo informado: usa o preço da própria nota (valor_total ÷ qtd).
-  if (!custo) { const vtP = Number(pend.valor_total); if (Number.isFinite(vtP) && vtP > 0) custo = Number((vtP / qtd).toFixed(4)); }
+  // Preço da nota (ou o sugerido sem alteração): total = o da NOTA, em centavos (ver valorDaCompra).
+  const vtP = Number(pend.valor_total);
+  const usaDocNovo = Number.isFinite(vtP) && vtP > 0 && (!custo || Math.abs(custo - vtP / qtd) < 0.005);
+  if (usaDocNovo) custo = custoUnitarioDoDocumento(vtP, qtd);
+  const valorDocNovo = usaDocNovo ? vtP : null;
 
   // Cria o produto já com a quantidade da nota (é a primeira entrada).
   const { data: novo, error } = await supabase.from('produtos').insert({
@@ -6513,11 +6534,11 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   const { data: movNovo } = await supabase.from('movimentacoes').insert({
     produto_id: novo.id, produto_nome: novo.nome, categoria: novo.categoria,
     tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
-    valor: Number((custo * qtd).toFixed(2)), motivo: 'Compra',
+    valor: valorDaCompra({ custoUnit: custo, qtd, valorDocumento: valorDocNovo }), motivo: 'Compra',
     responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
     qtd_antes: 0, qtd_depois: qtd, // produto criado agora: 0 → primeira entrada
   }).select('id').single();
-  const rcNovo = await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id });
+  const rcNovo = await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id, valorDocumento: valorDocNovo });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
