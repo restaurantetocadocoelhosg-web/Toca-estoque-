@@ -1377,7 +1377,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }, req.user, getClientIp(req));
   let avisoContas = null;
   if (tipo === 'Entrada' && motivo === 'Compra') {
-    const rc = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movInsId });
+    const rc = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movInsId, data: quando.retroativo ? dataISOFromTimestampSP(quando.ts) : null });
     avisoContas = rc.aviso;
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
@@ -2164,7 +2164,8 @@ function valorDaCompra({ custoUnit, qtd, valorDocumento = null }) {
 }
 const custoUnitarioDoDocumento = (valorDocumento, qtd) => Number((Number(valorDocumento) / Number(qtd)).toFixed(4));
 
-async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId, valorDocumento = null }) {
+// R2: `data` = dia do lançamento (compra retroativa entra em Contas no MESMO dia, não hoje).
+async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs, movId, valorDocumento = null, data = null }) {
   try {
     const v = valorDaCompra({ custoUnit, qtd, valorDocumento });
     if (!v || v <= 0) return { ok: true, erro: null, aviso: null };  // sem preço real não polui as Contas
@@ -2173,7 +2174,7 @@ async function lancarCompraNasContas({ produto, qtd, custoUnit, responsavel, obs
     let [grupo, conta] = MAPA_CONTA_COMPRA[cat] || CONTA_COMPRA_FALLBACK;
     if (grupo === 'CMV Bebidas') conta = contaBebida(produto.nome);
     const r = await inserirPagamentos({
-      data: dateSP(), grupo, categoria: conta, forma: 'compra_estoque',
+      data: data || dateSP(), grupo, categoria: conta, forma: 'compra_estoque',
       valor_bruto: v, taxa: 0, valor_liquido: v, parcelas: 0,
       descricao: sanitizeText(`Compra estoque: ${produto.nome} × ${qtd}${obs ? ' — ' + obs : ''}`, 180),
       origem: 'estoque-auto', responsavel: responsavel || 'estoque',
