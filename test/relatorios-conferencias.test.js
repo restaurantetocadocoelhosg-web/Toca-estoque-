@@ -128,3 +128,18 @@ test('Dinheiro — "1.500" digitado vale 1.500 também na tela (moneyFromText)',
   assert.equal(parse('12.50'), 12.5, 'formato do moneyInputValue segue decimal');
   assert.equal(parse(Number(1500).toFixed(2)), 1500);
 });
+
+test('F6 — consumo da média usa os MESMOS meses do divisor (só meses com contas)', async () => {
+  // Julho/2026: só consumo (sem contas). Agosto/2026: venda 1000, conta 100, consumo 300.
+  const id = await ctx.criarProduto({ nome: 'F6 produto', qtd: 0, categoria: 'F6' });
+  await ctx.db.query(`insert into movimentacoes (produto_id, produto_nome, categoria, tipo, qtd, unidade, valor, motivo, created_at, tenant_id) values
+    ($1, 'F6 produto', 'F6', 'Saída', 1, 'un', 900, 'Produção', '2026-07-15T12:00:00-03:00', 1),
+    ($1, 'F6 produto', 'F6', 'Saída', 1, 'un', 300, 'Produção', '2026-08-15T12:00:00-03:00', 1)`, [id]);
+  await ctx.db.query(`insert into fechamentos_diarios (data, vendas, tenant_id) values ('2026-07-15', 1000, 1), ('2026-08-15', 1000, 1)`);
+  await ctx.db.query(`insert into pagamentos_comprovantes (data, valor_bruto, grupo, categoria, origem, tenant_id) values ('2026-08-10', 100, 'Outras Despesas', 'Teste', 'manual', 1)`);
+  const r = await ctx.api('admin', 'GET', '/api/indices?mes=2026-08');
+  assert.equal(r.status, 200, JSON.stringify(r.json).slice(0, 300));
+  assert.deepEqual(r.json.janela.meses_com_custo, ['2026-08']);
+  assert.equal(r.json.janela.situacao, 'parcial');
+  assert.equal(r.json.consumo_estoque.valor_janela, 300, 'julho (sem contas) não pode entrar no consumo da média');
+});

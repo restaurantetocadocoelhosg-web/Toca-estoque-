@@ -3553,12 +3553,16 @@ async function montarIndices(mesParam) {
   // Consumo real do estoque: o CMV que de fato saiu pra cozinha. Serve de contraprova
   // do CMV por compras — os dois deveriam convergir; enquanto não convergem, o CMV
   // verdadeiro está do lado do consumo.
+  // F6: o consumo da janela soma SÓ os meses do divisor (mesesJanela). Antes somava os 3 meses
+  // inteiros e dividia pela venda só dos meses com contas: o % da média saía inflado.
+  const mesesDoDivisor = new Set(mesesJanela);
   let consumoMes = 0, consumoJanela = 0;
   for (const mv of movimentos) {
     if (mv.tipo !== 'Saída') continue;
     const v = Number(mv.valor || 0);
-    consumoJanela += v;
-    if (dataISOFromTimestampSP(mv.created_at).slice(0, 7) === mes) consumoMes += v;
+    const mMov = dataISOFromTimestampSP(mv.created_at).slice(0, 7);
+    if (mesesDoDivisor.has(mMov)) consumoJanela += v;
+    if (mMov === mes) consumoMes += v;
   }
 
   const zero = () => ({ mes: 0, janela: 0, n_mes: 0, n_janela: 0 });
@@ -3632,7 +3636,11 @@ async function montarIndices(mesParam) {
       meses_com_custo: mesesJanela,
       n_meses: nMeses,
       completa: mesesComCusto.length >= MESES_JANELA,
+      // completa: 3 meses com contas · parcial: 1-2 · nao_calculavel: nenhum mês com contas
+      // (a "média" seria só o próprio mês, sem custo lançado — não serve para decidir).
+      situacao: mesesComCusto.length >= MESES_JANELA ? 'completa' : mesesComCusto.length ? 'parcial' : 'nao_calculavel',
       aviso: mesesComCusto.length >= MESES_JANELA ? null
+        : !mesesComCusto.length ? 'Nenhum dos últimos 3 meses tem contas lançadas: a média não pode ser calculada. Os percentuais da média mostram só o mês.'
         : `A média cobre ${nMeses} ${nMeses === 1 ? 'mês' : 'meses'} de contas lançadas, não ${MESES_JANELA}. Item comprado em lote (gás, óleo, descartável) distorce mês isolado — o percentual só estabiliza com a janela cheia.`,
     },
     vendas_mes: vendasMes,
