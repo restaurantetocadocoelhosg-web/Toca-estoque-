@@ -31,15 +31,25 @@ async function subirApp() {
   const servidor = await new Promise((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const base = `http://127.0.0.1:${servidor.address().port}`;
 
-  async function api(role, metodo, caminho, corpo) {
+  async function apiToken(token, metodo, caminho, corpo) {
     const r = await fetch(base + caminho, {
       method: metodo,
-      headers: { authorization: `Bearer ${tokens[role]}`, 'content-type': 'application/json' },
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), 'content-type': 'application/json' },
       body: corpo === undefined ? undefined : JSON.stringify(corpo),
     });
     let json = null;
     try { json = await r.json(); } catch { /* sem corpo */ }
     return { status: r.status, json };
+  }
+  const api = (role, metodo, caminho, corpo) => apiToken(tokens[role], metodo, caminho, corpo);
+
+  // Mais uma sessão aberta para o usuário do papel (ex.: "outro aparelho").
+  async function novaSessao(role) {
+    const { rows: [u] } = await amb.db.query('select id from users where username = $1', [`teste_${role}`]);
+    const token = crypto.randomBytes(24).toString('hex');
+    await amb.db.query(`insert into sessions (token, user_id, username, nome, role, last_activity) values ($1, $2, $3, $4, $5, now())`,
+      [token, u.id, `teste_${role}`, `Teste ${role}`, role]);
+    return { token, userId: u.id };
   }
 
   async function criarProduto({ nome = 'Produto Teste', unidade = 'un', qtd = 0, custo = 1, categoria = 'Teste' } = {}) {
@@ -52,7 +62,7 @@ async function subirApp() {
   const movimentos = async (id) => (await amb.db.query('select * from movimentacoes where produto_id = $1 order by id', [id])).rows;
 
   return {
-    base, api, db: amb.db, novaConexao: amb.novaConexao, criarProduto, saldo, movimentos,
+    base, api, apiToken, novaSessao, db: amb.db, novaConexao: amb.novaConexao, criarProduto, saldo, movimentos,
     async parar() { await new Promise((r) => servidor.close(r)); await amb.parar(); },
   };
 }

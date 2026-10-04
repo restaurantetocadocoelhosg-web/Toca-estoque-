@@ -2416,7 +2416,7 @@ async function loadAlertas() {
           const diasTxt = a.dias_parado !== null ? `${a.dias_parado} dias sem mov.` : 'Sem histórico';
           const ultTxt = a.ultimo_movimento ? 'último: ' + new Date(String(a.ultimo_movimento).trim().replace(' ','T')).toLocaleDateString('pt-BR') + (a.ultimo_responsavel ? ' (' + a.ultimo_responsavel + ')' : '') : 'Nunca movimentado';
           html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${urgColors[urg]}">`;
-          html += `<div><div style="font-size:13px;font-weight:600">${a.nome}</div><div style="font-size:11px;color:var(--muted)">${a.categoria} | ${a.qtd} ${a.unidade} | limite: ${a.threshold_dias}d</div><div style="font-size:10px;color:var(--muted);margin-top:2px">${ultTxt}</div></div>`;
+          html += `<div><div style="font-size:13px;font-weight:600">${escapeHtml(a.nome)}</div><div style="font-size:11px;color:var(--muted)">${escapeHtml(a.categoria)} | ${a.qtd} ${escapeHtml(a.unidade)} | limite: ${a.threshold_dias}d</div><div style="font-size:10px;color:var(--muted);margin-top:2px">${escapeHtml(ultTxt)}</div></div>`;
           html += `<div style="font-size:12px;font-weight:700;color:${urgColors[urg]};text-align:right;flex-shrink:0;margin-left:8px">${diasTxt}</div>`;
           html += `</div>`;
         }
@@ -2439,7 +2439,7 @@ async function loadAlertas() {
         const cor = f.classe === 'sumico' ? '#e85d26' : '#b8860b';
         const acao = f.classe === 'desync' ? `<button onclick="reconciliarFantasma(${f.produto_id})" style="margin-top:6px;font-size:10px;font-weight:700;border:none;background:#b8860b;color:#fff;padding:4px 8px;border-radius:6px;cursor:pointer">✓ reconciliar</button>` : '';
         fhtml += `<div style="display:flex;justify-content:space-between;align-items:flex-start;padding:10px 12px;background:var(--s1);border-radius:8px;margin-bottom:6px;border-left:3px solid ${cor}">`;
-        fhtml += `<div style="flex:1"><div style="font-size:13px;font-weight:600">${f.nome}</div><div style="font-size:11px;color:var(--muted)">${f.categoria} | entrada: ${f.total_entradas} ${f.unidade} | saída: ${f.total_saidas} ${f.unidade}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${f.explica}</div><div style="font-size:10px;color:var(--muted);margin-top:2px">último: ${ultTxt}</div></div>`;
+        fhtml += `<div style="flex:1"><div style="font-size:13px;font-weight:600">${escapeHtml(f.nome)}</div><div style="font-size:11px;color:var(--muted)">${escapeHtml(f.categoria)} | entrada: ${f.total_entradas} ${escapeHtml(f.unidade)} | saída: ${f.total_saidas} ${escapeHtml(f.unidade)}</div><div style="font-size:10px;color:var(--muted);margin-top:3px">${escapeHtml(f.explica)}</div><div style="font-size:10px;color:var(--muted);margin-top:2px">último: ${escapeHtml(ultTxt)}</div></div>`;
         fhtml += `<div style="text-align:right;flex-shrink:0;margin-left:8px"><div style="font-size:11px;font-weight:700;color:${cor}">${f.label}</div>${acao}</div>`;
         fhtml += `</div>`;
       }
@@ -2627,7 +2627,7 @@ function renderCupomItens() {
         </div>
         ${item.via_sinonimo ? `<div style="font-size:11px;color:var(--green);margin-top:4px">✓ Reconhecido por sinônimo salvo</div>`
           : item.produto ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
-              <button class="btn-sm" onclick="salvarSinonimoCupom('${escapeHtml(item.nome_cupom)}','${escapeHtml(item.produto.nome)}')">💾 Memorizar</button>
+              <button class="btn-sm" onclick="salvarSinonimoCupom(${jsArg(item.nome_cupom)},${jsArg(item.produto.nome)})">💾 Memorizar</button>
               <button class="btn-sm" onclick="abrirProdModal(${idx}, 'buscar')">🔄 Trocar item</button>
               <button class="btn-sm" onclick="abrirProdModal(${idx}, 'cadastrar')">➕ Item novo</button>
             </div>`
@@ -3485,7 +3485,8 @@ function pendPick(id, val) {
   else st.produtoId = val;
   loadPendencias();
 }
-async function criarProdutoPendencia(id) {
+function criarProdutoPendencia(id) { return umaVezPorVez('pendencia-' + id, () => criarProdutoPendenciaAgora(id)); }
+async function criarProdutoPendenciaAgora(id) {
   const nome = (document.getElementById('pc-nome-' + id).value || '').trim();
   const categoria = (document.getElementById('pc-cat-' + id).value || '').trim();
   const unidade = document.getElementById('pc-uni-' + id).value;
@@ -3495,7 +3496,7 @@ async function criarProdutoPendencia(id) {
   if (!qtd || qtd <= 0) { toast('Quantidade inválida.', 'err'); return; }
   const memo = document.getElementById('pc-memo-' + id);
   const custoEl = document.getElementById('pc-custo-' + id);
-  const custo = custoEl ? Number(String(custoEl.value).replace(',', '.')) : null;
+  const custo = custoEl ? moneyFromText(custoEl.value) : null;
   try {
     const r = await apiPost(`/api/pendencias/${id}/criar-produto`, { nome, categoria, unidade, qtd, memorizar: memo ? memo.checked : true, ...(custo > 0 ? { custo } : {}) });
     toast(`✅ ${r.produto} cadastrado: +${fmt(r.qtd)} ${unidade}`, 'ok');
@@ -3524,7 +3525,8 @@ function pendPickSearch(id, produtoId) {
   const box = document.getElementById('pc-res-' + id);
   if (box) box.querySelectorAll('.pc-res').forEach(el => el.classList.toggle('sel', el.getAttribute('data-pid') === String(produtoId)));
 }
-async function resolverPendencia(id) {
+function resolverPendencia(id) { return umaVezPorVez('pendencia-' + id, () => resolverPendenciaAgora(id)); }
+async function resolverPendenciaAgora(id) {
   const st = pendState[id] || {};
   if (!st.produtoId) { toast('Escolha o produto certo primeiro.', 'err'); return; }
   const memo = document.getElementById('pc-memo-' + id);
@@ -3532,7 +3534,7 @@ async function resolverPendencia(id) {
   const qtd = qtdEl ? Number(String(qtdEl.value).replace(',', '.')) : null;
   if (qtdEl && (!qtd || qtd <= 0)) { toast('Quantidade inválida.', 'err'); return; }
   const custoEl = document.getElementById('pc-custo-' + id);
-  const custo = custoEl ? Number(String(custoEl.value).replace(',', '.')) : null;
+  const custo = custoEl ? moneyFromText(custoEl.value) : null;
   try {
     const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd, ...(custo > 0 ? { custo } : {}) });
     toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})${r.custo_aplicado > 0 ? ` · R$ ${Number(r.custo_aplicado).toFixed(2)}/un` : ''}`, 'ok');
@@ -3542,7 +3544,8 @@ async function resolverPendencia(id) {
     await loadHist();
   } catch(e) { handleApiError(e, true); }
 }
-async function ignorarPendencia(id) {
+function ignorarPendencia(id) { return umaVezPorVez('pendencia-' + id, () => ignorarPendenciaAgora(id)); }
+async function ignorarPendenciaAgora(id) {
   try {
     await apiPost(`/api/pendencias/${id}/ignorar`, {});
     delete pendState[id];
@@ -3606,7 +3609,9 @@ function moneyFromText(value) {
   if (value === null || value === undefined) return 0;
   let s = String(value).trim().replace(/[R$\s]/g, '');
   if (!s) return 0;
-  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  // "1.500" sem vírgula = milhar brasileiro (era 1,50). "12.50" (2 casas) segue decimal: formato do toFixed(2).
+  if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  else if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
   else if (s.includes(',')) s = s.replace(',', '.');
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
@@ -6394,7 +6399,17 @@ function histDelCancel(id) {
   document.getElementById(`hist-confirm-${id}`).style.display = 'none';
   document.getElementById(`del1-${id}`).style.display = '';
 }
-async function histDelConfirm(id) {
+// Contenção de clique repetido: a mesma ação no mesmo item não sai duas vezes enquanto a
+// primeira não voltar (duplo toque no celular cancelava/resolvia duas vezes).
+const acoesEmAndamento = new Set();
+async function umaVezPorVez(chave, fn) {
+  if (acoesEmAndamento.has(chave)) return;
+  acoesEmAndamento.add(chave);
+  try { return await fn(); } finally { acoesEmAndamento.delete(chave); }
+}
+
+function histDelConfirm(id) { return umaVezPorVez('cancelar-' + id, () => histDelConfirmAgora(id)); }
+async function histDelConfirmAgora(id) {
   try {
     const res = await fetch(API + `/api/movimentacoes/${id}`, { method: 'DELETE', headers: authHeaders() });
     const data = await res.json();
@@ -6653,6 +6668,13 @@ function escapeHtml(value) {
   return String(value??'').replace(/[&<>'"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 }
 
+// Texto livre como ARGUMENTO de onclick="fn(...)". escapeHtml sozinho não basta: o navegador
+// desfaz &#39; antes de rodar o JS e um nome com aspa saía da string (XSS). Aqui vira literal JS
+// completo (com as próprias aspas) e só depois é escapado para o atributo. Uso: onclick="fn(${jsArg(x)})"
+function jsArg(value) {
+  return escapeHtml(JSON.stringify(String(value ?? '')));
+}
+
 // ==================== ADMIN: USUÁRIOS ====================
 async function importarSinonimos(input) {
   const file = input.files[0];
@@ -6699,8 +6721,8 @@ async function loadUsers() {
             <div class="user-meta">@${escapeHtml(u.username)} · ${u.active ? 'Ativo' : 'Inativo'}</div>
           </div>
           <div class="user-actions">
-            <button class="btn-sm" onclick="renomearUser(${u.id}, '${escapeHtml(u.nome)}', '${escapeHtml(u.username)}')">✏️ Renomear</button>
-            <button class="btn-sm" onclick="resetSenha(${u.id}, '${escapeHtml(u.username)}')">🔑 Senha</button>
+            <button class="btn-sm" onclick="renomearUser(${u.id}, ${jsArg(u.nome)}, ${jsArg(u.username)})">✏️ Renomear</button>
+            <button class="btn-sm" onclick="resetSenha(${u.id}, ${jsArg(u.username)})">🔑 Senha</button>
             <button class="btn-sm ${u.active ? 'danger' : 'success'}" onclick="toggleUser(${u.id}, ${u.active})">${u.active ? 'Desativar' : 'Ativar'}</button>
           </div>
         </div>
@@ -6777,7 +6799,7 @@ async function buscaSinProd(q) {
     const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
     const ac = document.getElementById('sin-ac');
     if (!items.length) { ac.classList.remove('open'); return; }
-    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="selSinProd('${escapeHtml(p.nome)}')">${escapeHtml(p.nome)}</div>`).join('');
+    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="selSinProd(${jsArg(p.nome)})">${escapeHtml(p.nome)}</div>`).join('');
     ac.classList.add('open');
   } catch(e) {}
 }
@@ -6835,8 +6857,8 @@ async function loadCatsAdmin() {
     el.innerHTML = cats.map(c => `
       <div class="sin-row">
         <span class="sin-prod" style="flex:1">${escapeHtml(c)}</span>
-        <button class="btn-sm" onclick="renomearCategoria('${escapeHtml(c)}')">✏️</button>
-        <button class="btn-sm danger" onclick="excluirCategoria('${escapeHtml(c)}')">✕</button>
+        <button class="btn-sm" onclick="renomearCategoria(${jsArg(c)})">✏️</button>
+        <button class="btn-sm danger" onclick="excluirCategoria(${jsArg(c)})">✕</button>
       </div>`).join('');
   } catch(e) {}
 }
@@ -6882,7 +6904,7 @@ async function buscaGrupoProd(q) {
   try {
     const items = await api(`/api/produtos/buscar?q=${encodeURIComponent(q)}`);
     if (!items.length) { ac.classList.remove('open'); return; }
-    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="addGrupoProd(${p.id},'${escapeHtml(p.nome)}')">${escapeHtml(p.nome)} <span style="color:var(--muted);font-size:11px">${escapeHtml(p.codigo||'')}</span></div>`).join('');
+    ac.innerHTML = items.map(p => `<div class="ac-item" onmousedown="addGrupoProd(${p.id},${jsArg(p.nome)})">${escapeHtml(p.nome)} <span style="color:var(--muted);font-size:11px">${escapeHtml(p.codigo||'')}</span></div>`).join('');
     ac.classList.add('open');
   } catch(e) {}
 }
@@ -6923,7 +6945,7 @@ async function loadGrupos() {
       <div style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:10px">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <b style="font-size:13px">🔄 ${escapeHtml(g.nome)}</b>
-          <button class="btn-sm danger" onclick="excluirGrupo('${escapeHtml(g.nome)}')">🗑️ Desfazer grupo</button>
+          <button class="btn-sm danger" onclick="excluirGrupo(${jsArg(g.nome)})">🗑️ Desfazer grupo</button>
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           ${g.produtos.map(p => `<span style="font-size:12px;padding:4px 9px;border-radius:11px;background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3)">${escapeHtml(p.nome)} <span style="color:var(--muted)">(${p.qtd} ${escapeHtml(p.unidade||'')})</span> <b style="cursor:pointer" title="Tirar do grupo" onclick="removerDoGrupo(${p.id})">✕</b></span>`).join('')}
@@ -7203,7 +7225,7 @@ async function modalBuscaCat(q) {
     const ac = document.getElementById('modal-cat-ac');
     if (!filtradas.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = filtradas.map(c =>
-      `<div class="ac-item" onmousedown="document.getElementById('modal-cat').value='${escapeHtml(c)}';document.getElementById('modal-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
+      `<div class="ac-item" onmousedown="document.getElementById('modal-cat').value=${jsArg(c)};document.getElementById('modal-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
     ).join('');
     ac.classList.add('open');
   } catch(e) {}
@@ -7468,7 +7490,7 @@ async function peditBuscaCat(q) {
     const ac = document.getElementById('pedit-cat-ac');
     if (!filtradas.length) { ac.classList.remove('open'); return; }
     ac.innerHTML = filtradas.map(c =>
-      `<div class="ac-item" onmousedown="document.getElementById('pedit-cat').value='${escapeHtml(c)}';document.getElementById('pedit-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
+      `<div class="ac-item" onmousedown="document.getElementById('pedit-cat').value=${jsArg(c)};document.getElementById('pedit-cat-ac').classList.remove('open')">${escapeHtml(c)}</div>`
     ).join('');
     ac.classList.add('open');
   } catch(e) {}

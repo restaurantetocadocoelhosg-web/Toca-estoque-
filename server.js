@@ -204,6 +204,35 @@ function custoSuspeito(custoAtual, custoNovo) {
   };
 }
 
+// Quem pode fazer Ajuste e confirmar alertas ("forcar"). Vale para REST, IA e lote.
+const PODE_CONFIRMAR = (user) => !!user && ['admin', 'gerente'].includes(user.role);
+
+// Travas que o assistente IA precisa ter IGUAIS às do REST (/api/movimentacoes). A IA não tem
+// "confirmar mesmo assim": quando a trava dispara, a resposta manda lançar pela tela.
+async function travaIaLancamento({ prod, tipo, qtd, custoInformado, user }) {
+  if (tipo === 'Ajuste' && !PODE_CONFIRMAR(user)) return 'Ajuste de estoque é só para gerente ou admin.';
+  if (tipo === 'Ajuste') {
+    const corte = new Date(Date.now() - 6 * 3600000).toISOString();
+    const { data: recentes, error } = await supabase.from('movimentacoes').select('id').eq('produto_id', prod.id)
+      .in('tipo', ['Entrada', 'Saída', 'Perda']).gte('created_at', corte).limit(1);
+    if (error) return 'Não consegui conferir as movimentações recentes. Faça o ajuste pela tela.';
+    if (recentes && recentes.length) return `${prod.nome} teve movimentação nas últimas 6 horas: o ajuste pode apagar esses lançamentos. Faça pela tela de Lançar, que pede confirmação.`;
+  }
+  if ((tipo === 'Saída' || tipo === 'Perda') && !PODE_CONFIRMAR(user)) {
+    const { data: hist, error } = await supabase.from('movimentacoes').select('qtd').eq('produto_id', prod.id)
+      .in('tipo', ['Saída', 'Perda']).gte('created_at', dateAgoDias(30) + 'T00:00:00-03:00');
+    if (error) return 'Não consegui conferir o consumo médio. Lance pela tela.';
+    const media = (hist || []).reduce((s, m) => s + Number(m.qtd), 0) / 30;
+    if (hist && hist.length >= 5 && media > 0 && qtd > media * 3)
+      return `Quantidade ${qtd} ${prod.unidade} é ${(qtd / media).toFixed(1)}× a média diária. Peça para um gerente ou admin lançar.`;
+  }
+  if (tipo === 'Entrada' && custoInformado !== null) {
+    const salto = custoSuspeito(prod.custo, custoInformado);
+    if (salto) return `${prod.nome}: ${salto.msg}. Lance pela tela para confirmar o preço.`;
+  }
+  return null;
+}
+
 // No multi-restaurante, o que era único no sistema passa a ser único POR RESTAURANTE.
 // Todo upsert precisa refletir isso na chave de conflito, senão o Postgres reclama
 // ("no unique constraint matching the ON CONFLICT specification") ou — pior — dois
@@ -286,6 +315,21 @@ async function touchSession(token) {
   }
 }
 
+// Derruba as sessões de um usuário (senha trocada, conta desativada). `exceto` mantém a sessão
+// de quem acabou de trocar a própria senha.
+async function encerrarSessoesDoUsuario(userId, exceto = null) {
+  if (useSupabaseSessions) {
+    let q = supabase.from('sessions').delete().eq('user_id', userId);
+    if (exceto) q = q.neq('token', exceto);
+    const { error } = await q;
+    if (error) throw new Error(`não consegui encerrar as sessões: ${error.message}`);
+    return;
+  }
+  for (const [token, s] of memSessions.entries()) {
+    if (String(s.user_id) === String(userId) && token !== exceto) memSessions.delete(token);
+  }
+}
+
 async function deleteSession(token) {
   if (useSupabaseSessions) {
     await supabase.from('sessions').delete().eq('token', token);
@@ -364,13 +408,23 @@ function requireRole(...roles) {
   };
 }
 
-async function permsDoRequest(req) {
-  let permsCol = null;
-  if (req.user && req.user.role !== 'admin') {
-    try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
+// Liberações efetivas do usuário. FALHA FECHADA: se a leitura der erro, nada liberado.
+// Antes o erro virava "sem liberação gravada" e o usuário caía no padrão do papel — ganhando
+// de volta, numa falha do banco, o que o admin tinha bloqueado para ele.
+const NADA_LIBERADO = () => Object.fromEntries(PERM_KEYS.map(k => [k, false]));
+async function permsDoUsuario(user) {
+  if (!user) return NADA_LIBERADO();
+  if (user.role === 'admin') return permsEfetivas('admin', null);
+  try {
+    const { data: u, error } = await supabase.from('users').select('permissoes').eq('id', user.id).single();
+    if (error || !u) return NADA_LIBERADO();
+    return permsEfetivas(user.role, u.permissoes);
+  } catch (e) {
+    console.error('permissoes:', e.message);
+    return NADA_LIBERADO();
   }
-  return permsEfetivas(req.user ? req.user.role : null, permsCol);
 }
+const permsDoRequest = (req) => permsDoUsuario(req.user);
 
 async function usuarioTemPerm(req, key) {
   if (!req.user) return false; // sem usuário logado nunca acessa .role (evita crash de req.user undefined)
@@ -521,9 +575,7 @@ app.post('/api/logout', auth, async (req, res) => {
 });
 
 app.get('/api/me', auth, async (req, res) => {
-  let permsCol = null;
-  try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', req.user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
-  const perms = permsEfetivas(req.user.role, permsCol);
+  const perms = await permsDoUsuario(req.user);
   res.json({
     user: { id: req.user.id, username: req.user.username, nome: req.user.nome, role: req.user.role },
     permissions: {
@@ -553,7 +605,10 @@ app.post('/api/change-password', auth, async (req, res) => {
   const { data: user } = await supabase.from('users').select('*').eq('id', req.user.id).single();
   if (!verifyPassword(current, user.password_hash)) return res.status(400).json({ erro: 'Senha atual incorreta.' });
   if (next.length < 6) return res.status(400).json({ erro: 'A nova senha precisa ter pelo menos 6 caracteres.' });
-  await supabase.from('users').update({ password_hash: hashPassword(next) }).eq('id', req.user.id);
+  const { error: errSenha } = await supabase.from('users').update({ password_hash: hashPassword(next) }).eq('id', req.user.id);
+  if (errSenha) return res.status(500).json({ erro: 'Não consegui salvar a nova senha. Tente de novo.' });
+  // Senha trocada: quem tinha a senha antiga (outro aparelho, credencial vazada) cai agora.
+  try { await encerrarSessoesDoUsuario(req.user.id, req.token); } catch (e) { console.error('change-password:', e.message); }
   await audit('change_password', {}, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -1064,6 +1119,10 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
 
   if ((!produto_id && !produto_nome) || !['Entrada', 'Saída', 'Perda', 'Ajuste'].includes(tipo))
     return res.status(400).json({ erro: 'Produto e tipo válidos são obrigatórios.' });
+  // Ajuste define o saldo absoluto: só gerente/admin (operador fez 0 ajustes em 60 dias até 03/10/2026).
+  if (tipo === 'Ajuste' && !PODE_CONFIRMAR(req.user)) return res.status(403).json({ erro: 'Ajuste de estoque é só para gerente ou admin.' });
+  // "Confirmar mesmo assim" (forcar) só vale para gerente/admin: o operador não confirma o próprio alerta.
+  const podeForcar = !!req.body?.forcar && PODE_CONFIRMAR(req.user);
 
   // Ajuste retroativo fica de fora de propósito: Ajuste define o saldo ABSOLUTO do produto, e
   // "o saldo de ontem" aplicado hoje apaga em silêncio tudo que se movimentou nesse meio-tempo.
@@ -1109,7 +1168,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   // Trava de contagem desatualizada: Ajuste em produto que se movimentou há pouco.
   // A causa nº1 de "produto que volta": contagem feita ANTES das saídas da noite,
   // digitada depois — o ajuste apaga as saídas. Avisa e pede confirmação (forcar).
-  if (tipo === 'Ajuste' && !req.body.forcar) {
+  if (tipo === 'Ajuste' && !podeForcar) {
     const corte = new Date(Date.now() - 6 * 3600000).toISOString();
     const { data: recentes } = await supabase.from('movimentacoes')
       .select('tipo, qtd, unidade, responsavel, created_at').eq('produto_id', prod.id)
@@ -1146,7 +1205,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
             media_diaria: Number(mediaDiaria.toFixed(2)), qtd_lancada: qtd, unidade: prod.unidade,
             msg: `Quantidade ${qtd} ${prod.unidade} é ${(qtd/mediaDiaria).toFixed(1)}× acima da média diária (${mediaDiaria.toFixed(1)} ${prod.unidade}). Peça pra um gerente ou admin lançar esse item.`
           });
-        } else if (!req.body.forcar) {
+        } else if (!podeForcar) {
           req.body.obs = (req.body.obs ? req.body.obs + ' | ' : '') +
             `⚠️ Anomalia: ${qtd} ${prod.unidade} = ${(qtd/mediaDiaria).toFixed(1)}× média diária`;
           obs = sanitizeText(req.body.obs, 200);
@@ -1171,7 +1230,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
       ? custoSuspeito(prodAtual.custo, custoBody) : null;
     // usa o mesmo `forcar` do alerta de quantidade: o app já sabe perguntar
     // "confirmar mesmo assim?" e reenviar — não precisa de um caminho novo na tela
-    if (saltoPreco && !req.body.forcar) {
+    if (saltoPreco && !podeForcar) {
       return res.status(409).json({
         alerta: true, codigo: 'PRECO_SUSPEITO',
         custo_atual: Number(prodAtual.custo), custo_informado: custoBody,
@@ -1558,11 +1617,23 @@ function parseMoneyNumber(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   let s = String(value).trim().replace(/[R$\s]/g, '');
   if (!s) return null;
-  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  // "1.500" / "12.000" / "1.500.000" sem vírgula = milhar brasileiro (era lido como 1,50).
+  // "1500.00" / "12.50" (2 casas) continuam decimais: é o formato que a tela grava (toFixed(2)).
+  if (/^-?\d{1,3}(\.\d{3})+$/.test(s)) s = s.replace(/\./g, '');
+  else if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
   else if (s.includes(',')) s = s.replace(',', '.');
   const n = Number(s);
   return Number.isFinite(n) ? n : null;
 }
+
+// Leitor de notas: número que veio da IA (às vezes "1,5", "2 un"). null se não der para ler.
+function lerNumeroNota(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const limpo = String(value ?? '').replace(/[^\d.,-]/g, '');
+  return limpo ? parseMoneyNumber(limpo) : null;
+}
+// Acima disso a linha da nota não entra sozinha: vai para conferência (erro de leitura é o mais provável).
+const LIMITES_NOTA = { qtd: 1000, embalagem: 200, gramatura_kg: 50 };
 
 function parseNonNegativeMoney(value) {
   const n = parseMoneyNumber(value);
@@ -4388,6 +4459,13 @@ app.post('/api/plataforma/restaurantes/:id/status', auth, requireSuperadmin, asy
   const { error } = await supabaseRaw.from('tenants')
     .update({ ativo, suspenso_em: ativo ? null : nowSP() }).eq('id', req.params.id);
   if (error) return res.status(500).json({ erro: 'Erro ao mudar o status.' });
+  // Suspenso: quem já estava logado cai agora (antes só o próximo login era barrado).
+  if (!ativo) {
+    const { data: us, error: errUs } = await supabaseRaw.from('users').select('id').eq('tenant_id', req.params.id);
+    if (errUs) return res.status(500).json({ erro: 'Restaurante suspenso, mas não consegui derrubar as sessões abertas. Tente de novo.' });
+    try { for (const u of us || []) await encerrarSessoesDoUsuario(u.id); }
+    catch (e) { return res.status(500).json({ erro: 'Restaurante suspenso, mas não consegui derrubar as sessões abertas. Tente de novo.' }); }
+  }
   res.json({ ok: true, ativo });
 });
 
@@ -5437,7 +5515,14 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
       const confiavel = via === 'apelido' || via === 'nome_exato' || via === 'forte';
       // Preço da nota: valor_total da linha ÷ qtd (já normalizada p/ unidade do produto,
       // ex. saco 25kg → qtd 25) = custo unitário REAL da compra. Mantém preço vivo.
-      let qtdItem = Number(item.qtd) || 1;
+      // Quantidade da IA: "1,5" virava 1 (Number("1,5") = NaN → 1) e -2 entrava como entrada
+      // negativa. Agora lê decimal brasileiro e, se vier inválida, negativa ou exagerada, o item
+      // NÃO é lançado no automático: vai para conferência com o motivo.
+      const qtdLida = lerNumeroNota(item.qtd);
+      let problemaQtd = null;
+      if (qtdLida === null || qtdLida <= 0) problemaQtd = `quantidade "${item.qtd}" inválida`;
+      else if (qtdLida > LIMITES_NOTA.qtd) problemaQtd = `quantidade ${qtdLida} acima do limite (${LIMITES_NOTA.qtd})`;
+      let qtdItem = problemaQtd ? 1 : qtdLida;
       const vt = Number(item.valor_total);
       const valorTotal = Number.isFinite(vt) && vt > 0 ? Number(vt.toFixed(2)) : null;
 
@@ -5446,7 +5531,10 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
       // e era esse o erro que inflou R$3.262 em compras entre 14/07 e 03/08 (Coca,
       // Guaraná, H2O, Fanta, água com gás, brócolis...). O leitor agora só INFORMA
       // quantas unidades vêm na embalagem; quem multiplica é aqui, uma vez só.
-      const emb = Number(item.embalagem) || 1;
+      const embLida = lerNumeroNota(item.embalagem);
+      const emb = embLida && embLida > 0 ? embLida : 1;
+      if (!problemaQtd && emb > LIMITES_NOTA.embalagem) problemaQtd = `embalagem de ${emb} unidades acima do limite (${LIMITES_NOTA.embalagem})`;
+      if (!problemaQtd && Number(item.gramatura_kg) > LIMITES_NOTA.gramatura_kg) problemaQtd = `pacote de ${item.gramatura_kg} kg acima do limite (${LIMITES_NOTA.gramatura_kg})`;
       const unidadeProduto = String(candidatos[0]?.unidade || '');
       const produtoEmUnidade = candidatos[0] && /^(un|und|unid)/i.test(unidadeProduto);
       const produtoEmQuilo = candidatos[0] && /^(kg|quilo)/i.test(unidadeProduto);
@@ -5475,9 +5563,10 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
         convertido,   // aparece na resposta do grupo pra ficar claro o que o sistema fez
         custo_unit: valorTotal ? Number((valorTotal / qtdItem).toFixed(4)) : null,
         candidatos,
-        produto: confiavel ? (candidatos[0] || null) : null,
+        produto: confiavel && !problemaQtd ? (candidatos[0] || null) : null,
         via, via_sinonimo: via === 'apelido',
-        incerto: !confiavel && candidatos.length > 0,
+        incerto: (!confiavel || !!problemaQtd) && candidatos.length > 0,
+        ...(problemaQtd ? { problema_qtd: problemaQtd } : {}),
       });
     }
     return { itens };
@@ -6044,8 +6133,9 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
           candidatos: (item.candidatos || []).map(c => ({ id: c.id, nome: c.nome, unidade: c.unidade, codigo: c.codigo || null })),
           remetente, status: 'pendente', created_at: nowSP(),
         });
-        if (item.candidatos && item.candidatos.length) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.candidatos[0].nome });
-        else naoachados.push(`${item.nome_cupom} (${item.qtd})`);
+        const motivoQtd = item.problema_qtd ? ` — ${item.problema_qtd}, confira a quantidade` : '';
+        if (item.candidatos && item.candidatos.length) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.candidatos[0].nome + motivoQtd });
+        else naoachados.push(`${item.nome_cupom} (${item.qtd})${motivoQtd}`);
         continue;
       }
       // Entrada com trava otimista (mesma blindagem do webhook entrada)
@@ -6652,9 +6742,7 @@ async function executarFerramenta(nome, input, user) {
 
       case 'ver_realidade_dia': {
         if (user?.role !== 'admin') {
-          let permsCol = null;
-          try { const { data: u } = await supabase.from('users').select('permissoes').eq('id', user.id).single(); permsCol = u && u.permissoes; } catch(e) {}
-          const perms = permsEfetivas(user?.role, permsCol);
+          const perms = await permsDoUsuario(user);
           if (!perms.dia) return { erro: 'Acesso ao Dia/fechamento não liberado para este usuário.' };
         }
         const dataDia = input.data ? validarDataISO(input.data) : dateSP();
@@ -6748,6 +6836,9 @@ async function executarFerramenta(nome, input, user) {
           const invAberto = await inventarioAbertoDoProduto(prod.id);
           if (invAberto) return { sucesso: false, erro: `${prod.nome} está sendo contado agora no Inventário #${invAberto}, ainda aberto. Ajuste manual bloqueado — corrija na tela do inventário ou feche-o primeiro.` };
         }
+        const custoIa = input.custo !== undefined ? parseNonNegativeNumber(input.custo) : null;
+        const travaIa = await travaIaLancamento({ prod, tipo, qtd, custoInformado: custoIa, user });
+        if (travaIa) return { sucesso: false, erro: travaIa };
         // Trava otimista com retry — mesmo padrão do endpoint REST: dois comandos
         // simultâneos ao assistente não corrompem o estoque.
         let novaQtd, qtdAntes, custoUnit, valor, prodAtual = prod, sucesso = false;
@@ -7421,7 +7512,15 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
     for (const k of PERM_KEYS) if (typeof req.body.permissoes[k] === 'boolean') limpo[k] = req.body.permissoes[k];
     updates.permissoes = limpo;
   }
-  if (Object.keys(updates).length > 0) await supabase.from('users').update(updates).eq('id', id);
+  if (Object.keys(updates).length > 0) {
+    const { error: errUpd } = await supabase.from('users').update(updates).eq('id', id);
+    if (errUpd) return res.status(500).json({ erro: 'Não consegui salvar as alterações do usuário.' });
+  }
+  // Senha redefinida ou conta desativada: as sessões abertas dessa pessoa caem.
+  // (Papel não precisa: o auth relê role do banco a cada pedido.)
+  if (updates.password_hash || updates.active === 0) {
+    try { await encerrarSessoesDoUsuario(id); } catch (e) { console.error('editar_usuario sessões:', e.message); }
+  }
   await audit('editar_usuario', { id, active, role, permissoes: !!updates.permissoes }, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -7709,6 +7808,9 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
       return res.json({ resposta: `Encontrei ${opcoes.length} produtos com "${produto_nome}". Seja mais especifico (pode usar o código):\n\n${ops}` });
     }
     if (!prod) return res.json({ resposta: `Não encontrei "${produto_nome}" no estoque.` });
+    // Mesma trava de preço do REST: preço muito diferente do cadastro não troca o custo pelo zap.
+    const saltoW = custoNovoW !== null ? custoSuspeito(prod.custo, custoNovoW) : null;
+    if (saltoW) return res.json({ resposta: `⚠️ Não lancei: ${prod.nome} — ${saltoW.msg}.\n\nSe o preço mudou mesmo, lance pelo app (ele pede confirmação) ou mande sem o preço.` });
     // Blindagem de concorrência: trava otimista com retry — evita que duas baixas
     // simultâneas do mesmo produto se sobrescrevam (perda de dado).
     let novaQtd, prodAtual = prod, sucesso = false;

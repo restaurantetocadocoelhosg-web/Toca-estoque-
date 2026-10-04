@@ -72,10 +72,18 @@ test('Dinheiro — "1.500" digitado (milhar brasileiro) vale 1.500, não 1,50 (s
   assert.equal(parse('1.500,00'), 1500);
   assert.equal(parse('1500,00'), 1500);
   assert.equal(parse('12,5'), 12.5);
+  assert.equal(parse('1500.00'), 1500, 'formato da tela (toFixed(2)) segue decimal');
+  assert.equal(parse('12.50'), 12.5);
+  assert.equal(parse('1.50'), 1.5);
+  assert.equal(parse('1.500.000'), 1500000);
+  assert.equal(parse('R$ 2.350'), 2350);
+  assert.equal(parse(1.5), 1.5, 'número canônico não é reinterpretado');
 });
 
 test('Dinheiro — "1.500" digitado vale 1.500 também na tela (moneyFromText)', () => {
   const parse = extrairFuncao('public/index.html', 'moneyFromText');
   assert.equal(parse('1.500'), 1500);
   assert.equal(parse('1.500,00'), 1500);
+  assert.equal(parse('12.50'), 12.5, 'formato do moneyInputValue segue decimal');
+  assert.equal(parse(Number(1500).toFixed(2)), 1500);
 });
