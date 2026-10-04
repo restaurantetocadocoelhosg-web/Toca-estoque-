@@ -35,6 +35,7 @@ test('operador não confirma o próprio alerta de preço com forcar; gerente con
   const op = await ctx.api('operador', 'POST', '/api/movimentacoes', corpo);
   assert.equal(op.status, 409, JSON.stringify(op.json));
   assert.equal(op.json.codigo, 'PRECO_SUSPEITO');
+  assert.equal(op.json.precisa_gerente, true, 'sem isso a tela abre "confirmar mesmo assim" em loop');
   assert.equal(await ctx.saldo(id), 0);
   const ge = await ctx.api('gerente', 'POST', '/api/movimentacoes', corpo);
   assert.equal(ge.status, 200, JSON.stringify(ge.json));
@@ -105,7 +106,9 @@ test('nota: "1,5" vale 1,5; negativa e exagerada NÃO entram no automático', as
       { nome: 'Tomate Nota', qtd: '1,5', unidade: 'KG', valor_total: 9, embalagem: 1, gramatura_kg: 0 },
       { nome: 'Cebola Nota', qtd: -2, unidade: 'KG', valor_total: 10, embalagem: 1, gramatura_kg: 0 },
       { nome: 'Batata Nota', qtd: 50000, unidade: 'KG', valor_total: 10, embalagem: 1, gramatura_kg: 0 },
+      { nome: 'Alho Nota', qtd: '0.750', unidade: 'KG', valor_total: 30, embalagem: 1, gramatura_kg: 0 },
     ] };
+    await ctx.criarProduto({ nome: 'Alho Nota', unidade: 'kg', qtd: 0, custo: 40 });
     const sess = await ctx.novaSessao('gerente'); // o teste anterior derrubou as sessões do gerente
     const r = await ctx.apiToken(sess.token, 'POST', '/api/ler-cupom', { imagem: 'eA==' });
     assert.equal(r.status, 200, JSON.stringify(r.json));
@@ -116,6 +119,9 @@ test('nota: "1,5" vale 1,5; negativa e exagerada NÃO entram no automático', as
     assert.match(porNome['Cebola Nota'].problema_qtd, /inválida/);
     assert.equal(porNome['Batata Nota'].produto, null, 'exagerada vai para conferência');
     assert.match(porNome['Batata Nota'].problema_qtd, /limite/);
+    assert.equal(porNome['Batata Nota'].qtd, 50000, 'guarda o número lido para quem confere');
+    assert.equal(porNome['Batata Nota'].custo_unit, null, 'sem custo calculado de quantidade suspeita');
+    assert.equal(porNome['Alho Nota'].qtd, 0.75, '"0.750" kg é 0,75 — quantidade não usa leitor de milhar');
   } finally {
     process.env.ANTHROPIC_API_KEY = '';
   }
@@ -148,4 +154,28 @@ test('IA do chat: operador não faz Ajuste pela IA (mesma trava do REST)', async
     globalThis.fetch = anterior;
     process.env.ANTHROPIC_API_KEY = '';
   }
+});
+
+// ---------- multi-restaurante: usuários ----------
+test('admin só vê e edita usuários do PRÓPRIO restaurante', async () => {
+  await ctx.db.query(`insert into tenants (id, nome, slug, plano, ativo) values (2, 'Outro Restaurante', 'outro', 'completo', true) on conflict do nothing`);
+  const { rows: [u] } = await ctx.db.query(`insert into users (username, nome, role, password_hash, active, tenant_id) values ('outro_admin', 'Admin de Outro', 'admin', 'x', 1, 2) returning id`);
+  const lista = await ctx.api('admin', 'GET', '/api/users');
+  assert.equal(lista.status, 200);
+  assert.ok(!lista.json.some((x) => x.username === 'outro_admin'), 'não pode listar usuário de outro restaurante');
+  const ed = await ctx.api('admin', 'PUT', `/api/users/${u.id}`, { nova_senha: 'invadida123' });
+  assert.equal(ed.status, 404, JSON.stringify(ed.json));
+  const { rows: [depois] } = await ctx.db.query('select password_hash from users where id = $1', [u.id]);
+  assert.equal(depois.password_hash, 'x', 'senha do outro restaurante não pode mudar');
+});
+
+test('restaurante suspenso pela plataforma: quem já estava logado cai', async () => {
+  const { rows: [u] } = await ctx.db.query(`insert into users (username, nome, role, password_hash, active, tenant_id) values ('susp_user', 'Susp', 'gerente', 'x', 1, 2) returning id`);
+  const { rows: [sa] } = await ctx.db.query(`insert into users (username, nome, role, password_hash, active, tenant_id) values ('teste_super', 'Super', 'superadmin', 'x', 1, null) returning id`);
+  const tokU = 'tok-susp-' + Date.now(), tokSa = 'tok-sa-' + Date.now();
+  await ctx.db.query(`insert into sessions (token, user_id, username, nome, role, last_activity) values ($1, $2, 'susp_user', 'Susp', 'gerente', now()), ($3, $4, 'teste_super', 'Super', 'superadmin', now())`, [tokU, u.id, tokSa, sa.id]);
+  assert.equal((await ctx.apiToken(tokU, 'GET', '/api/me')).status, 200, 'controle: logado antes da suspensão');
+  const r = await ctx.apiToken(tokSa, 'POST', '/api/plataforma/restaurantes/2/status', { ativo: false });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal((await ctx.apiToken(tokU, 'GET', '/api/me')).status, 401, 'sessão do restaurante suspenso deveria ter caído');
 });

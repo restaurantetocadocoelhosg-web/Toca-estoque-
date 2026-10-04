@@ -2613,7 +2613,8 @@ function renderCupomItens() {
 
     return `<div class="${classeItem}" id="ci-${idx}">
       <div class="ci-top">
-        <div class="ci-nome-cupom">Cupom: ${escapeHtml(item.nome_cupom)}${item.valor_total > 0 && item.qtd > 0 ? ` <span style="color:var(--green);font-weight:600">· R$ ${(item.valor_total/item.qtd).toFixed(2)}/un</span>` : ''}</div>
+        <div class="ci-nome-cupom">Cupom: ${escapeHtml(item.nome_cupom)}${item.valor_total > 0 && item.qtd > 0 && !item.problema_qtd ? ` <span style="color:var(--green);font-weight:600">· R$ ${(item.valor_total/item.qtd).toFixed(2)}/un</span>` : ''}</div>
+        ${item.problema_qtd ? `<div style="font-size:11px;color:var(--red);font-weight:700;margin-top:3px">⚠️ ${escapeHtml(item.problema_qtd)} — confira a quantidade na nota</div>` : ''}
         ${badge}
       </div>
       ${!ignorado ? `
@@ -3167,7 +3168,9 @@ async function lancar(forcar = false) {
     });
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
-      if (resultado.codigo === 'QUANTIDADE_SUSPEITA') {
+      // precisa_gerente: o servidor não aceita a confirmação deste usuário (operador). Abrir
+      // "Confirmar mesmo assim?" aqui virava loop — confirmava, o servidor recusava de novo.
+      if (resultado.codigo === 'QUANTIDADE_SUSPEITA' || resultado.precisa_gerente) {
         // Bloqueio de operador é de verdade agora (servidor não aceita forcar pra isso) —
         // sem botão de "confirmar mesmo assim" pra não fingir uma opção que não existe.
         avisar(resultado.msg, { titulo: 'Precisa de um gerente', perigo: true });
@@ -3525,8 +3528,8 @@ function pendPickSearch(id, produtoId) {
   const box = document.getElementById('pc-res-' + id);
   if (box) box.querySelectorAll('.pc-res').forEach(el => el.classList.toggle('sel', el.getAttribute('data-pid') === String(produtoId)));
 }
-function resolverPendencia(id) { return umaVezPorVez('pendencia-' + id, () => resolverPendenciaAgora(id)); }
-async function resolverPendenciaAgora(id) {
+function resolverPendencia(id, forcar = false) { return umaVezPorVez('pendencia-' + id, () => resolverPendenciaAgora(id, forcar)); }
+async function resolverPendenciaAgora(id, forcar = false) {
   const st = pendState[id] || {};
   if (!st.produtoId) { toast('Escolha o produto certo primeiro.', 'err'); return; }
   const memo = document.getElementById('pc-memo-' + id);
@@ -3536,7 +3539,13 @@ async function resolverPendenciaAgora(id) {
   const custoEl = document.getElementById('pc-custo-' + id);
   const custo = custoEl ? moneyFromText(custoEl.value) : null;
   try {
-    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd, ...(custo > 0 ? { custo } : {}) });
+    const r = await apiPost(`/api/pendencias/${id}/resolver`, { produto_id: st.produtoId, memorizar: memo ? memo.checked : true, qtd, ...(custo > 0 ? { custo } : {}), forcar });
+    if (r._alerta409) {
+      if (r.precisa_gerente) { avisar(r.msg, { titulo: 'Precisa de um gerente', perigo: true }); return; }
+      // Confirmou: libera a trava de clique antes de reenviar com forcar.
+      if (await askConfirm(r.msg, { titulo: 'Confirmar mesmo assim?' })) setTimeout(() => resolverPendencia(id, true), 0);
+      return;
+    }
     toast(`✅ ${r.produto}: +${fmt(r.qtd)} (estoque ${fmt(r.nova_qtd)})${r.custo_aplicado > 0 ? ` · R$ ${Number(r.custo_aplicado).toFixed(2)}/un` : ''}`, 'ok');
     if (r.aviso) erroModal('Entrou no estoque, mas não nas Contas', r.aviso);
     delete pendState[id];
@@ -3554,6 +3563,7 @@ async function ignorarPendenciaAgora(id) {
 }
 
 async function loadHist() {
+  const ehAtual = novaCarga('loadHist');
   loadPendencias();
   const q = document.getElementById('hist-search').value;
   const tipo = document.getElementById('hist-tipo').value;
@@ -3566,6 +3576,7 @@ async function loadHist() {
   if (dataFim) params.set('data_fim', dataFim);
   try {
     const items = await api('/api/movimentacoes?' + params);
+    if (!ehAtual()) return;
     const el = document.getElementById('hist-list');
     if (!items.length) { el.innerHTML='<div class="empty"><div class="empty-icon">📋</div><div class="empty-text">Nenhum lançamento encontrado.</div></div>'; return; }
     el.innerHTML = items.map(m => {
@@ -4766,6 +4777,7 @@ function realidadeHoje() {
 }
 
 async function loadRealidade() {
+  const ehAtual = novaCarga('loadRealidade');
   const dataEl = document.getElementById('real-data');
   if (!dataEl) return;
   if (!dataEl.value) dataEl.value = hojeSPClient();
@@ -4775,6 +4787,7 @@ async function loadRealidade() {
   perdasEl.innerHTML = '';
   try {
     const d = await api('/api/realidade-dia?data=' + encodeURIComponent(dataEl.value));
+    if (!ehAtual()) return;
     realidadeCache = d;
     renderRealidade(d);
   } catch(e) {
@@ -5319,7 +5332,15 @@ function fmtSheetMoney(n) {
   return val ? fmtBRLMoney(val) : '—';
 }
 
+// F5: troca rápida de mês disparava duas cargas; a mais lenta (mês velho) chegava por último e
+// sobrescrevia a tela e o planilhaCache — a exportação saía de um mês e a tela mostrava outro.
+// Cada carga leva um número; só a mais recente desenha.
+let planilhaSeq = 0;
+// Mesmo cuidado para as outras telas com filtro de data: só a carga mais recente desenha.
+const cargaSeq = {};
+function novaCarga(tela) { const n = (cargaSeq[tela] || 0) + 1; cargaSeq[tela] = n; return () => cargaSeq[tela] === n; }
 async function loadPlanilhaMensal() {
+  const minhaSeq = ++planilhaSeq;
   const mesEl = document.getElementById('planilha-mes');
   if (!mesEl) return;
   if (!mesEl.value) mesEl.value = mesAtualClient();
@@ -5333,9 +5354,11 @@ async function loadPlanilhaMensal() {
   pendEl.innerHTML = '';
   try {
     const d = await api('/api/planilha-mensal?mes=' + encodeURIComponent(mesEl.value));
+    if (minhaSeq !== planilhaSeq) return; // chegou atrasada: já pediram outro mês
     planilhaCache = d;
     renderPlanilhaMensal(d);
   } catch(e) {
+    if (minhaSeq !== planilhaSeq) return;
     resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar planilha.</div></div>';
     formasEl.innerHTML = '';
     handleApiError(e, true);
@@ -5702,13 +5725,16 @@ function cmpPreset(tipo) {
 }
 
 async function loadComparar() {
+  const ehAtual = novaCarga('loadComparar');
   const iniEl = document.getElementById('cmp-inicio'), fimEl = document.getElementById('cmp-fim');
   if (!iniEl || !fimEl) return;
   if (!iniEl.value || !fimEl.value) { cmpPreset('7'); return; }
   const tabela = document.getElementById('cmp-tabela');
   tabela.innerHTML = '<tbody><tr><td class="loading">Carregando...</td></tr></tbody>';
   try {
-    renderComparar(await api(`/api/comparar?inicio=${iniEl.value}&fim=${fimEl.value}`));
+    const dComparar = await api(`/api/comparar?inicio=${iniEl.value}&fim=${fimEl.value}`);
+    if (!ehAtual()) return;
+    renderComparar(dComparar);
   } catch (e) {
     tabela.innerHTML = '<tbody><tr><td class="empty-text">Erro ao comparar.</td></tr></tbody>';
     handleApiError(e);
@@ -5878,6 +5904,7 @@ document.addEventListener('click', async (ev) => {
 });
 
 async function loadIndices() {
+  const ehAtual = novaCarga('loadIndices');
   const mesEl = document.getElementById('indices-mes');
   if (!mesEl) return;
   if (!mesEl.value) mesEl.value = mesAtualClient();
@@ -5886,7 +5913,9 @@ async function loadIndices() {
   document.getElementById('indices-tabela').innerHTML = '';
   document.getElementById('indices-faltando').innerHTML = '';
   try {
-    renderIndices(await api('/api/indices?mes=' + encodeURIComponent(mesEl.value)));
+    const dIndices = await api('/api/indices?mes=' + encodeURIComponent(mesEl.value));
+    if (!ehAtual()) return;
+    renderIndices(dIndices);
   } catch (e) {
     primeEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar os índices.</div></div>';
     handleApiError(e, true);
@@ -6215,6 +6244,7 @@ async function ignorarContaPendencia(id) {
 }
 
 async function loadPagamentos() {
+  const ehAtual = novaCarga('loadPagamentos');
   const mesEl = document.getElementById('pag-mes');
   if (!mesEl) return;
   if (!mesEl.value) mesEl.value = mesAtualClient();
@@ -6228,6 +6258,7 @@ async function loadPagamentos() {
   listaEl.innerHTML = '<div class="loading">Carregando...</div>';
   try {
     const d = await api('/api/pagamentos?mes=' + encodeURIComponent(mesEl.value));
+    if (!ehAtual()) return;
     pagamentosCache = d;
     renderPagamentos(d);
     loadContaPendencias();
@@ -7433,7 +7464,7 @@ function peditAjustePreview() {
   const diff = nova - prodEditAtual.qtd;
   const sinal = diff >= 0 ? '+' : '';
   document.getElementById('pedit-ajuste-preview').innerHTML =
-    `Atual: <b>${fmt(prodEditAtual.qtd)}</b> → Novo: <b>${fmt(nova)}</b> &nbsp;(${sinal}${fmt(diff)} ${prodEditAtual.unidade})`;
+    `Atual: <b>${fmt(prodEditAtual.qtd)}</b> → Novo: <b>${fmt(nova)}</b> &nbsp;(${sinal}${fmt(diff)} ${escapeHtml(prodEditAtual.unidade)})`;
 }
 
 async function ajusteRapido() {
@@ -7619,10 +7650,10 @@ function renderAuditoria() {
           </div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--muted)">
-          <span>📦 Estoque atual: <b>${r.qtd_atual ?? '?'} ${r.unidade}</b></span>
-          <span title="movimento líquido no período: entrada − saída ± ajustes">📊 Saldo período: <b>${r.saldo > 0 ? '+' : ''}${r.saldo} ${r.unidade}</b></span>
-          ${r.num_ajustes > 0 ? `<span>🧮 Ajustes: <b>${r.num_ajustes}</b> (Δ ${r.total_ajuste_delta > 0 ? '+' : ''}${r.total_ajuste_delta} ${r.unidade})</span>` : ''}
-          ${r.total_perda > 0 ? `<span>❌ Perdas: <b>${r.total_perda} ${r.unidade}</b></span>` : ''}
+          <span>📦 Estoque atual: <b>${r.qtd_atual ?? '?'} ${escapeHtml(r.unidade)}</b></span>
+          <span title="movimento líquido no período: entrada − saída ± ajustes">📊 Saldo período: <b>${r.saldo > 0 ? '+' : ''}${r.saldo} ${escapeHtml(r.unidade)}</b></span>
+          ${r.num_ajustes > 0 ? `<span>🧮 Ajustes: <b>${r.num_ajustes}</b> (Δ ${r.total_ajuste_delta > 0 ? '+' : ''}${r.total_ajuste_delta} ${escapeHtml(r.unidade)})</span>` : ''}
+          ${r.total_perda > 0 ? `<span>❌ Perdas: <b>${r.total_perda} ${escapeHtml(r.unidade)}</b></span>` : ''}
           <span>💰 Saída valor: <b>R$ ${r.valor_saida.toFixed(2)}</b></span>
         </div>
       </div>`;
@@ -7670,11 +7701,11 @@ function renderAgenda() {
   lista.innerHTML = dados.map(n => {
     const icon = ICONS[n.tipo] || '📝';
     const dt = (n.criado_em||'').slice(0,16).replace('T',' ');
-    const prod = n.produto_nome ? '<span class="agenda-produto">📦 ' + n.produto_nome + '</span>' : '';
-    const user = n.usuario_nome ? ' · ' + n.usuario_nome : '';
+    const prod = n.produto_nome ? '<span class="agenda-produto">📦 ' + escapeHtml(n.produto_nome) + '</span>' : '';
+    const user = n.usuario_nome ? ' · ' + escapeHtml(n.usuario_nome) : '';
     return '<div class="agenda-item">' +
       '<div class="agenda-item-header">' +
-        '<span class="agenda-badge badge-' + n.tipo + '">' + icon + ' ' + n.tipo + '</span>' +
+        '<span class="agenda-badge badge-' + escapeHtml(n.tipo) + '">' + icon + ' ' + escapeHtml(n.tipo) + '</span>' +
         (prod ? prod : '') +
         '<span class="agenda-meta" style="margin-left:auto">' + dt + user + '</span>' +
       '</div>' +
@@ -7748,14 +7779,14 @@ async function renderInventario() {
         parado ? '<span style="color:#e85d26">⚠️ parado ' + it.dias_parado + 'd</span>' : '<span style="color:var(--muted)">' + it.dias_parado + 'd</span>';
       const val = (it.qtd_contada !== null && it.qtd_contada !== '') ? it.qtd_contada : '';
       linhas +=
-        '<div class="inv-row" data-nome="' + invNorm(it.produto_nome) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
+        '<div class="inv-row" data-nome="' + escapeHtml(invNorm(it.produto_nome)) + '" style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
           '<div style="flex:1;min-width:0">' +
             '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
-            '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + badge + '</div>' +
+            '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + escapeHtml(it.unidade) + ' · ' + badge + '</div>' +
           '</div>' +
           '<input type="text" inputmode="decimal" autocomplete="off" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
             'style="width:84px;padding:8px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);text-align:right;font-size:14px">' +
-          '<span style="font-size:11px;color:var(--muted);width:24px">' + it.unidade + '</span>' +
+          '<span style="font-size:11px;color:var(--muted);width:24px">' + escapeHtml(it.unidade) + '</span>' +
         '</div>';
     }
     html += '<div class="inv-cat-group"><div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;padding:10px 0 4px">' + escapeHtml(cat) + '</div>' + linhas + '</div>';
@@ -7905,7 +7936,7 @@ async function abrirRelatorioInventario(id) {
         }
         html += '<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--s1);border-radius:8px;margin-bottom:5px">' +
           '<div style="flex:1;min-width:0"><div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
-          '<div style="font-size:10px;color:var(--muted)">sistema ' + it.qtd_sistema + ' → contado ' + it.qtd_contada + ' ' + it.unidade + '</div></div>' +
+          '<div style="font-size:10px;color:var(--muted)">sistema ' + it.qtd_sistema + ' → contado ' + it.qtd_contada + ' ' + escapeHtml(it.unidade) + '</div></div>' +
           '<div style="text-align:right"><div style="font-size:13px;font-weight:800;color:' + cor + '">' + (dv>0?'+':'') + dv.toFixed(3).replace(/\.?0+$/,'') + '</div>' + sel + '</div>' +
           '</div>';
       }
@@ -7917,7 +7948,7 @@ async function abrirRelatorioInventario(id) {
         const info = it.dias_parado === null ? 'sem histórico' : (par ? '⚠️ parado ' + it.dias_parado + 'd' : 'parado ' + it.dias_parado + 'd');
         html += '<div style="padding:8px 10px;background:rgba(232,93,38,0.06);border:1px solid rgba(232,93,38,0.25);border-radius:8px;margin-bottom:5px">' +
           '<div style="font-size:13px;font-weight:600">' + escapeHtml(it.produto_nome) + '</div>' +
-          '<div style="font-size:10px;color:var(--muted)">consta ' + it.qtd_sistema + ' ' + it.unidade + ' · ' + info + ' · não foi contado</div></div>';
+          '<div style="font-size:10px;color:var(--muted)">consta ' + it.qtd_sistema + ' ' + escapeHtml(it.unidade) + ' · ' + info + ' · não foi contado</div></div>';
       }
     }
     if (!diverg.length && !susp.length) html += '<div class="empty"><div class="empty-icon">✅</div><div class="empty-text">Tudo bateu — sem divergências nem pendências.</div></div>';

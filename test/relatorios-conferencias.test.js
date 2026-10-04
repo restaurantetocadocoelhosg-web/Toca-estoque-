@@ -39,6 +39,34 @@ test('F8 — inventário abre com 10, saída normal de 3 durante a contagem, con
   assert.equal(await ctx.saldo(id), 7, 'estoque final = contagem');
 });
 
+test('F8 — saída feita DEPOIS da contagem do item não é apagada pelo fechamento', async () => {
+  const id = await ctx.criarProduto({ nome: 'F8b produto', qtd: 10, custo: 10, categoria: 'F8b' });
+  const ab = await ctx.api('gerente', 'POST', '/api/inventario/abrir', { categoria: 'F8b' });
+  assert.equal(ab.status, 200, JSON.stringify(ab.json));
+  const { rows: [inv] } = await ctx.db.query(`select id from inventarios where status = 'aberto' order by id desc limit 1`);
+  const c = await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: id, qtd_contada: 10 }] });
+  assert.equal(c.status, 200, JSON.stringify(c.json));
+  const s = await ctx.api('gerente', 'POST', '/api/movimentacoes', { produto_id: id, tipo: 'Saída', qtd: 2, motivo: 'Produção', forcar: true });
+  assert.equal(s.status, 200, JSON.stringify(s.json));
+  const f = await ctx.api('gerente', 'POST', '/api/inventario/fechar', { inventario_id: inv.id });
+  assert.equal(f.status, 200, JSON.stringify(f.json));
+  assert.equal(await ctx.saldo(id), 8, 'contou 10, saiu 2 depois: fica 8 (antes voltava para 10)');
+  const { rows: [item] } = await ctx.db.query('select divergencia from inventario_itens where inventario_id = $1 and produto_id = $2', [inv.id, id]);
+  assert.equal(Number(item.divergencia), 0);
+});
+
+test('F8 — CONTROLE: sumiço real continua sendo apontado', async () => {
+  const id = await ctx.criarProduto({ nome: 'F8c produto', qtd: 10, custo: 10, categoria: 'F8c' });
+  await ctx.api('gerente', 'POST', '/api/inventario/abrir', { categoria: 'F8c' });
+  const { rows: [inv] } = await ctx.db.query(`select id from inventarios where status = 'aberto' order by id desc limit 1`);
+  await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: id, qtd_contada: 6 }] });
+  const f = await ctx.api('gerente', 'POST', '/api/inventario/fechar', { inventario_id: inv.id });
+  assert.equal(f.status, 200, JSON.stringify(f.json));
+  const { rows: [item] } = await ctx.db.query('select divergencia from inventario_itens where inventario_id = $1 and produto_id = $2', [inv.id, id]);
+  assert.equal(Number(item.divergencia), -4);
+  assert.equal(await ctx.saldo(id), 6);
+});
+
 test('F9 — histórico maior que 1.000 linhas: a reconstrução considera tudo e acusa a falta de 1', async () => {
   const id = await ctx.criarProduto({ nome: 'F9 produto', qtd: 0, categoria: 'F9' });
   // 1.000 entradas antigas de 1 (há 10 dias) e uma saída de 1.001 hoje: o histórico fica 1 negativo.
@@ -52,6 +80,19 @@ test('F9 — histórico maior que 1.000 linhas: a reconstrução considera tudo 
   assert.ok(linha, 'produto deveria aparecer na auditoria');
   assert.equal(linha.alerta, true, 'deveria acusar alerta');
   assert.equal(linha.faltou, 1, `faltou calculado: ${linha.faltou}`);
+  assert.equal(linha.conferencia, 'inconclusivo', 'sem fotografia inicial, falta é inconclusiva (não prova de sumiço)');
+});
+
+test('F9 — CONTROLE: produto que já tinha saldo no 1º lançamento (fotografia) não vira alerta falso', async () => {
+  const id = await ctx.criarProduto({ nome: 'F9 foto', qtd: 4, categoria: 'F9b' });
+  await ctx.db.query(`insert into movimentacoes (produto_id, produto_nome, categoria, tipo, qtd, unidade, motivo, qtd_antes, qtd_depois, tenant_id)
+    values ($1, 'F9 foto', 'F9b', 'Saída', 6, 'un', 'Produção', 10, 4, 1)`, [id]);
+  const r = await ctx.api('admin', 'GET', `/api/auditoria/divergencias?data_inicio=${diaSP(-2)}&data_fim=${diaSP(0)}&categoria=F9b`);
+  assert.equal(r.status, 200);
+  const linha = r.json.resultado.find((x) => String(x.produto_id) === String(id));
+  assert.equal(linha.alerta, false, 'partiu de 10 (fotografia), saiu 6: não faltou nada');
+  assert.equal(linha.conferencia, 'conferido');
+  assert.equal(linha.ancora, 'fotografia');
 });
 
 test('R2 — compra lançada com data retroativa vai para as Contas na MESMA data (não hoje)', async () => {

@@ -44,6 +44,13 @@ test('nenhum handler inline interpola texto entre aspas simples com escapeHtml (
   assert.deepEqual(vulneraveis.map(([n]) => n), [], 'use ${jsArg(x)} sem aspas em volta');
 });
 
+test('Agenda e Inventário escapam nome de produto, usuário e unidade (achado da revisão de segurança)', () => {
+  for (const vulneravel of [
+    "' + n.produto_nome + '", "' · ' + n.usuario_nome", "data-nome=\"' + invNorm(", "' + it.unidade + '", '${r.unidade}', '${fmt(diff)} ${prodEditAtual.unidade}',
+  ]) assert.ok(!HTML.includes(vulneravel), `sem escape: ${vulneravel}`);
+  // (toast() e .textContent são texto puro: não entram aqui.)
+});
+
 test('listas de estoque parado e "fantasmas" escapam nome, categoria, unidade e responsável', () => {
   // avisar(msg) escapa a mensagem inteira: texto passado para ele é seguro.
   const linhasHtml = HTML.split('\n').filter((l) => !/\bavisar\(/.test(l));

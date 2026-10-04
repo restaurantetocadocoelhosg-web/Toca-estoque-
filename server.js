@@ -369,6 +369,18 @@ async function audit(action, details = {}, user = null, ip = '') {
   });
 }
 
+const cacheRestauranteAtivo = new Map(); // tenant_id → { ativo, ate }
+async function restauranteAtivo(tenantId) {
+  const k = Number(tenantId);
+  const c = cacheRestauranteAtivo.get(k);
+  if (c && c.ate > Date.now()) return c.ativo;
+  const { data, error } = await supabaseRaw.from('tenants').select('ativo').eq('id', tenantId).maybeSingle();
+  if (error) return c ? c.ativo : true;
+  const ativo = !data || data.ativo !== false;
+  cacheRestauranteAtivo.set(k, { ativo, ate: Date.now() + 45000 });
+  return ativo;
+}
+
 // ==================== AUTH MIDDLEWARE ====================
 async function auth(req, res, next) {
   const token = getToken(req);
@@ -389,6 +401,14 @@ async function auth(req, res, next) {
   if (!user || !user.active) {
     await deleteSession(token);
     return res.status(401).json({ erro: 'Usuário inativo ou inválido.' });
+  }
+
+  // Restaurante suspenso cai também quem JÁ estava logado (antes só o login era barrado). Cache curto
+  // para não consultar a cada clique; falha na leitura não derruba ninguém (a suspensão também
+  // derruba as sessões na hora).
+  if (MULTI_TENANT && user.tenant_id && !(await restauranteAtivo(user.tenant_id))) {
+    await deleteSession(token);
+    return res.status(403).json({ erro: 'Acesso suspenso. Fale com a administração da plataforma para reativar.' });
   }
 
   await touchSession(token);
@@ -608,7 +628,7 @@ app.post('/api/change-password', auth, async (req, res) => {
   const { error: errSenha } = await supabase.from('users').update({ password_hash: hashPassword(next) }).eq('id', req.user.id);
   if (errSenha) return res.status(500).json({ erro: 'Não consegui salvar a nova senha. Tente de novo.' });
   // Senha trocada: quem tinha a senha antiga (outro aparelho, credencial vazada) cai agora.
-  try { await encerrarSessoesDoUsuario(req.user.id, req.token); } catch (e) { console.error('change-password:', e.message); }
+  try { await encerrarSessoesDoUsuario(req.user.id, req.token); } catch (e) { console.error('change-password:', e.message); return res.status(500).json({ erro: 'Senha trocada, mas não consegui desconectar os outros aparelhos. Troque a senha de novo ou fale com o administrador.' }); }
   await audit('change_password', {}, req.user, getClientIp(req));
   res.json({ ok: true });
 });
@@ -1170,10 +1190,12 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   // digitada depois — o ajuste apaga as saídas. Avisa e pede confirmação (forcar).
   if (tipo === 'Ajuste' && !podeForcar) {
     const corte = new Date(Date.now() - 6 * 3600000).toISOString();
-    const { data: recentes } = await supabase.from('movimentacoes')
+    const { data: recentes, error: errRecentes } = await supabase.from('movimentacoes')
       .select('tipo, qtd, unidade, responsavel, created_at').eq('produto_id', prod.id)
       .in('tipo', ['Entrada', 'Saída', 'Perda']).gte('created_at', corte)
       .order('created_at', { ascending: false }).limit(10);
+    // Sem conseguir conferir, a trava não pode ser pulada em silêncio.
+    if (errRecentes) return res.status(503).json({ erro: 'Não consegui conferir as movimentações recentes. Tente de novo.' });
     if (recentes && recentes.length) {
       const resumo = recentes.slice(0, 5).map(r => {
         const h = new Date(r.created_at).toLocaleTimeString('pt-BR', { timeZone: 'America/Sao_Paulo', hour: '2-digit', minute: '2-digit' });
@@ -1189,9 +1211,10 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   // Detecção de anomalia para Saída/Perda
   if (tipo === 'Saída' || tipo === 'Perda') {
     const trintaDias = dateAgoDias(30);
-    const { data: hist } = await supabase.from('movimentacoes')
+    const { data: hist, error: errHist } = await supabase.from('movimentacoes')
       .select('qtd').eq('produto_id', prod.id)
       .in('tipo', ['Saída', 'Perda']).gte('created_at', trintaDias + 'T00:00:00-03:00');
+    if (errHist && !PODE_CONFIRMAR(req.user)) return res.status(503).json({ erro: 'Não consegui conferir o consumo médio. Tente de novo.' });
     if (hist && hist.length >= 5) {
       const totalConsumo = hist.reduce((s, m) => s + Number(m.qtd), 0);
       const mediaDiaria = totalConsumo / 30;
@@ -1234,7 +1257,10 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
       return res.status(409).json({
         alerta: true, codigo: 'PRECO_SUSPEITO',
         custo_atual: Number(prodAtual.custo), custo_informado: custoBody,
-        msg: `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`,
+        precisa_gerente: !PODE_CONFIRMAR(req.user),
+        msg: PODE_CONFIRMAR(req.user)
+          ? `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`
+          : `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, peça para um gerente ou admin lançar.`,
       });
     }
     custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
@@ -1627,10 +1653,16 @@ function parseMoneyNumber(value) {
 }
 
 // Leitor de notas: número que veio da IA (às vezes "1,5", "2 un"). null se não der para ler.
+// QUANTIDADE, não dinheiro: vírgula ou ponto é sempre decimal ("0.750" kg = 0,75, nunca 750).
+// Com os dois sinais ("1.234,5") o ponto é milhar. Ambíguo/ilegível → null (vai para conferência).
 function lerNumeroNota(value) {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  const limpo = String(value ?? '').replace(/[^\d.,-]/g, '');
-  return limpo ? parseMoneyNumber(limpo) : null;
+  let s = String(value ?? '').replace(/[^\d.,-]/g, '');
+  if (!s) return null;
+  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
+  else s = s.replace(',', '.');
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
+  return Number(s);
 }
 // Acima disso a linha da nota não entra sozinha: vai para conferência (erro de leitura é o mais provável).
 const LIMITES_NOTA = { qtd: 1000, embalagem: 200, gramatura_kg: 50 };
@@ -3396,8 +3428,10 @@ async function montarPlanilhaMensal(mesParam) {
   // acumulado e o derivado vai para `divergencias_internas`, que a tela denuncia
   // em vez de esconder.
   totais.divergencias_internas = [];
+  // F4: o acumulado dia a dia só tem o SALÃO; o delivery entra depois, em vendas. Compara a
+  // mesma base (acumulado + delivery), senão todo mês com delivery gerava aviso falso.
   const derivar = (campo, valor) => {
-    const acumulado = Number(totais[campo] || 0);
+    const acumulado = Number((Number(totais[campo] || 0) + delivery.bruto).toFixed(2));
     const certo = Number(valor.toFixed(2));
     if (Math.abs(acumulado - certo) > 0.02) {
       totais.divergencias_internas.push({ campo, acumulado, derivado: certo });
@@ -3810,8 +3844,10 @@ async function montarRelatorioPeriodo(inicioParam, fimParam) {
   // Mesma razao da Planilha: somar dia a dia cria uma segunda fonte de verdade para
   // um numero que ja existe nos componentes, e as duas divergem sozinhas.
   totais.divergencias_internas = [];
+  // F4: o acumulado dia a dia só tem o SALÃO; o delivery entra depois, em vendas. Compara a
+  // mesma base (acumulado + delivery), senão todo mês com delivery gerava aviso falso.
   const derivar = (campo, valor) => {
-    const acumulado = Number(totais[campo] || 0);
+    const acumulado = Number((Number(totais[campo] || 0) + delivery.bruto).toFixed(2));
     const certo = Number(valor.toFixed(2));
     if (Math.abs(acumulado - certo) > 0.02) {
       totais.divergencias_internas.push({ campo, acumulado, derivado: certo });
@@ -4459,6 +4495,7 @@ app.post('/api/plataforma/restaurantes/:id/status', auth, requireSuperadmin, asy
   const { error } = await supabaseRaw.from('tenants')
     .update({ ativo, suspenso_em: ativo ? null : nowSP() }).eq('id', req.params.id);
   if (error) return res.status(500).json({ erro: 'Erro ao mudar o status.' });
+  cacheRestauranteAtivo.delete(Number(req.params.id));
   // Suspenso: quem já estava logado cai agora (antes só o próximo login era barrado).
   if (!ativo) {
     const { data: us, error: errUs } = await supabaseRaw.from('users').select('id').eq('tenant_id', req.params.id);
@@ -5522,7 +5559,8 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
       let problemaQtd = null;
       if (qtdLida === null || qtdLida <= 0) problemaQtd = `quantidade "${item.qtd}" inválida`;
       else if (qtdLida > LIMITES_NOTA.qtd) problemaQtd = `quantidade ${qtdLida} acima do limite (${LIMITES_NOTA.qtd})`;
-      let qtdItem = problemaQtd ? 1 : qtdLida;
+      // Exagerada guarda o número lido (quem confere vê o que veio); inválida/negativa fica 1.
+      let qtdItem = qtdLida && qtdLida > 0 ? qtdLida : 1;
       const vt = Number(item.valor_total);
       const valorTotal = Number.isFinite(vt) && vt > 0 ? Number(vt.toFixed(2)) : null;
 
@@ -5561,7 +5599,7 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
         valor_total: valorTotal,
         embalagem: emb,
         convertido,   // aparece na resposta do grupo pra ficar claro o que o sistema fez
-        custo_unit: valorTotal ? Number((valorTotal / qtdItem).toFixed(4)) : null,
+        custo_unit: valorTotal && !problemaQtd ? Number((valorTotal / qtdItem).toFixed(4)) : null,
         candidatos,
         produto: confiavel && !problemaQtd ? (candidatos[0] || null) : null,
         via, via_sinonimo: via === 'apelido',
@@ -6389,6 +6427,16 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   const vtPend = Number(pend.valor_total);
   const custoNovo = custoInformado !== null ? custoInformado
     : (Number.isFinite(vtPend) && vtPend > 0 ? Number((vtPend / qtd).toFixed(4)) : null);
+  // Mesmas travas do lançamento pela tela: quantidade fora do razoável e preço muito diferente
+  // do cadastro precisam de confirmação de gerente/admin (antes passavam direto e iam às Contas).
+  const podeForcarPend = !!req.body?.forcar && PODE_CONFIRMAR(req.user);
+  if (qtd > LIMITES_NOTA.qtd && !podeForcarPend)
+    return res.status(409).json({ alerta: true, codigo: 'QUANTIDADE_SUSPEITA', precisa_gerente: !PODE_CONFIRMAR(req.user),
+      msg: `Quantidade ${qtd} ${prod.unidade} acima do limite de uma linha de nota (${LIMITES_NOTA.qtd}). Confira a nota.` });
+  const saltoPend = custoNovo !== null ? custoSuspeito(prod.custo, custoNovo) : null;
+  if (saltoPend && !podeForcarPend)
+    return res.status(409).json({ alerta: true, codigo: 'PRECO_SUSPEITO', precisa_gerente: !PODE_CONFIRMAR(req.user),
+      msg: `${prod.nome}: ${saltoPend.msg}.` });
 
   // Entrada com trava otimista (mesma blindagem dos outros lançamentos).
   let prodAtual = prod, novaQtd = 0, sucesso = false;
@@ -7267,13 +7315,27 @@ app.post('/api/inventario/contar', auth, async (req, res) => {
     const { data: inv } = await supabase.from('inventarios').select('id, status').eq('id', invId).maybeSingle();
     if (!inv || inv.status !== 'aberto') return res.status(400).json({ erro: 'Inventário não está aberto.' });
     let salvos = 0;
+    const falhas = [];
     for (const it of itens) {
       const pid = Number(it.produto_id);
       const q = it.qtd_contada === null || it.qtd_contada === '' ? null : parseNonNegativeNumber(it.qtd_contada);
       if (!pid) continue;
-      await supabase.from('inventario_itens').update({ qtd_contada: q }).eq('inventario_id', invId).eq('produto_id', pid);
+      // F8: guarda o INSTANTE da contagem e o saldo do sistema nesse instante. No fechamento a
+      // divergência é medida contra ele (não contra a abertura) e o que se mexeu depois é preservado.
+      let extra = { contado_em: null, qtd_sistema_contagem: null };
+      if (q !== null) {
+        const { data: p, error: errP } = await supabase.from('produtos').select('qtd').eq('id', pid).maybeSingle();
+        if (!errP && p) extra = { contado_em: nowSP(), qtd_sistema_contagem: Number(p.qtd) };
+      }
+      let { error } = await supabase.from('inventario_itens').update({ qtd_contada: q, ...extra }).eq('inventario_id', invId).eq('produto_id', pid);
+      // Banco ainda sem a migração (colunas novas): salva só a contagem, como antes.
+      if (error && /contado_em|qtd_sistema_contagem/.test(error.message || '')) {
+        ({ error } = await supabase.from('inventario_itens').update({ qtd_contada: q }).eq('inventario_id', invId).eq('produto_id', pid));
+      }
+      if (error) { falhas.push(pid); continue; }
       salvos++;
     }
+    if (falhas.length) return res.status(500).json({ erro: `Não consegui salvar ${falhas.length} contagem(ns). Tente de novo.`, salvos, falhas });
     res.json({ ok: true, salvos });
   } catch(e) { console.error(e); res.status(500).json({ erro: 'Erro interno. Tente novamente ou fale com o administrador.' }); }
 });
@@ -7301,7 +7363,7 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
     const absurdos = [];
     for (const it of (itens || [])) {
       if (it.qtd_contada === null) continue;
-      const sistemaQ = Number(it.qtd_sistema || 0);
+      const sistemaQ = Number((it.contado_em && it.qtd_sistema_contagem != null ? it.qtd_sistema_contagem : it.qtd_sistema) || 0);
       const contadaQ = Number(it.qtd_contada || 0);
       const custoQ = Number(it.custo || 0);
       const sobraQ = contadaQ - sistemaQ;
@@ -7350,13 +7412,23 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
       }
 
       const contada = Number(it.qtd_contada);
-      const div = Number((contada - sistema).toFixed(3));
+      // F8: com o instante da contagem, a base é o saldo NAQUELE instante, e o estoque final é a
+      // contagem + o que se mexeu depois dela. Sem ele (contagem antiga), regra antiga: abertura.
+      const temInstante = it.contado_em && it.qtd_sistema_contagem !== null && it.qtd_sistema_contagem !== undefined;
+      const base = temInstante ? Number(it.qtd_sistema_contagem) : sistema;
+      const div = Number((contada - base).toFixed(3));
       const valorDiv = Number((Math.abs(div) * custo).toFixed(2));
       let causa = sanitizeText(causas[it.produto_id] || '', 20);
       if (!causa) causa = div < 0 ? 'sumico' : div > 0 ? 'sobra' : 'ok';
+      let alvo = contada;
+      if (temInstante) {
+        const { data: pAgora, error: errAgora } = await supabase.from('produtos').select('qtd').eq('id', it.produto_id).maybeSingle();
+        if (errAgora || !pAgora) throw new Error(`não consegui ler o saldo atual de ${it.produto_nome}`);
+        alvo = Number((contada + (Number(pAgora.qtd) - base)).toFixed(3));
+      }
 
       if (Math.abs(div) > 0.001) {
-        await aplicarAjusteInventario(it, contada, inv, req.user.nome, causa);
+        await aplicarAjusteInventario(it, alvo, inv, req.user.nome, causa);
         divergentes++;
         if (div < 0) { valorSumico += valorDiv; topSumico.push({ nome: it.produto_nome, qtd: Math.abs(div), valor: valorDiv }); }
         else valorSobra += valorDiv;
@@ -7458,8 +7530,13 @@ app.put('/api/inventario/item/:id', auth, requireRole('admin', 'gerente'), async
 });
 
 // ==================== GERENCIAR USUÁRIOS ====================
+// `users` é tabela GLOBAL (tenant.js): o proxy não filtra. No multi-restaurante o admin só vê e
+// mexe nos usuários do PRÓPRIO restaurante (antes listava e editava os de todos).
+const doMeuRestaurante = (q, req) => (MULTI_TENANT ? q.eq('tenant_id', req.user.tenant_id) : q);
+
 app.get('/api/users', auth, requireRole('admin'), async (req, res) => {
-  const { data } = await supabase.from('users').select('id, username, nome, role, active, created_at, permissoes').order('role').order('nome');
+  const { data, error } = await doMeuRestaurante(supabase.from('users').select('id, username, nome, role, active, created_at, permissoes'), req).order('role').order('nome');
+  if (error) return res.status(500).json({ erro: 'Erro ao listar usuários.' });
   const out = (data || []).map(u => ({ ...u, permissoes_efetivas: permsEfetivas(u.role, u.permissoes) }));
   res.json(out);
 });
@@ -7472,7 +7549,8 @@ app.post('/api/users', auth, requireRole('admin'), async (req, res) => {
   if (!username || !nome || !password) return res.status(400).json({ erro: 'Preencha todos os campos.' });
   if (!['admin','gerente','operador'].includes(role)) return res.status(400).json({ erro: 'Perfil inválido.' });
   if (password.length < 6) return res.status(400).json({ erro: 'Senha precisa ter pelo menos 6 caracteres.' });
-  const { error } = await supabase.from('users').insert({ username, nome, role, password_hash: hashPassword(password), active: 1 });
+  const { error } = await supabase.from('users').insert({ username, nome, role, password_hash: hashPassword(password), active: 1,
+    ...(MULTI_TENANT ? { tenant_id: req.user.tenant_id } : {}) });
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Usuário já existe.' });
     return res.status(500).json({ erro: 'Erro ao criar usuário.' });
@@ -7488,6 +7566,9 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
   const role = sanitizeText(req.body?.role, 20);
   const nome = req.body?.nome !== undefined ? sanitizeText(req.body.nome, 60) : null;
   const novoUsername = req.body?.username !== undefined ? sanitizeText(req.body.username, 40).toLowerCase() : null;
+  const { data: alvoU, error: errAlvo } = await doMeuRestaurante(supabase.from('users').select('id').eq('id', id), req).maybeSingle();
+  if (errAlvo) return res.status(500).json({ erro: 'Erro ao buscar o usuário.' });
+  if (!alvoU) return res.status(404).json({ erro: 'Usuário não encontrado.' });
   if (Number(id) === req.user.id && active === 0) return res.status(400).json({ erro: 'Você não pode desativar sua própria conta.' });
   const updates = {};
   if (active !== null) updates.active = active;
@@ -7519,7 +7600,7 @@ app.put('/api/users/:id', auth, requireRole('admin'), async (req, res) => {
   // Senha redefinida ou conta desativada: as sessões abertas dessa pessoa caem.
   // (Papel não precisa: o auth relê role do banco a cada pedido.)
   if (updates.password_hash || updates.active === 0) {
-    try { await encerrarSessoesDoUsuario(id); } catch (e) { console.error('editar_usuario sessões:', e.message); }
+    try { await encerrarSessoesDoUsuario(id); } catch (e) { console.error('editar_usuario sessões:', e.message); return res.status(500).json({ erro: 'Alteração salva, mas não consegui desconectar as sessões abertas dessa pessoa. Tente de novo.' }); }
   }
   await audit('editar_usuario', { id, active, role, permissoes: !!updates.permissoes }, req.user, getClientIp(req));
   res.json({ ok: true });
@@ -7575,12 +7656,18 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   const dataInicio = req.query?.data_inicio || dateAgoDias(30);
   const dataFim = req.query?.data_fim || dateSP();
   const categoria = sanitizeText(req.query?.categoria || '', 80);
-  const allMovs = await fetchTodas(() => {
-    let q = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
-    if (categoria) q = q.eq('categoria', categoria);
-    return q.order('id', { ascending: true });
-  });
-  const { data: produtos } = await supabase.from('produtos').select('id, nome, qtd, minimo');
+  let allMovs, produtos;
+  try {
+    allMovs = await fetchTodas(() => {
+      let q = supabase.from('movimentacoes').select('*').gte('created_at', dataInicio + 'T00:00:00-03:00').lte('created_at', dataFim + 'T23:59:59-03:00');
+      if (categoria) q = q.eq('categoria', categoria);
+      return q.order('id', { ascending: true });
+    });
+    produtos = await fetchTodas(() => supabase.from('produtos').select('id, nome, qtd, minimo').order('id', { ascending: true }));
+  } catch (e) {
+    console.error('auditoria/divergencias:', e.message);
+    return res.status(502).json({ erro: 'Não consegui ler as movimentações — a auditoria NÃO foi conferida. Tente de novo.' });
+  }
   const prodPorId = {};
   for (const p of (produtos || [])) prodPorId[p.id] = p;
 
@@ -7602,21 +7689,36 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
   // ALERTA confiável = reconstrução cronológica do HISTÓRICO COMPLETO por produto_id:
   // Entrada soma, Saída/Perda subtrai, Ajuste DEFINE o saldo absoluto. Se o saldo ficou
   // negativo em algum momento, saiu mais do que tinha = saída sem lastro (entrada não lançada).
+  // F9: o histórico era lido numa consulta só — o PostgREST corta em 1.000 linhas e o erro era
+  // ignorado, então produto com histórico grande (ou falha do banco) saía "sem alerta" falso.
+  // Agora pagina em lotes de produtos e, se a leitura falhar, a resposta diz que NÃO conferiu.
   const idsPeriodo = Object.values(groups).map(g => g.produto_id).filter(v => v != null);
-  const piorSaldo = {};
-  if (idsPeriodo.length) {
-    const { data: hist } = await supabase.from('movimentacoes')
-      .select('produto_id, tipo, qtd').in('produto_id', idsPeriodo)
-      .order('created_at', { ascending: true }).order('id', { ascending: true });
-    const saldo = {};
-    for (const m of (hist || [])) {
-      const k = m.produto_id;
-      if (saldo[k] === undefined) saldo[k] = 0;
-      if (m.tipo === 'Entrada') saldo[k] += Number(m.qtd);
-      else if (m.tipo === 'Saída' || m.tipo === 'Perda') saldo[k] -= Number(m.qtd);
-      else if (m.tipo === 'Ajuste') saldo[k] = Number(m.qtd);
-      if (piorSaldo[k] === undefined || saldo[k] < piorSaldo[k]) piorSaldo[k] = saldo[k];
+  const piorSaldo = {}, ancora = {};
+  try {
+    for (let i = 0; i < idsPeriodo.length; i += 150) {
+      const lote = idsPeriodo.slice(i, i + 150);
+      const hist = await fetchTodas(() => supabase.from('movimentacoes')
+        .select('id, produto_id, tipo, qtd, qtd_antes').in('produto_id', lote)
+        .order('created_at', { ascending: true }).order('id', { ascending: true }));
+      const saldo = {};
+      for (const m of hist) {
+        const k = m.produto_id;
+        if (saldo[k] === undefined) {
+          // Ponto de partida declarado (não é abertura comprovada): Ajuste define o saldo;
+          // "qtd_antes" é a fotografia do saldo no 1º lançamento; sem ela, parte do zero.
+          const antes = m.qtd_antes === null || m.qtd_antes === undefined ? null : Number(m.qtd_antes);
+          ancora[k] = m.tipo === 'Ajuste' ? 'ajuste' : antes === null ? 'sem_fotografia' : antes === 0 ? 'zero' : 'fotografia';
+          saldo[k] = antes && m.tipo !== 'Ajuste' ? antes : 0;
+        }
+        if (m.tipo === 'Entrada') saldo[k] += Number(m.qtd);
+        else if (m.tipo === 'Saída' || m.tipo === 'Perda') saldo[k] -= Number(m.qtd);
+        else if (m.tipo === 'Ajuste') saldo[k] = Number(m.qtd);
+        if (piorSaldo[k] === undefined || saldo[k] < piorSaldo[k]) piorSaldo[k] = saldo[k];
+      }
     }
+  } catch (e) {
+    console.error('auditoria/divergencias histórico:', e.message);
+    return res.status(502).json({ erro: 'Não consegui ler o histórico completo — a auditoria NÃO foi conferida. Tente de novo.' });
   }
 
   const resultado = Object.values(groups).filter(g => g.total_entrada > 0 || g.total_saida > 0 || g.num_ajustes > 0).map(r => {
@@ -7631,6 +7733,9 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
       num_ajustes: r.num_ajustes, valor_entrada: Number(r.valor_entrada.toFixed(2)),
       valor_saida: Number(r.valor_saida.toFixed(2)), saldo, qtd_atual: qtdAtual,
       alerta: faltou > 0, faltou,
+      // Sem ponto de partida conhecido, falta no histórico é "inconclusivo", não prova de sumiço.
+      conferencia: r.produto_id == null ? 'inconclusivo' : faltou > 0 ? (ancora[r.produto_id] === 'sem_fotografia' ? 'inconclusivo' : 'divergente') : 'conferido',
+      ancora: r.produto_id != null ? (ancora[r.produto_id] || null) : null,
       sem_entrada: zerouSemRepor };
   }).sort((a, b) => (a.categoria + a.produto_nome).localeCompare(b.categoria + b.produto_nome));
   const detalhesSaidas = (allMovs || []).filter(m => ['Saída','Perda'].includes(m.tipo))

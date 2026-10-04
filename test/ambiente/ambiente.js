@@ -71,6 +71,14 @@ async function subirAmbienteUmaVez({ sqlExtra = [] } = {}) {
     grant anon, authenticated, service_role to authenticator;
   `);
   await admin.query(fs.readFileSync(path.join(__dirname, 'schema-producao.sql'), 'utf8'));
+  // Migrações novas (pasta migracoes/, em ordem de nome): o código novo é testado contra
+  // "produção + migrações pendentes", que é o estado depois da subida aprovada.
+  const pastaMig = path.join(__dirname, '..', '..', 'migracoes');
+  if (fs.existsSync(pastaMig)) {
+    for (const arq of fs.readdirSync(pastaMig).filter((a) => a.endsWith('.sql')).sort()) {
+      await admin.query(fs.readFileSync(path.join(pastaMig, arq), 'utf8'));
+    }
+  }
   for (const s of sqlExtra) await admin.query(s);
   await admin.query(`
     grant usage on schema public to anon, authenticated, service_role;
