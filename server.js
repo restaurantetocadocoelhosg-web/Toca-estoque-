@@ -1402,6 +1402,8 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
     if (quando.erro) return res.status(400).json({ erro: quando.erro });
 
     const feitos = [], falhas = [];
+    const loteId = sanitizeText(req.body?.lote_id || '', 60) || null;
+    const ocorrLote = {};
     for (const it of itens) {
       const pid = Number(it.produto_id);
       const qtd = parsePositiveNumber(it.qtd);
@@ -1433,29 +1435,41 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
       const custoUnit = Number(prod.custo || 0);
       const valor = Number((custoUnit * qtdFinal).toFixed(2));
 
-      // Trava otimista igual à do lançamento avulso: duas baixas simultâneas do mesmo produto
-      // não podem se sobrescrever.
-      const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd })
-        .eq('id', prod.id).eq('qtd', prod.qtd).select('id');
-      if (!upd || !upd.length) { falhas.push({ nome: prod.nome, erro: 'estoque mudou durante o lançamento, tente de novo' }); continue; }
-
       const partesObs = ['lote'];
       if (quando.retroativo) partesObs.push(`📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`);
       // Fica registrado que a baixa foi aparada pelo saldo: sem isso o histórico mostra 1
       // onde a cozinha usou 3, e ninguém entende a diferença depois.
       if (zerado) partesObs.push(`⚠️ pedido ${zerado.pedido} ${prod.unidade}, tinha ${zerado.baixado} — zerou`);
 
-      const { error: movErr } = await supabase.from('movimentacoes').insert({
-        produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-        tipo, qtd: qtdFinal, unidade: prod.unidade, custo: custoUnit, valor, motivo,
-        responsavel: req.user.nome,
-        obs: partesObs.join(' · ').slice(0, 200),
-        qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: quando.ts,
+      // Onda 3: cada linha numa transação só. Com lote_id (tela), a mesma linha reenviada não baixa de novo.
+      ocorrLote[pid] = (ocorrLote[pid] || 0) + 1;
+      const atL = await movimentarAtomico({
+        produtoId: prod.id, tipo, qtd: qtdFinal, motivo, responsavel: req.user.nome,
+        obs: partesObs.join(' · ').slice(0, 200), createdAt: quando.ts, unidade: prod.unidade,
+        eventoId: loteId ? `lote:${loteId}:${pid}:${ocorrLote[pid]}` : null,
       });
-      if (movErr) {
-        await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd);
-        falhas.push({ nome: prod.nome, erro: 'erro ao registrar' });
-        continue;
+      if (atL.erro) { falhas.push({ nome: prod.nome, erro: atL.erro }); continue; }
+      if (!atL.indisponivel && atL.dados.repetido) { falhas.push({ nome: prod.nome, erro: 'já lançado antes neste mesmo lote — não baixei de novo' }); continue; }
+      if (atL.indisponivel) {
+        // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+        // Trava otimista igual à do lançamento avulso: duas baixas simultâneas do mesmo produto
+        // não podem se sobrescrever.
+        const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd })
+          .eq('id', prod.id).eq('qtd', prod.qtd).select('id');
+        if (!upd || !upd.length) { falhas.push({ nome: prod.nome, erro: 'estoque mudou durante o lançamento, tente de novo' }); continue; }
+
+        const { error: movErr } = await supabase.from('movimentacoes').insert({
+          produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+          tipo, qtd: qtdFinal, unidade: prod.unidade, custo: custoUnit, valor, motivo,
+          responsavel: req.user.nome,
+          obs: partesObs.join(' · ').slice(0, 200),
+          qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: quando.ts,
+        });
+        if (movErr) {
+          await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd);
+          falhas.push({ nome: prod.nome, erro: 'erro ao registrar' });
+          continue;
+        }
       }
       feitos.push({ nome: prod.nome, qtd: qtdFinal, unidade: prod.unidade, valor, ...(zerado ? { zerado } : {}) });
     }
@@ -5526,6 +5540,11 @@ async function sincronizarQtd(prod, novaQtd, motivo, responsavel) {
   const alvo = Number(Number(novaQtd).toFixed(3));
   if (!Number.isFinite(alvo) || alvo === qtdAntes) return false;
   const custoUnit = Number(prod.custo || 0);
+  // Onda 3: Ajuste atômico (saldo e histórico juntos). Reserva antiga só sem a migração.
+  const atS = await movimentarAtomico({ produtoId: prod.id, tipo: 'Ajuste', qtd: alvo, custo: custoUnit,
+    motivo, responsavel: responsavel || 'Sistema', obs: 'sincronização automática' });
+  if (atS.erro) throw new Error(`${prod.nome}: ${atS.erro}`);
+  if (!atS.indisponivel) return true;
   await supabase.from('produtos').update({ qtd: alvo }).eq('id', prod.id);
   await supabase.from('movimentacoes').insert({
     produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
@@ -6665,23 +6684,45 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
   if (usaDocNovo) custo = custoUnitarioDoDocumento(vtP, qtd);
   const valorDocNovo = usaDocNovo ? vtP : null;
 
-  // Cria o produto já com a quantidade da nota (é a primeira entrada).
+  // Cria o produto ZERADO e dá a primeira entrada pelo caminho atômico (Onda 3): antes nascia
+  // já com a quantidade e o histórico era gravado depois, sem conferir erro — falha no meio
+  // deixava saldo sem histórico.
   const { data: novo, error } = await supabase.from('produtos').insert({
     nome, nome_search: normalizeSearch(nome), categoria, unidade,
-    qtd, minimo: 1, custo, ativo: 1,
+    qtd: 0, minimo: 1, custo, ativo: 1,
   }).select().single();
   if (error) {
     if (error.code === '23505') return res.status(400).json({ erro: 'Já existe um produto com esse nome. Use "Buscar outro produto".' });
     return res.status(500).json({ erro: 'Erro ao cadastrar produto.' });
   }
-  // Registra a movimentação de Entrada correspondente (rastreabilidade).
-  const { data: movNovo } = await supabase.from('movimentacoes').insert({
-    produto_id: novo.id, produto_nome: novo.nome, categoria: novo.categoria,
-    tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
-    valor: valorDaCompra({ custoUnit: custo, qtd, valorDocumento: valorDocNovo }), motivo: 'Compra',
-    responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
-    qtd_antes: 0, qtd_depois: qtd, // produto criado agora: 0 → primeira entrada
-  }).select('id').single();
+  let movNovo = null;
+  const atNovo = await movimentarAtomico({
+    produtoId: novo.id, tipo: 'Entrada', qtd, custo, atualizaCusto: false,
+    valor: valorDaCompra({ custoUnit: custo, qtd, valorDocumento: valorDocNovo }),
+    motivo: 'Compra', responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp',
+    eventoId: `pendencia:${pend.id}`, unidade: novo.unidade,
+  });
+  if (atNovo.erro) return res.status(atNovo.status).json({ erro: `Produto ${novo.nome} cadastrado, mas a entrada não foi registrada: ${atNovo.erro}` });
+  if (!atNovo.indisponivel) {
+    if (atNovo.dados.repetido) return res.json({ ok: true, repetido: true, produto: novo.nome, aviso: 'Essa pendência já tinha sido lançada antes. Não lancei de novo.' });
+    movNovo = { id: atNovo.dados.mov_id };
+  } else {
+    // RESERVA (banco sem a migração 2026-10-02): saldo e histórico em duas chamadas, conferindo erro.
+    const { error: errQtd } = await supabase.from('produtos').update({ qtd }).eq('id', novo.id).eq('qtd', 0);
+    if (errQtd) return res.status(500).json({ erro: `Produto ${novo.nome} cadastrado, mas a entrada não foi registrada. Lance pela tela.` });
+    const { data: movIns, error: errMovNovo } = await supabase.from('movimentacoes').insert({
+      produto_id: novo.id, produto_nome: novo.nome, categoria: novo.categoria,
+      tipo: 'Entrada', qtd, unidade: novo.unidade, custo,
+      valor: valorDaCompra({ custoUnit: custo, qtd, valorDocumento: valorDocNovo }), motivo: 'Compra',
+      responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp', created_at: nowSP(),
+      qtd_antes: 0, qtd_depois: qtd, // produto criado agora: 0 → primeira entrada
+    }).select('id').single();
+    if (errMovNovo) {
+      await supabase.from('produtos').update({ qtd: 0 }).eq('id', novo.id).eq('qtd', qtd);
+      return res.status(500).json({ erro: `Produto ${novo.nome} cadastrado, mas a entrada não foi registrada. Lance pela tela.` });
+    }
+    movNovo = movIns;
+  }
   const rcNovo = await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id, valorDocumento: valorDocNovo });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
@@ -7659,6 +7700,15 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
 async function aplicarAjusteInventario(item, novaQtd, inv, responsavel, causa) {
   const alvo = Number(Number(novaQtd).toFixed(3));
   const custo = Number(item.custo || 0);
+  // Onda 3: Ajuste atômico; a chave do item no inventário impede ajustar duas vezes (fechamento repetido).
+  const atInv = await movimentarAtomico({
+    produtoId: item.produto_id, tipo: 'Ajuste', qtd: alvo, custo,
+    motivo: `Inventário #${inv.id} (${inv.data})${causa ? ' — ' + causa : ''}`,
+    responsavel: responsavel || 'Inventário', obs: 'inventario', eventoId: `inventario:${inv.id}:${item.produto_id}`,
+  });
+  if (atInv.erro) throw new Error(`${item.produto_nome}: ${atInv.erro}`);
+  if (!atInv.indisponivel) return;
+  // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
   // Lê a quantidade atual (a contagem física é a verdade, mas o log precisa do valor real de antes).
   const { data: prodAtual } = await supabase.from('produtos').select('qtd').eq('id', item.produto_id).maybeSingle();
   const antes = prodAtual ? Number(prodAtual.qtd) : Number(item.qtd_sistema);

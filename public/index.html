@@ -3111,13 +3111,21 @@ async function lancarLoteSaidas() {
     { titulo: 'Lançar a lista?' })) return;
 
   try {
+    const itensLote = aLancar.map(i => ({ produto_id: i.produto_id, qtd: i.qtd, nome: i.nome }));
+    // Mesma lista reenviada (rede caiu, clique de novo) = mesmo lote_id: o servidor não baixa duas vezes.
+    const assinaturaLote = JSON.stringify([itensLote, motivo, data]);
+    if (!loteEnvioPendente || loteEnvioPendente.assinatura !== assinaturaLote) {
+      loteEnvioPendente = { assinatura: assinaturaLote, id: 'lote-' + ((window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2)) };
+    }
     const r = await apiPost('/api/movimentacoes/lote', {
-      itens: aLancar.map(i => ({ produto_id: i.produto_id, qtd: i.qtd, nome: i.nome })),
+      itens: itensLote,
       tipo: motivo === 'Perda/Vencimento' ? 'Perda' : 'Saída',
       motivo,
       zerar_sem_saldo: true,
+      lote_id: loteEnvioPendente.id,
       ...(data !== hojeISO() ? { data } : {}),
     });
+    loteEnvioPendente = null;
     let msg = `✓ ${r.lancados} lançado(s) · R$ ${Number(r.valor_total).toFixed(2)}`;
     if (r.retroativo) msg += ` → ${String(r.data).split('-').reverse().join('/')}`;
     toast(msg, 'ok');
@@ -3138,6 +3146,7 @@ async function lancarLoteSaidas() {
 // "confirmar mesmo assim") leva a MESMA chave e o servidor não lança duas vezes. Mudou o conteúdo
 // ou já gravou → chave nova (duas saídas reais iguais continuam valendo as duas).
 let eventoPendente = null;
+let loteEnvioPendente = null; // idem para o lançamento em lote
 function eventoDoLancamento(partes) {
   const assinatura = JSON.stringify(partes);
   if (!eventoPendente || eventoPendente.assinatura !== assinatura) {

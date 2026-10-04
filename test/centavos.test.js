@@ -51,3 +51,15 @@ test('centavos — CONTROLE: preço digitado diferente da nota vale custo × qua
   assert.equal(r.status, 200, JSON.stringify(r.json));
   assert.deepEqual((await contasDaMov(id)).contas, [25]);
 });
+
+test('criar produto pela pendência: nasce com o saldo da nota, 1 histórico e o total da nota nas Contas', async () => {
+  const pid = await pendencia('Produto Novo Nota', 300, 417.75);
+  const r = await ctx.api('admin', 'POST', `/api/pendencias/${pid}/criar-produto`, { nome: 'Produto Novo Nota', categoria: 'Teste', unidade: 'un', qtd: 300, memorizar: false });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const { rows: [p] } = await ctx.db.query(`select id, qtd::float8 as qtd from produtos where nome = 'Produto Novo Nota'`);
+  assert.equal(p.qtd, 300);
+  const movs = await ctx.movimentos(p.id);
+  assert.equal(movs.length, 1);
+  assert.equal(Number(movs[0].qtd_antes), 0);
+  assert.deepEqual((await contasDaMov(p.id)).contas, [417.75]);
+});

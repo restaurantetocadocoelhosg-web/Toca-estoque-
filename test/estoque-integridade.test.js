@@ -188,3 +188,16 @@ test('WhatsApp — entrada com total informado: saldo, histórico e Contas pelo 
   assert.match(s.json.resposta, /insuficiente/i);
   assert.equal(await ctx.saldo(id), 600);
 });
+
+test('Lote — a mesma lista reenviada com o mesmo lote_id não baixa duas vezes; lote novo baixa', async () => {
+  const id = await ctx.criarProduto({ nome: 'Lote feijão', qtd: 20 });
+  const corpo = { itens: [{ produto_id: id, qtd: 5, nome: 'Lote feijão' }], tipo: 'Saída', motivo: 'Produção', lote_id: 'lote-teste-1' };
+  const r1 = await ctx.api('gerente', 'POST', '/api/movimentacoes/lote', corpo);
+  const r2 = await ctx.api('gerente', 'POST', '/api/movimentacoes/lote', corpo);
+  assert.equal(r1.status, 200, JSON.stringify(r1.json));
+  assert.equal(r2.status, 200);
+  assert.equal(await ctx.saldo(id), 15, 'reenvio do mesmo lote não baixa de novo');
+  const r3 = await ctx.api('gerente', 'POST', '/api/movimentacoes/lote', { ...corpo, lote_id: 'lote-teste-2' });
+  assert.equal(r3.status, 200);
+  assert.equal(await ctx.saldo(id), 10, 'outro lote (outra baixa real) vale');
+});
