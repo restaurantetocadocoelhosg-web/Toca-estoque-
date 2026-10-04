@@ -143,3 +143,51 @@ test('F6 — consumo da média usa os MESMOS meses do divisor (só meses com con
   assert.equal(r.json.janela.situacao, 'parcial');
   assert.equal(r.json.consumo_estoque.valor_janela, 300, 'julho (sem contas) não pode entrar no consumo da média');
 });
+
+test('F8 (revisão) — a tela REENVIA a mesma contagem no fechamento: o instante original vale', async () => {
+  const id = await ctx.criarProduto({ nome: 'F8d produto', qtd: 12, custo: 10, categoria: 'F8d' });
+  await ctx.api('gerente', 'POST', '/api/inventario/abrir', { categoria: 'F8d' });
+  const { rows: [inv] } = await ctx.db.query(`select id from inventarios where status = 'aberto' order by id desc limit 1`);
+  // 9h: contou 10 (sistema 12 → sumiço de 2)
+  await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: id, qtd_contada: 10 }] });
+  // 10h: saída real de 3
+  await ctx.api('gerente', 'POST', '/api/movimentacoes', { produto_id: id, tipo: 'Saída', qtd: 3, motivo: 'Produção', forcar: true });
+  // 11h: a tela salva a lista inteira de novo (mesmo 10) e fecha
+  await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: id, qtd_contada: 10 }] });
+  const f = await ctx.api('gerente', 'POST', '/api/inventario/fechar', { inventario_id: inv.id });
+  assert.equal(f.status, 200, JSON.stringify(f.json));
+  const { rows: [item] } = await ctx.db.query('select divergencia from inventario_itens where inventario_id = $1 and produto_id = $2', [inv.id, id]);
+  assert.equal(Number(item.divergencia), -2, 'sumiço de 2 no instante da contagem (não "sobra de 1")');
+  assert.equal(await ctx.saldo(id), 7, 'contou 10, saíram 3 depois: fica 7');
+});
+
+test('F8 (revisão) — final negativo (contou 2, saíram 5 depois) é recusado ANTES de ajustar qualquer item', async () => {
+  const a = await ctx.criarProduto({ nome: 'F8e ok', qtd: 10, custo: 1, categoria: 'F8e' });
+  const b = await ctx.criarProduto({ nome: 'F8e neg', qtd: 10, custo: 1, categoria: 'F8e' });
+  await ctx.api('gerente', 'POST', '/api/inventario/abrir', { categoria: 'F8e' });
+  const { rows: [inv] } = await ctx.db.query(`select id from inventarios where status = 'aberto' order by id desc limit 1`);
+  await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: a, qtd_contada: 8 }, { produto_id: b, qtd_contada: 2 }] });
+  await ctx.api('gerente', 'POST', '/api/movimentacoes', { produto_id: b, tipo: 'Saída', qtd: 5, motivo: 'Produção', forcar: true });
+  const f = await ctx.api('gerente', 'POST', '/api/inventario/fechar', { inventario_id: inv.id });
+  assert.equal(f.status, 409, JSON.stringify(f.json));
+  assert.equal(f.json.negativos.length, 1);
+  assert.equal(await ctx.saldo(a), 10, 'nenhum item ajustado');
+  const { rows: [st] } = await ctx.db.query('select status from inventarios where id = $1', [inv.id]);
+  assert.equal(st.status, 'aberto');
+  await ctx.db.query("update inventarios set status = 'cancelado' where id = $1", [inv.id]); // só um aberto por vez
+});
+
+test('F8 (revisão) — fechamento repetido depois de cair no meio não ajusta o item duas vezes', async () => {
+  const id = await ctx.criarProduto({ nome: 'F8f produto', qtd: 10, custo: 1, categoria: 'F8f' });
+  await ctx.api('gerente', 'POST', '/api/inventario/abrir', { categoria: 'F8f' });
+  const { rows: [inv] } = await ctx.db.query(`select id from inventarios where status = 'aberto' order by id desc limit 1`);
+  await ctx.api('gerente', 'POST', '/api/inventario/contar', { inventario_id: inv.id, itens: [{ produto_id: id, qtd_contada: 6 }] });
+  // simula o 1º fechamento que ajustou o item e caiu antes de fechar o inventário
+  await ctx.db.query(`select estoque_movimentar(1, $1, 'Ajuste', 6, 1, false, null, 'Inventário', 'teste', 'inventario', null, $2)`, [id, `inventario:${inv.id}:${id}`]);
+  await ctx.api('gerente', 'POST', '/api/movimentacoes', { produto_id: id, tipo: 'Saída', qtd: 1, motivo: 'Produção', forcar: true });
+  const f = await ctx.api('gerente', 'POST', '/api/inventario/fechar', { inventario_id: inv.id });
+  assert.equal(f.status, 200, JSON.stringify(f.json));
+  assert.equal(await ctx.saldo(id), 5, 'ajustado uma vez (6) e a saída posterior (1) preservada');
+  const ajustes = (await ctx.movimentos(id)).filter((m) => m.tipo === 'Ajuste');
+  assert.equal(ajustes.length, 1);
+});

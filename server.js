@@ -214,7 +214,7 @@ function restauranteDoPedido() {
   if (!t) throw new Error('lançamento fora do contexto de um restaurante');
   return Number(t);
 }
-const funcaoAusente = (error) => error && (error.code === 'PGRST202' || error.code === '42883' || /could not find the function/i.test(error.message || ''));
+const funcaoAusente = (error) => error && (error.code === 'PGRST202' || /could not find the function/i.test(error.message || ''));
 function traduzirErroEstoque(error, unidade = '') {
   const msg = String(error?.message || '');
   let m;
@@ -1301,7 +1301,8 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     : obs;
   // Onda 3: saldo + histórico numa transação só, com o produto travado (F1/F2), e evento_id
   // da operação lógica para o reenvio não lançar de novo (F3).
-  const eventoId = sanitizeText(req.body?.evento_id || '', 80) || null;
+  const eventoBruto = sanitizeText(req.body?.evento_id || '', 80);
+  const eventoId = eventoBruto ? 'cli:' + eventoBruto : null; // prefixo próprio: o cliente não colide com chaves do servidor
   let novaQtd, qtdAntes, custoUnit, movInsId = null, repetido = false;
   const at = await movimentarAtomico({
     produtoId: prod.id, tipo, qtd, custo: custoBody, atualizaCusto: tipo === 'Entrada' && custoBody !== null,
@@ -1367,6 +1368,12 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     movInsId = movIns?.id || null;
   }
   if (repetido) {
+    if (tipo === 'Entrada' && motivo === 'Compra' && movInsId) {
+      const { data: jaConta, error: errConta } = await supabase.from('pagamentos_comprovantes').select('id').eq('mov_id', movInsId).limit(1);
+      if (!errConta && (!jaConta || !jaConta.length)) {
+        await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movInsId, data: quando.retroativo ? dataISOFromTimestampSP(quando.ts) : null });
+      }
+    }
     const { data: prodAgora } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
     return res.json({ ok: true, repetido: true, produto: prodAgora });
   }
@@ -1449,7 +1456,7 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
         eventoId: loteId ? `lote:${loteId}:${pid}:${ocorrLote[pid]}` : null,
       });
       if (atL.erro) { falhas.push({ nome: prod.nome, erro: atL.erro }); continue; }
-      if (!atL.indisponivel && atL.dados.repetido) { falhas.push({ nome: prod.nome, erro: 'já lançado antes neste mesmo lote — não baixei de novo' }); continue; }
+      if (!atL.indisponivel && atL.dados.repetido) { feitos.push({ nome: prod.nome, qtd: qtdFinal, unidade: prod.unidade, valor: 0, ja_lancado: true }); continue; }
       if (atL.indisponivel) {
         // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
         // Trava otimista igual à do lançamento avulso: duas baixas simultâneas do mesmo produto
@@ -5544,7 +5551,7 @@ async function sincronizarQtd(prod, novaQtd, motivo, responsavel) {
   // Onda 3: Ajuste atômico (saldo e histórico juntos). Reserva antiga só sem a migração.
   const atS = await movimentarAtomico({ produtoId: prod.id, tipo: 'Ajuste', qtd: alvo, custo: custoUnit,
     motivo, responsavel: responsavel || 'Sistema', obs: 'sincronização automática' });
-  if (atS.erro) throw new Error(`${prod.nome}: ${atS.erro}`);
+  if (atS.erro) { console.error('sincronizarQtd:', prod.nome, atS.erro); await logErroAgenda('sincronizar-qtd', new Error(`${prod.nome}: ${atS.erro}`), null); return false; }
   if (!atS.indisponivel) return true;
   await supabase.from('produtos').update({ qtd: alvo }).eq('id', prod.id);
   await supabase.from('movimentacoes').insert({
@@ -6280,7 +6287,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
   const hashNota = crypto.createHash('sha256').update(listaImg.join('|')).digest('hex').slice(0, 32);
   try {
     const { data: jaLida, error: errJa } = await supabaseRaw.from('movimentacao_eventos').select('evento_id')
-      .eq('tenant_id', restauranteDoPedido()).like('evento_id', `nota:${hashNota}:%`).limit(1);
+      .eq('tenant_id', restauranteDoPedido()).eq('evento_id', `nota:${hashNota}:_lida`).limit(1);
     if (!errJa && jaLida && jaLida.length) {
       return res.json({ resposta: '♻️ Essa nota já foi lançada antes (mesma foto). Não lancei de novo. Se for outra compra igual, lance pelo app.', repetida: true });
     }
@@ -6390,10 +6397,11 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
     }
     // Marca a nota como lida (mesmo que tudo tenha ido para pendência): reenvio da mesma foto
     // não cria pendências nem lançamentos de novo. Falha aqui não desfaz o que já entrou.
-    try {
-      await supabaseRaw.from('movimentacao_eventos').insert({ tenant_id: restauranteDoPedido(), evento_id: `nota:${hashNota}:_lida`, conteudo: 'lida',
-        resultado: { lancados: lancados.length, pendencias: pendencias.length } });
-    } catch (e) { console.error('[ler-nota] marca de nota lida:', e.message); }
+    if (!pendenciasFalharam) {
+      const { error: errLida } = await supabaseRaw.from('movimentacao_eventos').upsert({ tenant_id: restauranteDoPedido(), evento_id: `nota:${hashNota}:_lida`, conteudo: 'lida',
+        resultado: { lancados: lancados.length, pendencias: pendencias.length } }, { onConflict: 'tenant_id,evento_id', ignoreDuplicates: true });
+      if (errLida && !funcaoAusente(errLida)) console.error('[ler-nota] marca de nota lida:', errLida.message);
+    }
     await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length }, null, '');
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
@@ -6703,9 +6711,15 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     motivo: 'Compra', responsavel: req.user.nome, obs: 'produto novo via nota WhatsApp',
     eventoId: `pendencia:${pend.id}`, unidade: novo.unidade,
   });
-  if (atNovo.erro) return res.status(atNovo.status).json({ erro: `Produto ${novo.nome} cadastrado, mas a entrada não foi registrada: ${atNovo.erro}` });
+  // Produto recém-criado, zerado e sem histórico: se a entrada não vale, ele não pode ficar órfão.
+  const desfazProdutoNovo = async () => { const { error: errDel } = await supabase.from('produtos').delete().eq('id', novo.id).eq('qtd', 0); if (errDel) console.error('criar-produto: órfão não removido', errDel.message); };
+  if (atNovo.erro) { await desfazProdutoNovo(); return res.status(atNovo.status).json({ erro: `A entrada não foi registrada (${atNovo.erro}). Nada foi cadastrado; tente de novo.` }); }
   if (!atNovo.indisponivel) {
-    if (atNovo.dados.repetido) return res.json({ ok: true, repetido: true, produto: novo.nome, aviso: 'Essa pendência já tinha sido lançada antes. Não lancei de novo.' });
+    if (atNovo.dados.repetido) {
+      await desfazProdutoNovo();
+      await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+      return res.json({ ok: true, repetido: true, produto: nome, qtd, aviso: 'Essa pendência já tinha sido lançada antes. Não lancei nem cadastrei de novo.' });
+    }
     movNovo = { id: atNovo.dados.mov_id };
   } else {
     // RESERVA (banco sem a migração 2026-10-02): saldo e histórico em duas chamadas, conferindo erro.
@@ -7543,24 +7557,31 @@ app.post('/api/inventario/contar', auth, async (req, res) => {
     if (!invId || !itens.length) return res.status(400).json({ erro: 'Dados de contagem inválidos.' });
     const { data: inv } = await supabase.from('inventarios').select('id, status').eq('id', invId).maybeSingle();
     if (!inv || inv.status !== 'aberto') return res.status(400).json({ erro: 'Inventário não está aberto.' });
+    // F8: guarda o INSTANTE da contagem e o saldo do sistema nesse instante — mas SÓ quando o item
+    // ainda não tinha contagem ou o número contado MUDOU. A tela reenvia a lista inteira a cada
+    // salvamento (e no fechamento): regravar o instante sempre anulava a correção.
+    // 2 leituras para a lista toda (antes eram 1-2 por item: risco de timeout, ver incidente do inventário).
+    const pids = itens.map((it) => Number(it.produto_id)).filter(Boolean);
+    const { data: atuais, error: errAtuais } = await supabase.from('inventario_itens').select('*').eq('inventario_id', invId).in('produto_id', pids);
+    if (errAtuais) return res.status(500).json({ erro: 'Não consegui ler as contagens já salvas. Tente de novo.' });
+    const atualPorPid = Object.fromEntries((atuais || []).map((a) => [String(a.produto_id), a]));
+    const temColunasF8 = (atuais || []).some((a) => 'contado_em' in a);
+    const { data: saldos, error: errSaldos } = await supabase.from('produtos').select('id, qtd').in('id', pids);
+    if (errSaldos) return res.status(500).json({ erro: 'Não consegui ler o estoque. Tente de novo.' });
+    const saldoPorPid = Object.fromEntries((saldos || []).map((p) => [String(p.id), Number(p.qtd)]));
     let salvos = 0;
     const falhas = [];
     for (const it of itens) {
       const pid = Number(it.produto_id);
       const q = it.qtd_contada === null || it.qtd_contada === '' ? null : parseNonNegativeNumber(it.qtd_contada);
       if (!pid) continue;
-      // F8: guarda o INSTANTE da contagem e o saldo do sistema nesse instante. No fechamento a
-      // divergência é medida contra ele (não contra a abertura) e o que se mexeu depois é preservado.
-      let extra = { contado_em: null, qtd_sistema_contagem: null };
-      if (q !== null) {
-        const { data: p, error: errP } = await supabase.from('produtos').select('qtd').eq('id', pid).maybeSingle();
-        if (!errP && p) extra = { contado_em: nowSP(), qtd_sistema_contagem: Number(p.qtd) };
-      }
-      let { error } = await supabase.from('inventario_itens').update({ qtd_contada: q, ...extra }).eq('inventario_id', invId).eq('produto_id', pid);
-      // Banco ainda sem a migração (colunas novas): salva só a contagem, como antes.
-      if (error && /contado_em|qtd_sistema_contagem/.test(error.message || '')) {
-        ({ error } = await supabase.from('inventario_itens').update({ qtd_contada: q }).eq('inventario_id', invId).eq('produto_id', pid));
-      }
+      const atual = atualPorPid[String(pid)];
+      const mudou = !atual || (atual.qtd_contada === null ? q !== null : (q === null || Math.abs(Number(atual.qtd_contada) - q) > 0.0005));
+      if (!mudou) { salvos++; continue; } // mesma contagem: mantém o instante original
+      const upd = { qtd_contada: q };
+      if (temColunasF8) Object.assign(upd, q === null ? { contado_em: null, qtd_sistema_contagem: null }
+        : { contado_em: nowSP(), qtd_sistema_contagem: saldoPorPid[String(pid)] ?? null });
+      const { error } = await supabase.from('inventario_itens').update(upd).eq('inventario_id', invId).eq('produto_id', pid);
       if (error) { falhas.push(pid); continue; }
       salvos++;
     }
@@ -7616,6 +7637,38 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
         absurdos,
       });
     }
+    // ── PRÉ-PASSE (F8) ── calcula o estoque final de cada item contado ANTES de ajustar qualquer um:
+    // com o instante da contagem, final = contagem + o que se mexeu depois dela. Se algum der negativo
+    // (contou 2, saíram 5 depois), a contagem está errada: recusa sem ajustar nada.
+    // Itens que já têm o evento "inventario:<id>:<produto>" foram ajustados num fechamento que caiu
+    // no meio: são pulados (o fechamento pode ser repetido com segurança).
+    const contadosComInstante = (itens || []).filter((it) => it.qtd_contada !== null && it.contado_em && it.qtd_sistema_contagem != null);
+    const saldoAgora = {};
+    if (contadosComInstante.length) {
+      const { data: ps, error: errPs } = await supabase.from('produtos').select('id, qtd').in('id', contadosComInstante.map((it) => it.produto_id));
+      if (errPs) return res.status(500).json({ erro: 'Não consegui ler o estoque atual. Nada foi ajustado; tente de novo.' });
+      for (const p of ps || []) saldoAgora[String(p.id)] = Number(p.qtd);
+    }
+    const jaAjustados = new Set();
+    try {
+      const { data: evs } = await supabaseRaw.from('movimentacao_eventos').select('evento_id')
+        .eq('tenant_id', restauranteDoPedido()).like('evento_id', `inventario:${invId}:%`);
+      for (const e of evs || []) jaAjustados.add(e.evento_id.split(':')[2]);
+    } catch (e) { /* sem a migração: sem retomada, como antes */ }
+    const alvoDoItem = (it) => {
+      const contada = Number(it.qtd_contada);
+      if (!(it.contado_em && it.qtd_sistema_contagem != null)) return contada;
+      const agora = saldoAgora[String(it.produto_id)];
+      return Number((contada + (Number(agora ?? it.qtd_sistema_contagem) - Number(it.qtd_sistema_contagem))).toFixed(3));
+    };
+    const negativos = (itens || []).filter((it) => it.qtd_contada !== null && !jaAjustados.has(String(it.produto_id)) && alvoDoItem(it) < 0)
+      .map((it) => ({ produto_id: it.produto_id, nome: it.produto_nome, contada: Number(it.qtd_contada), final: alvoDoItem(it), unidade: it.unidade }));
+    if (negativos.length) {
+      return res.status(409).json({
+        erro: `${negativos.length} item(ns) ficariam negativos: saiu mais do que foi contado depois da contagem. Conte de novo esses itens antes de fechar.`,
+        negativos,
+      });
+    }
     let divergentes = 0, suspeitos = 0, valorSumico = 0, valorSobra = 0;
     const topSumico = [], suspeitosList = [], errosLanc = [];
 
@@ -7649,15 +7702,10 @@ app.post('/api/inventario/fechar', auth, requireRole('admin', 'gerente'), async 
       const valorDiv = Number((Math.abs(div) * custo).toFixed(2));
       let causa = sanitizeText(causas[it.produto_id] || '', 20);
       if (!causa) causa = div < 0 ? 'sumico' : div > 0 ? 'sobra' : 'ok';
-      let alvo = contada;
-      if (temInstante) {
-        const { data: pAgora, error: errAgora } = await supabase.from('produtos').select('qtd').eq('id', it.produto_id).maybeSingle();
-        if (errAgora || !pAgora) throw new Error(`não consegui ler o saldo atual de ${it.produto_nome}`);
-        alvo = Number((contada + (Number(pAgora.qtd) - base)).toFixed(3));
-      }
+      const alvo = alvoDoItem(it);
 
       if (Math.abs(div) > 0.001) {
-        await aplicarAjusteInventario(it, alvo, inv, req.user.nome, causa);
+        if (!jaAjustados.has(String(it.produto_id))) await aplicarAjusteInventario(it, alvo, inv, req.user.nome, causa);
         divergentes++;
         if (div < 0) { valorSumico += valorDiv; topSumico.push({ nome: it.produto_nome, qtd: Math.abs(div), valor: valorDiv }); }
         else valorSobra += valorDiv;
@@ -7937,7 +7985,7 @@ app.get('/api/auditoria/divergencias', auth, requireRole('admin', 'gerente'), as
       const lote = idsPeriodo.slice(i, i + 150);
       const hist = await fetchTodas(() => supabase.from('movimentacoes')
         .select('id, produto_id, tipo, qtd, qtd_antes').in('produto_id', lote)
-        .order('created_at', { ascending: true }).order('id', { ascending: true }));
+        .order('id', { ascending: true }));
       const saldo = {};
       for (const m of hist) {
         const k = m.produto_id;

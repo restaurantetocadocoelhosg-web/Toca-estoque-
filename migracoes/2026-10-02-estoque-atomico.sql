@@ -10,6 +10,8 @@
 -- com o mesmo conteúdo devolve o resultado da primeira vez; mesmo evento com conteúdo diferente é
 -- RECUSADO (nunca "adivinha" qual vale). Duas saídas reais iguais têm eventos diferentes e valem as duas.
 
+begin;
+
 create table if not exists movimentacao_eventos (
   tenant_id bigint not null,
   evento_id text not null,
@@ -29,7 +31,9 @@ create or replace function estoque_movimentar(
 ) returns jsonb
 language plpgsql
 security invoker
-set search_path = public
+-- search_path capturado na criação: em produção é public; num ambiente com outro schema, rode
+-- "set search_path = <schema>;" antes desta migração e a função fica presa a ele.
+set search_path from current
 as $$
 declare
   v_prod produtos%rowtype;
@@ -40,7 +44,9 @@ begin
   if p_qtd is null or p_qtd < 0 or (p_qtd = 0 and p_tipo <> 'Ajuste') then raise exception 'QTD_INVALIDA' using errcode = 'P0001'; end if;
 
   if p_evento_id is not null then
-    v_conteudo := concat_ws('|', p_tipo, p_produto_id, p_qtd::text, coalesce(p_custo::text, ''), coalesce(p_motivo, ''));
+    -- Conteúdo que identifica o pedido: o mesmo evento com qualquer destes diferentes é RECUSADO.
+    v_conteudo := concat_ws('|', p_tipo, p_produto_id, p_qtd::text, coalesce(p_custo::text, ''), coalesce(p_motivo, ''),
+                            coalesce(p_valor::text, ''), coalesce(to_char(p_created_at at time zone 'America/Sao_Paulo', 'YYYY-MM-DD'), ''));
     -- Reserva o evento. Reenvio concorrente espera aqui até a 1ª transação terminar.
     insert into movimentacao_eventos (tenant_id, evento_id, conteudo) values (p_tenant, p_evento_id, v_conteudo)
       on conflict (tenant_id, evento_id) do nothing;
@@ -87,7 +93,9 @@ end $$;
 create or replace function estoque_cancelar(p_tenant bigint, p_mov_id bigint) returns jsonb
 language plpgsql
 security invoker
-set search_path = public
+-- search_path capturado na criação: em produção é public; num ambiente com outro schema, rode
+-- "set search_path = <schema>;" antes desta migração e a função fica presa a ele.
+set search_path from current
 as $$
 declare
   v_mov movimentacoes%rowtype; v_prod produtos%rowtype; v_depois numeric;
@@ -119,3 +127,8 @@ grant execute on function estoque_movimentar(bigint, bigint, text, numeric, nume
 grant execute on function estoque_cancelar(bigint, bigint) to service_role;
 revoke all on table movimentacao_eventos from anon, authenticated;
 grant select, insert, update on table movimentacao_eventos to service_role;
+-- RLS ligado e SEM política: ninguém além do service_role (que ignora RLS) enxerga a tabela, mesmo
+-- se um GRANT futuro reabrir o acesso pela API pública.
+alter table movimentacao_eventos enable row level security;
+
+commit;

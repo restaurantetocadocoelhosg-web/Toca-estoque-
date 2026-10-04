@@ -3638,7 +3638,7 @@ async function loadHist() {
         </div>
       </div>`;
     }).join('');
-  } catch(e) { handleApiError(e,false); }
+  } catch(e) { if (!ehAtual()) return; handleApiError(e,false); } // erro de carga antiga não apaga a tela nova
 }
 
 function moneyFromText(value) {
@@ -4816,6 +4816,7 @@ async function loadRealidade() {
     realidadeCache = d;
     renderRealidade(d);
   } catch(e) {
+    if (!ehAtual()) return; // erro de carga antiga não apaga a tela nova
     resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar.</div></div>';
     handleApiError(e, true);
   }
@@ -5761,6 +5762,7 @@ async function loadComparar() {
     if (!ehAtual()) return;
     renderComparar(dComparar);
   } catch (e) {
+    if (!ehAtual()) return; // erro de carga antiga não apaga a tela nova
     tabela.innerHTML = '<tbody><tr><td class="empty-text">Erro ao comparar.</td></tr></tbody>';
     handleApiError(e);
   }
@@ -5942,6 +5944,7 @@ async function loadIndices() {
     if (!ehAtual()) return;
     renderIndices(dIndices);
   } catch (e) {
+    if (!ehAtual()) return;
     primeEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar os índices.</div></div>';
     handleApiError(e, true);
   }
@@ -6288,6 +6291,7 @@ async function loadPagamentos() {
     renderPagamentos(d);
     loadContaPendencias();
   } catch(e) {
+    if (!ehAtual()) return; // erro de carga antiga não apaga a tela nova
     resumoEl.innerHTML = '<div class="empty"><div class="empty-text">Erro ao carregar pagamentos.</div></div>';
     listaEl.innerHTML = '';
     handleApiError(e, true);
@@ -7644,7 +7648,10 @@ function renderAuditoria() {
     for (const r of itens) {
       const corBg = r.alerta ? 'rgba(232,93,38,0.06)' : r.sem_entrada ? 'rgba(255,193,7,0.06)' : 'var(--s2)';
       const corBorda = r.alerta ? 'rgba(232,93,38,0.3)' : r.sem_entrada ? 'rgba(255,193,7,0.3)' : 'var(--border)';
-      const badge = r.alerta
+      // F9: sem ponto de partida conhecido, a falta é "a conferir", não prova de sumiço.
+      const badge = r.alerta && r.conferencia === 'inconclusivo'
+        ? '<span title="O histórico não diz com quanto o produto começou: confira antes de concluir que sumiu" style="background:#64748b;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">⚪ A CONFERIR</span>'
+        : r.alerta
         ? '<span style="background:#e85d26;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">🔴 ALERTA</span>'
         : r.sem_entrada
           ? '<span style="background:#b8860b;color:#fff;border-radius:6px;padding:2px 7px;font-size:10px;font-weight:700">🟡 SEM ENTRADA</span>'

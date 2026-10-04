@@ -117,7 +117,8 @@ test('F3 — compra reenviada com o mesmo evento entra UMA vez também nas Conta
 test('COMPATIBILIDADE — banco SEM a migração (função ausente): lançar e cancelar seguem funcionando no modo antigo', async () => {
   await ctx.db.query('alter function estoque_movimentar(bigint, bigint, text, numeric, numeric, boolean, numeric, text, text, text, timestamptz, text) rename to estoque_movimentar_x');
   await ctx.db.query('alter function estoque_cancelar(bigint, bigint) rename to estoque_cancelar_x');
-  await ctx.recarregarEsquemaRest?.();
+  await ctx.esperarFuncaoRest('estoque_movimentar', false);
+  await ctx.esperarFuncaoRest('estoque_cancelar', false);
   try {
     const id = await ctx.criarProduto({ nome: 'Compat antigo', qtd: 50 });
     const r = await ctx.api('gerente', 'POST', '/api/movimentacoes', saida(id));
@@ -130,7 +131,8 @@ test('COMPATIBILIDADE — banco SEM a migração (função ausente): lançar e c
   } finally {
     await ctx.db.query('alter function estoque_movimentar_x(bigint, bigint, text, numeric, numeric, boolean, numeric, text, text, text, timestamptz, text) rename to estoque_movimentar');
     await ctx.db.query('alter function estoque_cancelar_x(bigint, bigint) rename to estoque_cancelar');
-    await ctx.recarregarEsquemaRest?.();
+    await ctx.esperarFuncaoRest('estoque_movimentar', true);
+    await ctx.esperarFuncaoRest('estoque_cancelar', true);
   }
 });
 

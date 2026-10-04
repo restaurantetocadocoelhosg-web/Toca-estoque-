@@ -64,6 +64,24 @@ async function subirApp() {
   return {
     // Depois de mexer em função/tabela pelo SQL: o PostgREST relê o esquema (assíncrono).
     async recarregarEsquemaRest() { await amb.recarregarEsquemaRest(); await new Promise((r) => setTimeout(r, 800)); },
+    // Espera o PostgREST enxergar (ou deixar de enxergar) uma função. Tempo fixo não basta: com o
+    // cache velho a chamada dá 42883 (não PGRST202), e o teste passaria pelo motivo errado.
+    async esperarFuncaoRest(nome, deveExistir, limiteMs = 10000) {
+      const fim = Date.now() + limiteMs;
+      for (;;) {
+        await amb.recarregarEsquemaRest();
+        // Assinatura completa (sem ela o PostgREST diz PGRST202 mesmo com a função existindo), com
+        // valores que a função recusa na 1ª validação: a sondagem nunca grava nada.
+        const args = nome === 'estoque_cancelar' ? { p_tenant: 0, p_mov_id: 0 }
+          : { p_tenant: 0, p_produto_id: 0, p_tipo: 'SONDA', p_qtd: 1, p_custo: null, p_atualiza_custo: false, p_valor: null, p_motivo: null, p_responsavel: null, p_obs: null, p_created_at: null, p_evento_id: null };
+        const r = await fetch(`${amb.url}/rest/v1/rpc/${nome}`, { method: 'POST', headers: { apikey: amb.chave, authorization: `Bearer ${amb.chave}`, 'content-type': 'application/json' }, body: JSON.stringify(args) });
+        const corpo = await r.json().catch(() => ({}));
+        const ausente = corpo.code === 'PGRST202';
+        if (ausente !== deveExistir) return;
+        if (Date.now() > fim) throw new Error(`PostgREST não atualizou ${nome} (deveExistir=${deveExistir})`);
+        await new Promise((res) => setTimeout(res, 300));
+      }
+    },
     base, api, apiToken, novaSessao, db: amb.db, novaConexao: amb.novaConexao, criarProduto, saldo, movimentos,
     async parar() { await new Promise((r) => servidor.close(r)); await amb.parar(); },
   };
