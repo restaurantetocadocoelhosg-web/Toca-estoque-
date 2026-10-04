@@ -62,6 +62,8 @@ async function subirApp() {
   const movimentos = async (id) => (await amb.db.query('select * from movimentacoes where produto_id = $1 order by id', [id])).rows;
 
   return {
+    // Depois de mexer em função/tabela pelo SQL: o PostgREST relê o esquema (assíncrono).
+    async recarregarEsquemaRest() { await amb.recarregarEsquemaRest(); await new Promise((r) => setTimeout(r, 800)); },
     base, api, apiToken, novaSessao, db: amb.db, novaConexao: amb.novaConexao, criarProduto, saldo, movimentos,
     async parar() { await new Promise((r) => servidor.close(r)); await amb.parar(); },
   };

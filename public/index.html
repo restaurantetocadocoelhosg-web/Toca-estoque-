@@ -3134,6 +3134,19 @@ async function lancarLoteSaidas() {
   } catch (e) { toast(e.message || 'Erro ao lançar', 'err'); }
 }
 
+// Chave da OPERAÇÃO LÓGICA (Onda 3 / F3): o mesmo lançamento reenviado (rede caiu, clique de novo,
+// "confirmar mesmo assim") leva a MESMA chave e o servidor não lança duas vezes. Mudou o conteúdo
+// ou já gravou → chave nova (duas saídas reais iguais continuam valendo as duas).
+let eventoPendente = null;
+function eventoDoLancamento(partes) {
+  const assinatura = JSON.stringify(partes);
+  if (!eventoPendente || eventoPendente.assinatura !== assinatura) {
+    const id = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2);
+    eventoPendente = { assinatura, id: 'tela-' + id };
+  }
+  return eventoPendente.id;
+}
+
 async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
   const qtd = numQtd(document.getElementById('f-qtd').value);
@@ -3160,12 +3173,15 @@ async function lancar(forcar = false) {
   btn.disabled = true; btn.textContent = '⏳ Salvando...';
   try {
     const dataEscolhida = dataLancamentoEscolhida();
+    const motivoLanc = document.getElementById('f-motivo').value;
+    const eventoId = eventoDoLancamento([prodAtual.id, tipoAtual, qtd, custoLancamento, motivoLanc, dataEscolhida || '']);
     const resultado = await apiPost('/api/movimentacoes', {
       produto_id: prodAtual.id,
       produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: custoLancamento,
-      motivo: document.getElementById('f-motivo').value, obs: '', forcar,
+      motivo: motivoLanc, obs: '', forcar, evento_id: eventoId,
       ...(dataEscolhida ? { data: dataEscolhida } : {})
     });
+    if (!resultado._alerta409) eventoPendente = null; // gravou: o próximo lançamento é outro evento
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
       // precisa_gerente: o servidor não aceita a confirmação deste usuário (operador). Abrir

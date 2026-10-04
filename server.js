@@ -204,6 +204,48 @@ function custoSuspeito(custoAtual, custoNovo) {
   };
 }
 
+// ── ESTOQUE ATÔMICO (Onda 3) ─────────────────────────────────────────────────
+// Saldo e histórico mudam numa transação só, no banco (migracoes/2026-10-02-estoque-atomico.sql).
+// Se o banco ainda não tem a função (código subiu antes da migração), devolve { indisponivel }
+// e quem chamou usa o caminho antigo — a ordem da subida não derruba o app.
+function restauranteDoPedido() {
+  if (!MULTI_TENANT) return 1;
+  const t = tenantAtual();
+  if (!t) throw new Error('lançamento fora do contexto de um restaurante');
+  return Number(t);
+}
+const funcaoAusente = (error) => error && (error.code === 'PGRST202' || error.code === '42883' || /could not find the function/i.test(error.message || ''));
+function traduzirErroEstoque(error, unidade = '') {
+  const msg = String(error?.message || '');
+  let m;
+  if ((m = msg.match(/ESTOQUE_INSUFICIENTE:([\d.]+)/))) return { status: 400, erro: `Estoque insuficiente. Disponível: ${Number(m[1])} ${unidade}.`.trim() };
+  if ((m = msg.match(/FICARIA_NEGATIVO:([\d.]+)/))) return { status: 400, erro: `Não é possível cancelar: estoque ficaria negativo (${Number(m[1])} disponível).` };
+  if (/PRODUTO_NAO_ENCONTRADO/.test(msg)) return { status: 404, erro: 'Produto não encontrado.' };
+  if (/MOV_NAO_ENCONTRADA/.test(msg)) return { status: 404, erro: 'Movimentação não encontrada (talvez já tenha sido cancelada).' };
+  if (/AJUSTE_NAO_CANCELA/.test(msg)) return { status: 400, erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' };
+  if (/EVENTO_CONFLITANTE/.test(msg)) return { status: 409, erro: 'Este lançamento já foi enviado antes com outro conteúdo. Confira o histórico antes de lançar de novo.' };
+  if (/QTD_INVALIDA|TIPO_INVALIDO/.test(msg)) return { status: 400, erro: 'Quantidade ou tipo inválido.' };
+  console.error('estoque atômico:', msg);
+  return { status: 500, erro: 'Erro ao registrar movimentação. Nada foi alterado.' };
+}
+async function movimentarAtomico({ produtoId, tipo, qtd, custo = null, atualizaCusto = false, valor = null, motivo = '', responsavel = '', obs = '', createdAt = null, eventoId = null, unidade = '' }) {
+  const { data, error } = await supabase.rpc('estoque_movimentar', {
+    p_tenant: restauranteDoPedido(), p_produto_id: produtoId, p_tipo: tipo, p_qtd: qtd,
+    p_custo: custo, p_atualiza_custo: !!atualizaCusto, p_valor: valor,
+    p_motivo: motivo || null, p_responsavel: responsavel || null, p_obs: obs || null,
+    p_created_at: createdAt || null, p_evento_id: eventoId || null,
+  });
+  if (funcaoAusente(error)) return { indisponivel: true };
+  if (error) return traduzirErroEstoque(error, unidade);
+  return { dados: { ...data, qtd_antes: Number(data.qtd_antes), qtd_depois: Number(data.qtd_depois), custo: Number(data.custo), valor: Number(data.valor) } };
+}
+async function cancelarAtomico(movId) {
+  const { data, error } = await supabase.rpc('estoque_cancelar', { p_tenant: restauranteDoPedido(), p_mov_id: movId });
+  if (funcaoAusente(error)) return { indisponivel: true };
+  if (error) return traduzirErroEstoque(error);
+  return { dados: data };
+}
+
 // Quem pode fazer Ajuste e confirmar alertas ("forcar"). Vale para REST, IA e lote.
 const PODE_CONFIRMAR = (user) => !!user && ['admin', 'gerente'].includes(user.role);
 
@@ -1237,60 +1279,96 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     }
   }
 
-  // Blindagem de concorrência: trava otimista com retry — duas baixas/entradas
-  // simultâneas do mesmo produto não se sobrescrevem (sem perda de dado).
-  let novaQtd, valor, qtdAntes, custoUnit, prodAtual = prod, sucesso = false;
-  for (let tent = 0; tent < 4 && !sucesso; tent++) {
-    qtdAntes = Number(prodAtual.qtd);
-    if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
-    else if (tipo === 'Saída' || tipo === 'Perda') {
-      if (qtd > qtdAntes) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}.` });
-      novaQtd = Number((qtdAntes - qtd).toFixed(3));
-    } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
-    // Salto de preço não atualiza o cadastro nem valoriza o lançamento: mantém o custo
-    // conhecido e devolve o aviso. Sem isso, o erro entra e some no meio do mês.
-    const saltoPreco = (tipo === 'Entrada' && custoBody !== null)
-      ? custoSuspeito(prodAtual.custo, custoBody) : null;
-    // usa o mesmo `forcar` do alerta de quantidade: o app já sabe perguntar
-    // "confirmar mesmo assim?" e reenviar — não precisa de um caminho novo na tela
-    if (saltoPreco && !podeForcar) {
-      return res.status(409).json({
-        alerta: true, codigo: 'PRECO_SUSPEITO',
-        custo_atual: Number(prodAtual.custo), custo_informado: custoBody,
-        precisa_gerente: !PODE_CONFIRMAR(req.user),
-        msg: PODE_CONFIRMAR(req.user)
-          ? `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`
-          : `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, peça para um gerente ou admin lançar.`,
-      });
-    }
-    custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
-    const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
-    valor = Number((custoUnit * valorBase).toFixed(2));
-    const updateData = { qtd: novaQtd };
-    if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
-    const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-    if (upd && upd.length) { sucesso = true; break; }
-    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
-    prodAtual = re;
+  // Salto de preço não atualiza o cadastro nem valoriza o lançamento: mantém o custo
+  // conhecido e devolve o aviso. Sem isso, o erro entra e some no meio do mês.
+  const saltoPreco = (tipo === 'Entrada' && custoBody !== null) ? custoSuspeito(prod.custo, custoBody) : null;
+  // usa o mesmo `forcar` do alerta de quantidade: o app já sabe perguntar
+  // "confirmar mesmo assim?" e reenviar — não precisa de um caminho novo na tela
+  if (saltoPreco && !podeForcar) {
+    return res.status(409).json({
+      alerta: true, codigo: 'PRECO_SUSPEITO',
+      custo_atual: Number(prod.custo), custo_informado: custoBody,
+      precisa_gerente: !PODE_CONFIRMAR(req.user),
+      msg: PODE_CONFIRMAR(req.user)
+        ? `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`
+        : `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, peça para um gerente ou admin lançar.`,
+    });
   }
-  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
-
-  const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
-    produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-    tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
-    custo: custoUnit, valor, motivo, responsavel: req.user.nome,
-    // Marca o retroativo na própria observação: sem isso o histórico mente — a linha aparece
-    // com data de ontem e não dá pra saber que foi digitada hoje, nem por quem.
-    obs: quando.retroativo
-      ? `${obs ? obs + ' | ' : ''}📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`.slice(0, 200)
-      : obs,
-    qtd_antes: qtdAntes, qtd_depois: novaQtd,
-    created_at: quando.ts,
-  }).select('id').single();
-  if (movErr) {
-    await supabase.from('produtos').update({ qtd: qtdAntes, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd);
-    return res.status(500).json({ erro: 'Erro ao registrar movimentação.' });
+  // Marca o retroativo na própria observação: sem isso o histórico mente — a linha aparece
+  // com data de ontem e não dá pra saber que foi digitada hoje, nem por quem.
+  const obsFinal = quando.retroativo
+    ? `${obs ? obs + ' | ' : ''}📅 lançado em ${dateSP()} com data de ${String(quando.ts).slice(0, 10)}`.slice(0, 200)
+    : obs;
+  // Onda 3: saldo + histórico numa transação só, com o produto travado (F1/F2), e evento_id
+  // da operação lógica para o reenvio não lançar de novo (F3).
+  const eventoId = sanitizeText(req.body?.evento_id || '', 80) || null;
+  let novaQtd, qtdAntes, custoUnit, movInsId = null, repetido = false;
+  const at = await movimentarAtomico({
+    produtoId: prod.id, tipo, qtd, custo: custoBody, atualizaCusto: tipo === 'Entrada' && custoBody !== null,
+    motivo, responsavel: req.user.nome, obs: obsFinal, createdAt: quando.ts, eventoId, unidade: prod.unidade,
+  });
+  if (at.erro) return res.status(at.status).json({ erro: at.erro });
+  if (!at.indisponivel) {
+    ({ qtd_antes: qtdAntes, qtd_depois: novaQtd, custo: custoUnit, mov_id: movInsId } = at.dados);
+    repetido = !!at.dados.repetido;
+  } else {
+    // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+    let valor;
+    // Blindagem de concorrência: trava otimista com retry — duas baixas/entradas
+    // simultâneas do mesmo produto não se sobrescrevem (sem perda de dado).
+    let prodAtual = prod, sucesso = false;
+    for (let tent = 0; tent < 4 && !sucesso; tent++) {
+      qtdAntes = Number(prodAtual.qtd);
+      if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
+      else if (tipo === 'Saída' || tipo === 'Perda') {
+        if (qtd > qtdAntes) return res.status(400).json({ erro: `Estoque insuficiente. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}.` });
+        novaQtd = Number((qtdAntes - qtd).toFixed(3));
+      } else if (tipo === 'Ajuste') novaQtd = Number(qtd.toFixed(3));
+      // Salto de preço não atualiza o cadastro nem valoriza o lançamento: mantém o custo
+      // conhecido e devolve o aviso. Sem isso, o erro entra e some no meio do mês.
+      const saltoPreco = (tipo === 'Entrada' && custoBody !== null)
+        ? custoSuspeito(prodAtual.custo, custoBody) : null;
+      // usa o mesmo `forcar` do alerta de quantidade: o app já sabe perguntar
+      // "confirmar mesmo assim?" e reenviar — não precisa de um caminho novo na tela
+      if (saltoPreco && !podeForcar) {
+        return res.status(409).json({
+          alerta: true, codigo: 'PRECO_SUSPEITO',
+          custo_atual: Number(prodAtual.custo), custo_informado: custoBody,
+          precisa_gerente: !PODE_CONFIRMAR(req.user),
+          msg: PODE_CONFIRMAR(req.user)
+            ? `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, confirme para gravar.`
+            : `${prod.nome}: ${saltoPreco.msg}. Se o preço mudou mesmo, peça para um gerente ou admin lançar.`,
+        });
+      }
+      custoUnit = custoBody !== null ? custoBody : Number(prodAtual.custo || 0);
+      const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
+      valor = Number((custoUnit * valorBase).toFixed(2));
+      const updateData = { qtd: novaQtd };
+      if (tipo === 'Entrada' && custoBody !== null) updateData.custo = custoUnit;
+      const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+      if (upd && upd.length) { sucesso = true; break; }
+      const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+      if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+      prodAtual = re;
+    }
+    if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
+  
+    const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
+      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+      tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
+      custo: custoUnit, valor, motivo, responsavel: req.user.nome, obs: obsFinal,
+      qtd_antes: qtdAntes, qtd_depois: novaQtd,
+      created_at: quando.ts,
+    }).select('id').single();
+    if (movErr) {
+      await supabase.from('produtos').update({ qtd: qtdAntes, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd);
+      return res.status(500).json({ erro: 'Erro ao registrar movimentação.' });
+    }
+    movInsId = movIns?.id || null;
+  }
+  if (repetido) {
+    const { data: prodAgora } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+    return res.json({ ok: true, repetido: true, produto: prodAgora });
   }
 
   await audit('movimentacao', {
@@ -1299,7 +1377,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   }, req.user, getClientIp(req));
   let avisoContas = null;
   if (tipo === 'Entrada' && motivo === 'Compra') {
-    const rc = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movIns?.id });
+    const rc = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movInsId });
     avisoContas = rc.aviso;
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
@@ -1410,36 +1488,48 @@ app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), asyn
   } else if (mov.tipo === 'Ajuste') {
     return res.status(400).json({ erro: 'Ajustes não podem ser cancelados. Use um novo Ajuste para corrigir.' });
   }
-  // Trava otimista com retry (mesmo padrão do lançamento): cancelamento simultâneo a
-  // outro lançamento não sobrescreve estoque. Delete só depois do update confirmado.
-  let prodAtual = prod, sucesso = false;
-  for (let tent = 0; tent < 4 && !sucesso; tent++) {
-    const base = Number(prodAtual.qtd);
-    if (mov.tipo === 'Entrada') {
-      novaQtd = Number((base - Number(mov.qtd)).toFixed(3));
-      if (novaQtd < 0) return res.status(400).json({ erro: `Não é possível cancelar: estoque ficaria negativo (${prodAtual.qtd} disponível).` });
-    } else {
-      novaQtd = Number((base + Number(mov.qtd)).toFixed(3));
+  // Onda 3 (F1): estorno numa transação só, com o lançamento e o produto travados. O 2º
+  // cancelamento simultâneo encontra o lançamento já apagado e NÃO devolve a quantidade de novo.
+  let prodAtual = prod;
+  const atC = await cancelarAtomico(mov.id);
+  if (atC.erro) return res.status(atC.status).json({ erro: atC.erro });
+  if (!atC.indisponivel) {
+    novaQtd = Number(atC.dados.qtd_depois);
+    const { data: pDepois } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+    if (pDepois) prodAtual = pDepois;
+  } else {
+    // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+    // Trava otimista com retry (mesmo padrão do lançamento): cancelamento simultâneo a
+    // outro lançamento não sobrescreve estoque. Delete só depois do update confirmado.
+    let sucesso = false;
+    for (let tent = 0; tent < 4 && !sucesso; tent++) {
+      const base = Number(prodAtual.qtd);
+      if (mov.tipo === 'Entrada') {
+        novaQtd = Number((base - Number(mov.qtd)).toFixed(3));
+        if (novaQtd < 0) return res.status(400).json({ erro: `Não é possível cancelar: estoque ficaria negativo (${prodAtual.qtd} disponível).` });
+      } else {
+        novaQtd = Number((base + Number(mov.qtd)).toFixed(3));
+      }
+      const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+      if (upd && upd.length) { sucesso = true; break; }
+      const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+      if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+      prodAtual = re;
     }
-    const { data: upd } = await supabase.from('produtos').update({ qtd: novaQtd }).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-    if (upd && upd.length) { sucesso = true; break; }
-    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
-    prodAtual = re;
+    if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
+    const { error: delErr } = await supabase.from('movimentacoes').delete().eq('id', mov.id);
+    if (delErr) {
+      // Reverte o estoque se não conseguiu apagar a movimentação (operação não pode ficar pela metade).
+      await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd);
+      return res.status(500).json({ erro: 'Erro ao cancelar movimentação. Estoque não foi alterado.' });
+    }
+    // Cancelou a compra → some também das Contas/Planilha/Relatórios (só lançamentos
+    // automáticos vinculados; pagamento digitado na mão na aba Contas nunca é tocado).
+    try {
+      await supabase.from('pagamentos_comprovantes').delete()
+        .eq('mov_id', mov.id).in('origem', ['estoque-auto', 'estoque-backfill']);
+    } catch (e) { console.error('contas-auto delete:', e.message); }
   }
-  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' });
-  const { error: delErr } = await supabase.from('movimentacoes').delete().eq('id', mov.id);
-  if (delErr) {
-    // Reverte o estoque se não conseguiu apagar a movimentação (operação não pode ficar pela metade).
-    await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd);
-    return res.status(500).json({ erro: 'Erro ao cancelar movimentação. Estoque não foi alterado.' });
-  }
-  // Cancelou a compra → some também das Contas/Planilha/Relatórios (só lançamentos
-  // automáticos vinculados; pagamento digitado na mão na aba Contas nunca é tocado).
-  try {
-    await supabase.from('pagamentos_comprovantes').delete()
-      .eq('mov_id', mov.id).in('origem', ['estoque-auto', 'estoque-backfill']);
-  } catch (e) { console.error('contas-auto delete:', e.message); }
   // ── O PRECO VOLTA JUNTO COM A QUANTIDADE ──────────────────────────────────
   // Cancelar devolvia a quantidade e deixava o `custo` do produto como a entrada
   // cancelada tinha deixado. Em 25/08 uma nota lida errado poe a Farinha de Trigo a
@@ -6165,6 +6255,16 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
   const remetente = sanitizeText(req.body?.remetente, 60) || 'WhatsApp';
   const listaImg = (Array.isArray(imagens) && imagens.length ? imagens : (imagem ? [imagem] : [])).slice(0, 8);
   if (!listaImg.length) return res.status(400).json({ erro: 'Imagem não enviada.' });
+  // F3 (caso real 28/09: a mesma nota processada 2x lançou 11 itens e R$ 435,72 em dobro).
+  // A impressão digital da imagem é a chave da operação: a mesma foto reprocessada não lança de novo.
+  const hashNota = crypto.createHash('sha256').update(listaImg.join('|')).digest('hex').slice(0, 32);
+  try {
+    const { data: jaLida, error: errJa } = await supabaseRaw.from('movimentacao_eventos').select('evento_id')
+      .eq('tenant_id', restauranteDoPedido()).like('evento_id', `nota:${hashNota}:%`).limit(1);
+    if (!errJa && jaLida && jaLida.length) {
+      return res.json({ resposta: '♻️ Essa nota já foi lançada antes (mesma foto). Não lancei de novo. Se for outra compra igual, lance pelo app.', repetida: true });
+    }
+  } catch (e) { console.error('[ler-nota] conferência de nota repetida:', e.message); }
   try {
     const r = await lerNotaComIA(listaImg, mediaType, { nome: remetente });
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler a nota: ${r.erro}` });
@@ -6173,7 +6273,11 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
     // semContas: item que entrou no estoque mas cujo custo NÃO chegou na aba Contas.
     // Vai na resposta do WhatsApp — sem isso o CMV do mês sai menor e ninguém percebe.
     const lancados = [], confirmar = [], naoachados = [], pendencias = [], semContas = [];
+    const ocorrencias = {};
     for (const item of r.itens) {
+      const nomeChave = normalizeSearch(item.nome_cupom || '').slice(0, 40);
+      ocorrencias[nomeChave] = (ocorrencias[nomeChave] || 0) + 1;
+      const eventoItem = `nota:${hashNota}:${nomeChave}:${ocorrencias[nomeChave]}`;
       // Auto-lança SÓ apelido/nome exato (certeza real) com unidade compatível; 'forte' é palpite — vai pra confirmação.
       // Preço muito fora do conhecido tira o item do automático e manda pra conferência.
       // Foi assim que a Coca a R$47,88 (preço de FARDO) entrou como preço de LATA em
@@ -6198,37 +6302,49 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
       // Entrada com trava otimista (mesma blindagem do webhook entrada)
       // Preço da nota atualiza o custo do produto — senão o custo congela pra sempre.
       const custoNovo = item.custo_unit && item.custo_unit > 0 ? item.custo_unit : null;
-      let prodAtual = item.produto, novaQtd = 0, sucesso = false;
-      for (let tent = 0; tent < 4 && !sucesso; tent++) {
-        novaQtd = Number((Number(prodAtual.qtd) + Number(item.qtd)).toFixed(3));
-        const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
-        const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-        if (upd && upd.length) { sucesso = true; break; }
-        const { data: re } = await supabase.from('produtos').select('*').eq('id', item.produto.id).single();
-        if (!re) break;
-        prodAtual = re;
-      }
-      if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
-      const custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
-      // Total da linha da nota (centavos) quando o preço veio dela — ver valorDaCompra().
       const valorDocNota = custoNovo !== null && item.valor_total > 0 ? item.valor_total : null;
-      const valorNota = valorDaCompra({ custoUnit, qtd: item.qtd, valorDocumento: valorDocNota });
-      const { data: movNota, error: errMovNota } = await supabase.from('movimentacoes').insert({
-        produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
-        tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
-        custo: custoUnit, valor: valorNota,
-        motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
-        qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
-      }).select('id').single();
-      // Sem movimentação o estoque muda sem histórico e o lançamento em Contas fica sem
-      // mov_id (cancelar a compra nunca limparia o financeiro). Desfaz a entrada, igual
-      // fazem os caminhos irmãos, e manda o item pra conferência em vez de dizer "lancei".
-      if (errMovNota || !movNota?.id) {
-        await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', item.produto.id).eq('qtd', novaQtd);
-        console.error('[ler-nota] movimentação não registrada:', String(errMovNota?.message || 'sem id'));
-        await logErroAgenda('ler-nota-movimentacao', errMovNota || new Error('sem id'), { nome: remetente });
-        confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} (não consegui registrar — lance no app)` });
-        continue;
+      let prodAtual = item.produto, novaQtd = 0, custoUnit, valorNota, movNota = null;
+      const atN = await movimentarAtomico({
+        produtoId: item.produto.id, tipo: 'Entrada', qtd: item.qtd, custo: custoNovo, atualizaCusto: custoNovo !== null,
+        valor: valorDocNota !== null ? Math.round(valorDocNota * 100) / 100 : null,
+        motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', eventoId: eventoItem, unidade: item.produto.unidade,
+      });
+      if (atN.erro) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} (${atN.erro})` }); continue; }
+      if (!atN.indisponivel) {
+        if (atN.dados.repetido) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} (já lançado antes por esta mesma nota — não lancei de novo)` }); continue; }
+        novaQtd = atN.dados.qtd_depois; custoUnit = atN.dados.custo; valorNota = atN.dados.valor;
+        prodAtual = { ...item.produto, qtd: atN.dados.qtd_antes };
+        movNota = { id: atN.dados.mov_id };
+      } else {
+        // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+        let sucesso = false;
+        for (let tent = 0; tent < 4 && !sucesso; tent++) {
+          novaQtd = Number((Number(prodAtual.qtd) + Number(item.qtd)).toFixed(3));
+          const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
+          const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+          if (upd && upd.length) { sucesso = true; break; }
+          const { data: re } = await supabase.from('produtos').select('*').eq('id', item.produto.id).single();
+          if (!re) break;
+          prodAtual = re;
+        }
+        if (!sucesso) { confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.produto.nome }); continue; }
+        custoUnit = custoNovo !== null ? custoNovo : Number(item.produto.custo || 0);
+        valorNota = valorDaCompra({ custoUnit, qtd: item.qtd, valorDocumento: valorDocNota });
+        const { data: movIns, error: errMovNota } = await supabase.from('movimentacoes').insert({
+          produto_id: item.produto.id, produto_nome: item.produto.nome, categoria: item.produto.categoria,
+          tipo: 'Entrada', qtd: item.qtd, unidade: item.produto.unidade,
+          custo: custoUnit, valor: valorNota,
+          motivo: 'Compra', responsavel: remetente, obs: 'nota via WhatsApp', created_at: nowSP(),
+          qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd,
+        }).select('id').single();
+        if (errMovNota || !movIns?.id) {
+          await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', item.produto.id).eq('qtd', novaQtd);
+          console.error('[ler-nota] movimentação não registrada:', String(errMovNota?.message || 'sem id'));
+          await logErroAgenda('ler-nota-movimentacao', errMovNota || new Error('sem id'), { nome: remetente });
+          confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: `${item.produto.nome} (não consegui registrar — lance no app)` });
+          continue;
+        }
+        movNota = movIns;
       }
       const custoAntes = Number(item.produto.custo || 0);
       const rc = await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id, valorDocumento: valorDocNota });
@@ -6252,6 +6368,12 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
         await logErroAgenda('ler-nota-pendencias-nao-salvou', e, { nome: remetente });
       }
     }
+    // Marca a nota como lida (mesmo que tudo tenha ido para pendência): reenvio da mesma foto
+    // não cria pendências nem lançamentos de novo. Falha aqui não desfaz o que já entrou.
+    try {
+      await supabaseRaw.from('movimentacao_eventos').insert({ tenant_id: restauranteDoPedido(), evento_id: `nota:${hashNota}:_lida`, conteudo: 'lida',
+        resultado: { lancados: lancados.length, pendencias: pendencias.length } });
+    } catch (e) { console.error('[ler-nota] marca de nota lida:', e.message); }
     await audit('ler_nota_whatsapp', { remetente, lancados: lancados.length, confirmar: confirmar.length, nao_achados: naoachados.length, pendencias: pendencias.length }, null, '');
 
     let msg = `🧾 *NOTA PROCESSADA* (por ${remetente})\n\n`;
@@ -6464,27 +6586,49 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
       msg: `${prod.nome}: ${saltoPend.msg}.` });
 
   // Entrada com trava otimista (mesma blindagem dos outros lançamentos).
-  let prodAtual = prod, novaQtd = 0, sucesso = false;
-  for (let tent = 0; tent < 4 && !sucesso; tent++) {
-    novaQtd = Number((Number(prodAtual.qtd) + qtd).toFixed(3));
-    const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
-    const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-    if (upd && upd.length) { sucesso = true; break; }
-    const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-    if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
-    prodAtual = re;
+  // Onda 3: entrada atômica com a chave natural da pendência — resolver de novo (duplo clique,
+  // status que não subiu) não lança em dobro.
+  let novaQtd = 0, custoUnit, movPend = null, repetidoPend = false;
+  const atP = await movimentarAtomico({
+    produtoId: prod.id, tipo: 'Entrada', qtd, custo: custoNovo, atualizaCusto: custoNovo !== null,
+    valor: valorDocPend !== null ? valorDaCompra({ custoUnit: custoNovo, qtd, valorDocumento: valorDocPend }) : null,
+    motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)',
+    eventoId: `pendencia:${pend.id}`, unidade: prod.unidade,
+  });
+  if (atP.erro) return res.status(atP.status).json({ erro: atP.erro });
+  if (!atP.indisponivel) {
+    novaQtd = atP.dados.qtd_depois; custoUnit = atP.dados.custo; movPend = { id: atP.dados.mov_id };
+    repetidoPend = !!atP.dados.repetido;
+  } else {
+    // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+    let prodAtual = prod, sucesso = false;
+    for (let tent = 0; tent < 4 && !sucesso; tent++) {
+      novaQtd = Number((Number(prodAtual.qtd) + qtd).toFixed(3));
+      const updData = custoNovo !== null ? { qtd: novaQtd, custo: custoNovo } : { qtd: novaQtd };
+      const { data: upd } = await supabase.from('produtos').update(updData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+      if (upd && upd.length) { sucesso = true; break; }
+      const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+      if (!re) return res.status(500).json({ erro: 'Erro ao atualizar estoque.' });
+      prodAtual = re;
+    }
+    if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente de novo.' });
+    custoUnit = custoNovo !== null ? custoNovo : Number(prod.custo || 0);
+    const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
+      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+      tipo: 'Entrada', qtd, unidade: prod.unidade,
+      custo: custoUnit, valor: valorDaCompra({ custoUnit, qtd, valorDocumento: valorDocPend }),
+      motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
+      qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
+    }).select('id').single();
+    if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
+    movPend = movIns;
   }
-  if (!sucesso) return res.status(409).json({ erro: 'Outro lançamento simultâneo alterou o estoque. Tente de novo.' });
-
-  const custoUnit = custoNovo !== null ? custoNovo : Number(prod.custo || 0);
-  const { data: movPend, error: movErr } = await supabase.from('movimentacoes').insert({
-    produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-    tipo: 'Entrada', qtd, unidade: prod.unidade,
-    custo: custoUnit, valor: valorDaCompra({ custoUnit, qtd, valorDocumento: valorDocPend }),
-    motivo: 'Compra', responsavel: req.user.nome, obs: 'nota WhatsApp (resolvido no app)', created_at: nowSP(),
-    qtd_antes: Number(prodAtual.qtd), qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
-  }).select('id').single();
-  if (movErr) { await supabase.from('produtos').update({ qtd: prodAtual.qtd }).eq('id', prod.id).eq('qtd', novaQtd); return res.status(500).json({ erro: 'Erro ao registrar movimentação.' }); }
+  if (repetidoPend) {
+    // Já tinha entrado antes: só garante que a pendência saia da lista.
+    await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
+    return res.json({ ok: true, repetido: true, produto: prod.nome, qtd, nova_qtd: novaQtd, custo_aplicado: custoUnit,
+      aviso: 'Essa pendência já tinha sido lançada antes. Não lancei de novo.' });
+  }
 
   // "Memorizar": salva o apelido (nome da nota → produto), pra próxima lançar sozinho.
   if (memorizar && pend.produto_cupom) {
@@ -6916,36 +7060,50 @@ async function executarFerramenta(nome, input, user) {
         const custoIa = input.custo !== undefined ? parseNonNegativeNumber(input.custo) : null;
         const travaIa = await travaIaLancamento({ prod, tipo, qtd, custoInformado: custoIa, user });
         if (travaIa) return { sucesso: false, erro: travaIa };
-        // Trava otimista com retry — mesmo padrão do endpoint REST: dois comandos
-        // simultâneos ao assistente não corrompem o estoque.
-        let novaQtd, qtdAntes, custoUnit, valor, prodAtual = prod, sucesso = false;
-        for (let tent = 0; tent < 4 && !sucesso; tent++) {
-          qtdAntes = Number(prodAtual.qtd);
-          if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
-          else if (tipo === 'Saída' || tipo === 'Perda') {
-            if (qtd > qtdAntes) return { sucesso: false, erro: `Estoque insuficiente: disponível ${prodAtual.qtd} ${prodAtual.unidade}` };
-            novaQtd = Number((qtdAntes - qtd).toFixed(3));
-          } else novaQtd = Number(qtd.toFixed(3));
-          custoUnit = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || Number(prodAtual.custo || 0)) : Number(prodAtual.custo || 0);
-          const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
-          valor = Number((custoUnit * valorBase).toFixed(2));
-          const updateData = { qtd: novaQtd };
-          if (tipo === 'Entrada' && input.custo !== undefined) updateData.custo = custoUnit;
-          const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-          if (upd && upd.length) { sucesso = true; break; }
-          const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-          if (!re) return { sucesso: false, erro: 'Erro ao atualizar estoque' };
-          prodAtual = re;
-        }
-        if (!sucesso) return { sucesso: false, erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' };
-        const { error: movErr } = await supabase.from('movimentacoes').insert({
-          produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
-          tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
-          custo: custoUnit, valor, motivo: sanitizeText(input.motivo || 'Via assistente IA', 80),
-          responsavel: user && user.nome ? user.nome : 'IA', obs: 'Registrado pelo assistente IA',
-          qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: nowSP(),
+        // Onda 3: saldo + histórico numa transação só (mesma função do REST).
+        let novaQtd, qtdAntes, custoUnit;
+        const custoIaAt = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || null) : null;
+        const atIa = await movimentarAtomico({
+          produtoId: prod.id, tipo, qtd, custo: custoIaAt, atualizaCusto: tipo === 'Entrada' && input.custo !== undefined && custoIaAt !== null,
+          motivo: sanitizeText(input.motivo || 'Via assistente IA', 80), responsavel: user && user.nome ? user.nome : 'IA',
+          obs: 'Registrado pelo assistente IA', unidade: prod.unidade,
         });
-        if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd); return { sucesso: false, erro: 'Erro ao registrar movimentação' }; }
+        if (atIa.erro) return { sucesso: false, erro: atIa.erro };
+        if (!atIa.indisponivel) {
+          ({ qtd_antes: qtdAntes, qtd_depois: novaQtd, custo: custoUnit } = atIa.dados);
+        } else {
+          // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+          // Trava otimista com retry — mesmo padrão do endpoint REST: dois comandos
+          // simultâneos ao assistente não corrompem o estoque.
+          let valor, prodAtual = prod, sucesso = false;
+          for (let tent = 0; tent < 4 && !sucesso; tent++) {
+            qtdAntes = Number(prodAtual.qtd);
+            if (tipo === 'Entrada') novaQtd = Number((qtdAntes + qtd).toFixed(3));
+            else if (tipo === 'Saída' || tipo === 'Perda') {
+              if (qtd > qtdAntes) return { sucesso: false, erro: `Estoque insuficiente: disponível ${prodAtual.qtd} ${prodAtual.unidade}` };
+              novaQtd = Number((qtdAntes - qtd).toFixed(3));
+            } else novaQtd = Number(qtd.toFixed(3));
+            custoUnit = input.custo !== undefined ? (parseNonNegativeNumber(input.custo) || Number(prodAtual.custo || 0)) : Number(prodAtual.custo || 0);
+            const valorBase = tipo === 'Ajuste' ? Math.abs(novaQtd - qtdAntes) : qtd;
+            valor = Number((custoUnit * valorBase).toFixed(2));
+            const updateData = { qtd: novaQtd };
+            if (tipo === 'Entrada' && input.custo !== undefined) updateData.custo = custoUnit;
+            const { data: upd } = await supabase.from('produtos').update(updateData).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+            if (upd && upd.length) { sucesso = true; break; }
+            const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+            if (!re) return { sucesso: false, erro: 'Erro ao atualizar estoque' };
+            prodAtual = re;
+          }
+          if (!sucesso) return { sucesso: false, erro: 'Outro lançamento simultâneo alterou o estoque. Tente novamente.' };
+          const { error: movErr } = await supabase.from('movimentacoes').insert({
+            produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria,
+            tipo, qtd: tipo === 'Ajuste' ? novaQtd : qtd, unidade: prod.unidade,
+            custo: custoUnit, valor, motivo: sanitizeText(input.motivo || 'Via assistente IA', 80),
+            responsavel: user && user.nome ? user.nome : 'IA', obs: 'Registrado pelo assistente IA',
+            qtd_antes: qtdAntes, qtd_depois: novaQtd, created_at: nowSP(),
+          });
+          if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntes }).eq('id', prod.id).eq('qtd', novaQtd); return { sucesso: false, erro: 'Erro ao registrar movimentação' }; }
+        }
         await audit('movimentacao_ia', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd }, user, '');
         return { sucesso: true, produto: prod.nome, tipo, qtd, qtd_antes: qtdAntes, qtd_depois: novaQtd, unidade: prod.unidade };
       }
@@ -7945,36 +8103,53 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
     // Mesma trava de preço do REST: preço muito diferente do cadastro não troca o custo pelo zap.
     const saltoW = custoNovoW !== null ? custoSuspeito(prod.custo, custoNovoW) : null;
     if (saltoW) return res.json({ resposta: `⚠️ Não lancei: ${prod.nome} — ${saltoW.msg}.\n\nSe o preço mudou mesmo, lance pelo app (ele pede confirmação) ou mande sem o preço.` });
-    // Blindagem de concorrência: trava otimista com retry — evita que duas baixas
-    // simultâneas do mesmo produto se sobrescrevam (perda de dado).
-    let novaQtd, prodAtual = prod, sucesso = false;
-    for (let tent = 0; tent < 4 && !sucesso; tent++) {
-      novaQtd = Number(prodAtual.qtd);
-      if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
-      else {
-        if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prodAtual.nome}. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}` });
-        novaQtd = Number((novaQtd - qtd).toFixed(3));
+    // Onda 3: saldo + histórico numa transação só (mesma função do REST).
+    // Total informado no zap ("valor") é o total do documento: vai em centavos, sem refazer pela unidade.
+    const valorDocW = tipo === 'Entrada' && custoInfW === null && valorInfW !== null ? valorInfW : null;
+    let novaQtd, qtdAntesW, custoUnitW, movWpp = null;
+    const atW = await movimentarAtomico({
+      produtoId: prod.id, tipo, qtd, custo: custoNovoW, atualizaCusto: custoNovoW !== null,
+      valor: valorDocW !== null ? valorDaCompra({ custoUnit: custoNovoW, qtd, valorDocumento: valorDocW }) : null,
+      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', unidade: prod.unidade,
+    });
+    if (atW.erro) return res.json({ resposta: `❌ ${prod.nome}: ${atW.erro}` });
+    if (!atW.indisponivel) {
+      ({ qtd_antes: qtdAntesW, qtd_depois: novaQtd, custo: custoUnitW } = atW.dados);
+      movWpp = { id: atW.dados.mov_id };
+    } else {
+      // RESERVA (banco sem a migração 2026-10-02): caminho antigo, não atômico.
+      // Blindagem de concorrência: trava otimista com retry — evita que duas baixas
+      // simultâneas do mesmo produto se sobrescrevam (perda de dado).
+      let prodAtual = prod, sucesso = false;
+      for (let tent = 0; tent < 4 && !sucesso; tent++) {
+        novaQtd = Number(prodAtual.qtd);
+        if (tipo === 'Entrada') novaQtd = Number((novaQtd + qtd).toFixed(3));
+        else {
+          if (qtd > novaQtd) return res.json({ resposta: `❌ Estoque insuficiente de ${prodAtual.nome}. Disponível: ${prodAtual.qtd} ${prodAtual.unidade}` });
+          novaQtd = Number((novaQtd - qtd).toFixed(3));
+        }
+        const updDataW = custoNovoW !== null ? { qtd: novaQtd, custo: custoNovoW } : { qtd: novaQtd };
+        const { data: upd } = await supabase.from('produtos').update(updDataW).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
+        if (upd && upd.length) { sucesso = true; break; }
+        const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
+        if (!re) break;
+        prodAtual = re;
       }
-      const updDataW = custoNovoW !== null ? { qtd: novaQtd, custo: custoNovoW } : { qtd: novaQtd };
-      const { data: upd } = await supabase.from('produtos').update(updDataW).eq('id', prodAtual.id).eq('qtd', prodAtual.qtd).select('id');
-      if (upd && upd.length) { sucesso = true; break; }
-      const { data: re } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-      if (!re) break;
-      prodAtual = re;
+      if (!sucesso) return res.json({ resposta: `❌ Não consegui atualizar ${prod.nome} agora (outro lançamento simultâneo). Tente de novo em instantes.` });
+      qtdAntesW = Number(prodAtual.qtd);
+      custoUnitW = custoNovoW !== null ? custoNovoW : Number(prod.custo || 0);
+      const { data: movIns, error: movErr } = await supabase.from('movimentacoes').insert({
+        produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
+        custo: custoUnitW, valor: valorDaCompra({ custoUnit: custoUnitW, qtd, valorDocumento: valorDocW }),
+        motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
+        qtd_antes: qtdAntesW, qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
+      }).select('id').single();
+      if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
+      movWpp = movIns;
     }
-    if (!sucesso) return res.json({ resposta: `❌ Não consegui atualizar ${prod.nome} agora (outro lançamento simultâneo). Tente de novo em instantes.` });
-    const qtdAntesW = Number(prodAtual.qtd);
-    const custoUnitW = custoNovoW !== null ? custoNovoW : Number(prod.custo || 0);
-    const { data: movWpp, error: movErr } = await supabase.from('movimentacoes').insert({
-      produto_id: prod.id, produto_nome: prod.nome, categoria: prod.categoria, tipo, qtd, unidade: prod.unidade,
-      custo: custoUnitW, valor: Number((custoUnitW*qtd).toFixed(2)),
-      motivo: tipo === 'Entrada' ? 'Compra' : 'Produção', responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', created_at: nowSP(),
-      qtd_antes: qtdAntesW, qtd_depois: novaQtd, // foto antes→depois (auditoria cruzada)
-    }).select('id').single();
-    if (movErr) { await supabase.from('produtos').update({ qtd: qtdAntesW, custo: prodAtual.custo }).eq('id', prod.id).eq('qtd', novaQtd); return res.json({ resposta: `❌ Erro ao registrar movimentação de ${prod.nome}.` }); }
     let avisoContasW = '';
     if (tipo === 'Entrada') {
-      const rcW = await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id });
+      const rcW = await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id, valorDocumento: valorDocW });
       if (!rcW.ok) avisoContasW = `\n\n🔴 *Mas o custo NÃO entrou nas Contas.* Lance essa compra manualmente no app em *Contas*, senão o CMV do mês sai menor.`;
     }
     await audit('movimentacao_whatsapp', { produto: prod.nome, tipo, qtd, nova_qtd: novaQtd, custo_novo: custoNovoW, remetente }, null, '');

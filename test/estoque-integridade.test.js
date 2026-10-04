@@ -91,3 +91,100 @@ test('CONTROLE — dois operadores baixam 10 ao mesmo tempo: nenhum se perde (sa
   assert.equal((await ctx.movimentos(id)).length, 2);
   assert.equal(await ctx.saldo(id), 80);
 });
+
+test('F3 — mesma chave de evento com conteúdo DIFERENTE é recusada (nunca adivinha qual vale)', async () => {
+  const id = await ctx.criarProduto({ nome: 'F3 conflito', qtd: 100 });
+  const r1 = await ctx.api('gerente', 'POST', '/api/movimentacoes', saida(id, { evento_id: 'evento-conflito' }));
+  const r2 = await ctx.api('gerente', 'POST', '/api/movimentacoes', saida(id, { evento_id: 'evento-conflito', qtd: 20 }));
+  assert.equal(r1.status, 200);
+  assert.equal(r2.status, 409, JSON.stringify(r2.json));
+  assert.equal(await ctx.saldo(id), 90);
+});
+
+test('F3 — compra reenviada com o mesmo evento entra UMA vez também nas Contas', async () => {
+  const id = await ctx.criarProduto({ nome: 'F3 compra', qtd: 0, custo: 5 });
+  const corpo = { produto_id: id, tipo: 'Entrada', qtd: 4, motivo: 'Compra', custo: 5, evento_id: 'evento-compra' };
+  await ctx.api('gerente', 'POST', '/api/movimentacoes', corpo);
+  const r2 = await ctx.api('gerente', 'POST', '/api/movimentacoes', corpo);
+  assert.equal(r2.status, 200);
+  assert.equal(r2.json.repetido, true);
+  const [mov] = await ctx.movimentos(id);
+  const { rows } = await ctx.db.query('select count(*)::int as n from pagamentos_comprovantes where mov_id = $1', [mov.id]);
+  assert.equal(rows[0].n, 1);
+  assert.equal(await ctx.saldo(id), 4);
+});
+
+test('COMPATIBILIDADE — banco SEM a migração (função ausente): lançar e cancelar seguem funcionando no modo antigo', async () => {
+  await ctx.db.query('alter function estoque_movimentar(bigint, bigint, text, numeric, numeric, boolean, numeric, text, text, text, timestamptz, text) rename to estoque_movimentar_x');
+  await ctx.db.query('alter function estoque_cancelar(bigint, bigint) rename to estoque_cancelar_x');
+  await ctx.recarregarEsquemaRest?.();
+  try {
+    const id = await ctx.criarProduto({ nome: 'Compat antigo', qtd: 50 });
+    const r = await ctx.api('gerente', 'POST', '/api/movimentacoes', saida(id));
+    assert.equal(r.status, 200, JSON.stringify(r.json));
+    assert.equal(await ctx.saldo(id), 40);
+    const [mov] = await ctx.movimentos(id);
+    const c = await ctx.api('gerente', 'DELETE', `/api/movimentacoes/${mov.id}`);
+    assert.equal(c.status, 200, JSON.stringify(c.json));
+    assert.equal(await ctx.saldo(id), 50);
+  } finally {
+    await ctx.db.query('alter function estoque_movimentar_x(bigint, bigint, text, numeric, numeric, boolean, numeric, text, text, text, timestamptz, text) rename to estoque_movimentar');
+    await ctx.db.query('alter function estoque_cancelar_x(bigint, bigint) rename to estoque_cancelar');
+    await ctx.recarregarEsquemaRest?.();
+  }
+});
+
+test('F3 (caso 28/09) — a MESMA nota reprocessada pelo WhatsApp não lança de novo nem chama a IA', async () => {
+  const id = await ctx.criarProduto({ nome: 'Cerveja Nota', unidade: 'un', qtd: 0, custo: 4 });
+  const fetchOriginal = globalThis.fetch;
+  let chamadasIa = 0;
+  globalThis.fetch = async (url, opts) => {
+    if (String(url).startsWith('https://api.anthropic.com/')) {
+      chamadasIa++;
+      const itens = [{ nome: 'Cerveja Nota', qtd: 12, unidade: 'UN', valor_total: 48, embalagem: 1, gramatura_kg: 0 }];
+      return new Response(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ itens }) }] }), { status: 200 });
+    }
+    return fetchOriginal(url, opts);
+  };
+  process.env.ANTHROPIC_API_KEY = 'chave-falsa-de-teste';
+  try {
+    const corpo = { imagem: 'Zm90by1kYS1ub3Rh', remetente: 'teste', secret: 'segredo-de-teste-local' };
+    const r1 = await ctx.apiToken(null, 'POST', '/api/webhook/ler-nota', corpo);
+    assert.equal(r1.status, 200, JSON.stringify(r1.json));
+    assert.equal(await ctx.saldo(id), 12, 'primeira vez lança');
+    const r2 = await ctx.apiToken(null, 'POST', '/api/webhook/ler-nota', corpo);
+    assert.equal(r2.status, 200);
+    assert.equal(r2.json.repetida, true, JSON.stringify(r2.json));
+    assert.equal(await ctx.saldo(id), 12, 'reprocessar não lança de novo');
+    assert.equal(chamadasIa, 1, 'nem gasta IA de novo');
+    const { rows } = await ctx.db.query(`select count(*)::int as n from pagamentos_comprovantes p join movimentacoes m on m.id = p.mov_id where m.produto_id = $1`, [id]);
+    assert.equal(rows[0].n, 1, 'Contas: uma compra só');
+  } finally {
+    globalThis.fetch = fetchOriginal;
+    process.env.ANTHROPIC_API_KEY = '';
+  }
+});
+
+test('F3 — pendência resolvida duas vezes AO MESMO TEMPO entra uma vez só', async () => {
+  const id = await ctx.criarProduto({ nome: 'Pend duplo', unidade: 'un', qtd: 0, custo: 2 });
+  const { rows: [p] } = await ctx.db.query(`insert into nota_pendencias (produto_cupom, qtd, valor_total, candidatos, status, tenant_id) values ('Pend duplo', 5, 10, '[]', 'pendente', 1) returning id`);
+  const corpo = { produto_id: id, qtd: 5, memorizar: false };
+  const outra = await ctx.novaSessao('admin'); // 2º aparelho do admin (gerente não tem a liberação 'pendencias')
+  const rs = await Promise.all([ctx.api('admin', 'POST', `/api/pendencias/${p.id}/resolver`, corpo), ctx.apiToken(outra.token, 'POST', `/api/pendencias/${p.id}/resolver`, corpo)]);
+  assert.ok(rs.every((r) => [200, 404].includes(r.status)), JSON.stringify(rs.map((r) => r.json)));
+  assert.equal(await ctx.saldo(id), 5);
+  assert.equal((await ctx.movimentos(id)).length, 1);
+});
+
+test('WhatsApp — entrada com total informado: saldo, histórico e Contas pelo caminho atômico (centavos do total)', async () => {
+  const id = await ctx.criarProduto({ nome: 'Zap Arroz', unidade: 'un', qtd: 0, custo: 0.0017 });
+  const r = await ctx.apiToken(null, 'POST', '/api/webhook/whatsapp', { secret: 'segredo-de-teste-local', acao: 'entrada', produto: 'Zap Arroz', qtd: 600, valor: 1, remetente: 'teste' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(await ctx.saldo(id), 600);
+  const movs = await ctx.movimentos(id);
+  assert.equal(movs.length, 1);
+  assert.equal(Number(movs[0].valor), 1, 'R$ 1,00 da mensagem, não 0,0017 × 600 = 1,02');
+  const s = await ctx.apiToken(null, 'POST', '/api/webhook/whatsapp', { secret: 'segredo-de-teste-local', acao: 'saida', produto: 'Zap Arroz', qtd: 1000, remetente: 'teste' });
+  assert.match(s.json.resposta, /insuficiente/i);
+  assert.equal(await ctx.saldo(id), 600);
+});
