@@ -8,6 +8,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const sharp = require('sharp');
+const { lerNumeroNota, converterItemNota } = require('./nota-unidades');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1766,15 +1767,7 @@ function parseMoneyNumber(value) {
 // Leitor de notas: número que veio da IA (às vezes "1,5", "2 un"). null se não der para ler.
 // QUANTIDADE, não dinheiro: vírgula ou ponto é sempre decimal ("0.750" kg = 0,75, nunca 750).
 // Com os dois sinais ("1.234,5") o ponto é milhar. Ambíguo/ilegível → null (vai para conferência).
-function lerNumeroNota(value) {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  let s = String(value ?? '').replace(/[^\d.,-]/g, '');
-  if (!s) return null;
-  if (s.includes(',') && s.includes('.')) s = s.replace(/\./g, '').replace(',', '.');
-  else s = s.replace(',', '.');
-  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
-  return Number(s);
-}
+// lerNumeroNota mora em nota-unidades.js (junto da conversão de unidade da nota — F7).
 // Acima disso a linha da nota não entra sozinha: vai para conferência (erro de leitura é o mais provável).
 const LIMITES_NOTA = { qtd: 1000, embalagem: 200, gramatura_kg: 50 };
 
@@ -5691,42 +5684,18 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
       // Quantidade da IA: "1,5" virava 1 (Number("1,5") = NaN → 1) e -2 entrava como entrada
       // negativa. Agora lê decimal brasileiro e, se vier inválida, negativa ou exagerada, o item
       // NÃO é lançado no automático: vai para conferência com o motivo.
-      const qtdLida = lerNumeroNota(item.qtd);
-      let problemaQtd = null;
-      if (qtdLida === null || qtdLida <= 0) problemaQtd = `quantidade "${item.qtd}" inválida`;
-      else if (qtdLida > LIMITES_NOTA.qtd) problemaQtd = `quantidade ${qtdLida} acima do limite (${LIMITES_NOTA.qtd})`;
-      // Exagerada guarda o número lido (quem confere vê o que veio); inválida/negativa fica 1.
-      let qtdItem = qtdLida && qtdLida > 0 ? qtdLida : 1;
+      // Quantidade, embalagem, gramatura e UNIDADE da nota × unidade do produto: tudo em nota-unidades.js
+      // (testado em test/nota-unidades.test.js). Converte uma vez só; o que a nota não deixa claro (g/ml para
+      // produto em unidade, caixa sem dizer quantas vêm, quilo para produto em unidade, linha sem valor, quantidade
+      // inválida ou exagerada) NÃO é lançado no automático: vai para conferência com o motivo (F7, auditoria Codex).
       const vt = Number(item.valor_total);
       const valorTotal = Number.isFinite(vt) && vt > 0 ? Number(vt.toFixed(2)) : null;
-
-      // EMBALAGEM FECHADA: a nota vende por CAIXA/FARDO, o estoque conta UNIDADE.
-      // Sem converter, "2 caixas de 24 a R$47,88" entrava como 2 latas a R$47,88 —
-      // e era esse o erro que inflou R$3.262 em compras entre 14/07 e 03/08 (Coca,
-      // Guaraná, H2O, Fanta, água com gás, brócolis...). O leitor agora só INFORMA
-      // quantas unidades vêm na embalagem; quem multiplica é aqui, uma vez só.
-      const embLida = lerNumeroNota(item.embalagem);
-      const emb = embLida && embLida > 0 ? embLida : 1;
-      if (!problemaQtd && emb > LIMITES_NOTA.embalagem) problemaQtd = `embalagem de ${emb} unidades acima do limite (${LIMITES_NOTA.embalagem})`;
-      if (!problemaQtd && Number(item.gramatura_kg) > LIMITES_NOTA.gramatura_kg) problemaQtd = `pacote de ${item.gramatura_kg} kg acima do limite (${LIMITES_NOTA.gramatura_kg})`;
       const unidadeProduto = String(candidatos[0]?.unidade || '');
-      const produtoEmUnidade = candidatos[0] && /^(un|und|unid)/i.test(unidadeProduto);
-      const produtoEmQuilo = candidatos[0] && /^(kg|quilo)/i.test(unidadeProduto);
-      let convertido = null;
-      if (emb > 1 && produtoEmUnidade) {
-        convertido = { tipo: 'embalagem', de: qtdItem, embalagem: emb, para: Number((qtdItem * emb).toFixed(3)) };
-        qtdItem = convertido.para;
-      }
-
-      // GRAMATURA: pacote com PESO no nome e produto contado por QUILO. A nota traz o
-      // preço do PACOTE; o estoque quer o preço do QUILO. Sem isso, "LING FINA PCT 5KG
-      // R$80" virava R$80 o quilo em vez de R$16 — foi o erro mais caro e mais silencioso
-      // que a varredura achou: R$2.171 só na linguiça, arrastado de abril a julho.
-      const gram = Number(item.gramatura_kg) || 0;
-      if (gram > 1 && produtoEmQuilo && !convertido) {
-        convertido = { tipo: 'gramatura', de: qtdItem, gramatura: gram, para: Number((qtdItem * gram).toFixed(3)) };
-        qtdItem = convertido.para;   // 1 pacote de 5kg → 5 kg; o preço por kg cai junto
-      }
+      const lido = converterItemNota({ item, unidadeProduto, limites: LIMITES_NOTA });
+      const problemaQtd = lido.problema;
+      const qtdItem = lido.qtd;
+      const emb = lido.embalagem;
+      const convertido = lido.convertido;
 
       itens.push({
         nome_cupom: item.nome,
