@@ -66,6 +66,7 @@ const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
 const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
 const MULTI_TENANT = /^(1|on|true|sim)$/i.test(String(process.env.MULTI_TENANT || ''));
 const livroCompras = require('./compras');
+const { lerListaEntrada, sugerirProdutos, ajustarAoProduto } = require('./entrada-texto');
 const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, SCHEMA !== 'public' ? { db: { schema: SCHEMA } } : undefined);
 const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
@@ -8169,6 +8170,66 @@ app.post('/api/backup/:id/restaurar', auth, requireRole('admin'), async (req, re
 const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET;
 if (!WEBHOOK_SECRET) console.error('⚠️ FATAL: WEBHOOK_SECRET não definido — webhook WhatsApp DESATIVADO até configurar no Railway.');
 
+// "ENTRADA> 10 FEIJAO 10 ARROZ" no grupo do estoque: TUDO vai para Histórico → Pendentes, nada
+// entra direto (texto não tem nota nem preço). A leitura do texto fica em entrada-texto.js (testada).
+async function entradaDigitadaNoGrupo(textoBruto, remetente) {
+  const texto = String(textoBruto || '').slice(0, 3000);
+  const { itens, ignorados } = lerListaEntrada(texto);
+  const exemplo = 'Exemplo:\nENTRADA> 10 feijao 10 arroz 15 farinha trigo\n\nou um por linha:\nENTRADA>\n10 feijao carioca\n2 farinha de trigo 5kg\n3,5 kg camarao';
+  if (!itens.length) return { resposta: `❓ Não entendi a lista.\n\n${exemplo}` };
+  // Mesma lista mandada 2x no mesmo dia (reenvio, mensagem duplicada) não cria pendências em dobro.
+  const hash = crypto.createHash('sha256').update(dateSP() + '|' + normalizeSearch(texto).replace(/\s+/g, ' ')).digest('hex').slice(0, 32);
+  const marca = `texto:${hash}:_lida`;
+  // Reserva a marca ANTES de gravar: duas mensagens iguais chegando juntas não passam as duas.
+  const { data: reservou, error: errMarca } = await supabaseRaw.from('movimentacao_eventos')
+    .upsert({ tenant_id: restauranteDoPedido(), evento_id: marca, conteudo: 'lida', resultado: { pendencias: itens.length } },
+      { onConflict: 'tenant_id,evento_id', ignoreDuplicates: true }).select('evento_id');
+  if (errMarca) console.error('[entrada-lista] marca de lista lida:', errMarca.message); // sem a trava, segue (melhor anotar que perder)
+  else if (!reservou || !reservou.length) return { resposta: '♻️ Essa mesma lista já foi mandada hoje e está em *Histórico → Pendentes*. Não repeti.', repetida: true };
+  const soltarMarca = async () => {
+    if (errMarca) return;
+    const { error } = await supabaseRaw.from('movimentacao_eventos').delete().eq('tenant_id', restauranteDoPedido()).eq('evento_id', marca);
+    if (error) console.error('[entrada-lista] não soltei a marca:', error.message);
+  };
+
+  const { data: prods, error: errProds } = await supabase.from('produtos').select('id, nome, unidade, codigo, nome_search').or('ativo.eq.1,ativo.is.null');
+  const termos = itens.map(i => normalizeSearch(i.nome));
+  const { data: sino, error: errSino } = await supabase.from('sinonimos').select('termo, produto_nome').in('termo', termos);
+  // Sem a lista de produtos, tudo sairia "não achei" e as pendências ficariam sem sugestão: melhor recusar.
+  if (errProds || errSino) {
+    console.error('[entrada-lista] leitura de produtos/apelidos:', (errProds || errSino).message);
+    await soltarMarca();
+    return { resposta: '🔴 Não consegui consultar o estoque agora. Nada foi anotado — mande a lista de novo daqui a pouco.' };
+  }
+  const apelidos = Object.fromEntries((sino || []).map(s => [s.termo, s.produto_nome]));
+  const compraId = await livroCompras.registrarCompra(supabase, { origem: 'grupo', sem_nota: true, motivo_sem_nota: 'digitado no grupo (ENTRADA>)', remetente });
+  const linhas = itens.map(i => {
+    const candidatos = sugerirProdutos(i.nome, prods || [], apelidos).map(c => ({ id: c.id, nome: c.nome, unidade: c.unidade, codigo: c.codigo || null }));
+    // Quantidade na unidade do produto sugerido ("2 farinha 5kg" → 10 kg); sem certeza, fica como digitado + aviso.
+    const ajuste = candidatos.length ? ajustarAoProduto(i, candidatos[0].unidade) : { qtd: i.qtd, unidade: i.unidade, conversao: null, aviso: null };
+    return { item: i, candidatos, ajuste };
+  });
+  const pendencias = linhas.map(({ item, candidatos, ajuste }) => ({
+    produto_cupom: item.nome, qtd: ajuste.qtd, unidade_cupom: ajuste.unidade, valor_total: null,
+    candidatos, remetente, status: 'pendente', created_at: nowSP(), ...(compraId ? { compra_id: compraId } : {}),
+  }));
+  const { error } = await supabase.from('nota_pendencias').insert(pendencias);
+  if (error) {
+    console.error('[entrada-lista] pendências:', error.message);
+    await logErroAgenda('entrada-lista-pendencias-nao-salvou', error, { nome: remetente });
+    await soltarMarca(); // senão o reenvio seria barrado como "já mandada"
+    return { resposta: '🔴 Não consegui guardar a lista. Nada foi lançado — mande de novo daqui a pouco ou lance pelo app.' };
+  }
+  await audit('entrada_lista_whatsapp', { remetente, itens: pendencias.length, ignorados: ignorados.length }, null, '');
+
+  let msg = `📝 *ENTRADA ANOTADA* (por ${remetente}) — nada foi lançado ainda\n\n`;
+  msg += linhas.map(({ item, candidatos, ajuste }) => `• ${item.qtd}${item.unidade ? ' ' + item.unidade : ''} ${item.nome} → ${candidatos.length ? candidatos[0].nome + (candidatos.length > 1 ? ` (ou mais ${candidatos.length - 1})` : '') : '❓ não achei no estoque'}`
+    + (ajuste.conversao ? `\n   📦 ${ajuste.conversao}` : '') + (ajuste.aviso ? `\n   ⚠️ confira: ${ajuste.aviso}` : '')).join('\n');
+  if (ignorados.length) msg += `\n\n⚠️ Não entendi (${ignorados.length}): ${ignorados.map(t => `"${t}"`).join(', ')}`;
+  msg += `\n\n✅ Confirme no app: aba *Histórico → Pendentes* (${pendencias.length}). Marque "memorizar" que da próxima eu já sugiro certo.`;
+  return { resposta: msg, pendencias: pendencias.length, ignorados: ignorados.length };
+}
+
 app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (req, res) => {
   if (!WEBHOOK_SECRET) return res.status(503).json({ erro: 'Webhook não configurado no servidor.' });
   const secret = req.headers['x-webhook-secret'] || req.body?.secret;
@@ -8246,6 +8307,8 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
     }
     return res.json({ resposta });
   }
+
+  if (acao === 'entrada_lista') return res.json(await entradaDigitadaNoGrupo(req.body?.texto, remetente || 'WhatsApp'));
 
   if (acao === 'entrada' || acao === 'saida') {
     const tipo = acao === 'entrada' ? 'Entrada' : 'Saída';
