@@ -1376,7 +1376,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
       }
     }
     const { data: prodAgora } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-    return res.json({ ok: true, repetido: true, produto: prodAgora });
+    return res.json({ ok: true, repetido: true, produto: prodAgora, mov_id: movInsId });
   }
 
   await audit('movimentacao', {
@@ -1389,7 +1389,7 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
     avisoContas = rc.aviso;
   }
   const { data: prodAtualizado } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
-  res.json({ ok: true, produto: prodAtualizado, ...(avisoContas ? { aviso: avisoContas } : {}) });
+  res.json({ ok: true, produto: prodAtualizado, mov_id: movInsId, ...(avisoContas ? { aviso: avisoContas } : {}) });
 });
 
 // Grava o lote já conferido na tela. Vai item a item de propósito: se um falhar (estoque
@@ -1494,6 +1494,46 @@ app.post('/api/movimentacoes/lote', auth, requireRole('admin', 'gerente'), async
       data: String(quando.ts).slice(0, 10), retroativo: quando.retroativo,
     });
   } catch (e) { console.error(e); res.status(500).json({ erro: 'Erro ao lançar o lote.' }); }
+});
+
+// ── RECIBO: "o que eu lancei hoje está mesmo no banco?" (11/10/2026) ────────────────────────────
+// O aparelho guarda o código (evento_id) de cada lançamento que fez. Aqui ele pergunta, de uma vez,
+// quais desses códigos o banco tem, e se o lançamento continua lá ou foi cancelado depois.
+// Só responde sobre códigos que o próprio aparelho mandou, dentro do restaurante de quem pergunta.
+const RECIBO_MAX_EVENTOS = 300;
+app.post('/api/conferir-lancamentos', auth, async (req, res) => {
+  const brutos = Array.isArray(req.body?.eventos) ? req.body.eventos : null;
+  if (!brutos || !brutos.length || brutos.length > RECIBO_MAX_EVENTOS) return res.status(400).json({ erro: `Envie de 1 a ${RECIBO_MAX_EVENTOS} códigos.` });
+  const eventos = [...new Set(brutos.map((e) => sanitizeText(String(e || ''), 80)).filter((e) => /^tela-[A-Za-z0-9-]{8,72}$/.test(e)))];
+  if (!eventos.length) return res.json({ resultado: [] });
+  try {
+    // Em blocos de 100: 300 códigos numa URL só passariam de ~14 KB (limite do gateway).
+    const tenant = restauranteDoPedido();
+    const achados = [];
+    for (let i = 0; i < eventos.length; i += 100) {
+      const { data, error } = await supabaseRaw.from('movimentacao_eventos').select('evento_id, mov_id')
+        .eq('tenant_id', tenant).in('evento_id', eventos.slice(i, i + 100).map((e) => 'cli:' + e));
+      if (error) throw error;
+      achados.push(...(data || []));
+    }
+    const movIds = (achados || []).map((a) => a.mov_id).filter(Boolean);
+    let vivos = new Set();
+    if (movIds.length) {
+      const { data: movs, error: errMov } = await supabase.from('movimentacoes').select('id').in('id', movIds);
+      if (errMov) throw errMov;
+      vivos = new Set((movs || []).map((m) => Number(m.id)));
+    }
+    const porEvento = new Map((achados || []).map((a) => [a.evento_id.slice(4), a.mov_id]));
+    const resultado = eventos.map((evento) => {
+      if (!porEvento.has(evento)) return { evento, status: 'nao_encontrado' };
+      const movId = Number(porEvento.get(evento));
+      return { evento, mov_id: movId, status: vivos.has(movId) ? 'salvo' : 'cancelado' };
+    });
+    res.json({ resultado });
+  } catch (e) {
+    console.error('conferir-lancamentos:', e.message);
+    res.status(503).json({ erro: 'Não consegui conferir agora. Tente de novo em instantes.' });
+  }
 });
 
 app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {

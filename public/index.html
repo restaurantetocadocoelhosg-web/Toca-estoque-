@@ -984,6 +984,9 @@ select.big-input { font-size: 14px; }
         </div>
       </div>
       <button id="btn-lancar" class="btn-lancar entrada" onclick="lancar()">⬆️ LANÇAR ENTRADA</button>
+      <!-- Recibo que não some (o toast some em 3 s e a pessoa lançava de novo "pra garantir") -->
+      <div id="recibo-ultimo" style="font-size:12px;margin-top:8px;line-height:1.4;color:var(--muted)"></div>
+      <button type="button" onclick="conferirMeuDia()" style="margin-top:8px;width:100%;padding:10px;background:var(--s2);color:var(--text);border:1.5px solid var(--border);border-radius:12px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">📋 Conferir meu dia — tudo que lancei está salvo?</button>
     </div>
 
     <!-- Lançar a baixa do dia item a item é o que faz ninguém lançar. Aqui cola a lista
@@ -1700,7 +1703,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v123</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v124</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2094,6 +2097,7 @@ select.big-input { font-size: 14px; }
 
 <div id="toast"></div>
 
+<script src="/recibo-lancamentos.js"></script>
 <script>
 const API = '';
 let authToken = localStorage.getItem('toca_token') || '';
@@ -3156,6 +3160,46 @@ function eventoDoLancamento(partes) {
   return eventoPendente.id;
 }
 
+// ── RECIBO DOS LANÇAMENTOS (11/10/2026) — ver public/recibo-lancamentos.js ──
+const diarioLanc = window.ReciboLancamentos ? window.ReciboLancamentos.criarDiario(window.localStorage) : null;
+const RECIBO_TEXTO = {
+  salvo: ['✓', 'salvo', 'var(--green)'], enviando: ['⏳', 'enviando… sem resposta ainda', 'var(--yellow)'],
+  sem_confirmacao: ['⚠️', 'sem confirmação — toque LANÇAR de novo, não duplica', 'var(--yellow)'],
+  falhou: ['⛔', 'NÃO foi salvo', 'var(--red)'], nao_enviado: ['…', 'esperando confirmação', 'var(--muted)'],
+};
+function atualizarRecibo() {
+  const el = document.getElementById('recibo-ultimo');
+  if (!el || !diarioLanc) return;
+  const u = diarioLanc.ultimo();
+  const pend = diarioLanc.semConfirmacao().length;
+  if (!u) { el.innerHTML = ''; return; }
+  const [icone, texto, cor] = RECIBO_TEXTO[u.status] || RECIBO_TEXTO.nao_enviado;
+  el.innerHTML = `Último: <b style="color:${cor}">${icone} ${escapeHtml(u.tipo)} ${escapeHtml(fmt(u.qtd))} ${escapeHtml(u.unidade || '')} de ${escapeHtml(u.produto)}</b> — ${escapeHtml(texto)} às ${escapeHtml(u.hora)}`
+    + (pend ? `<br><b style="color:var(--yellow)">⚠️ ${pend} lançamento(s) de hoje sem confirmação — toque em "Conferir meu dia"</b>` : '');
+}
+
+async function conferirMeuDia() {
+  if (!diarioLanc) { avisar('Este navegador não guarda a lista de lançamentos. Confira pela aba Histórico.', { titulo: 'Conferir meu dia' }); return; }
+  const lista = diarioLanc.ler().filter((x) => x.status !== 'nao_enviado');
+  if (!lista.length) { avisar('Nenhum lançamento feito neste aparelho hoje.', { titulo: 'Conferir meu dia' }); return; }
+  let conferida;
+  try {
+    const r = await apiPost('/api/conferir-lancamentos', { eventos: lista.slice(-300).map((x) => x.evento) });
+    conferida = diarioLanc.aplicarConferencia(r.resultado).filter((x) => x.status !== 'nao_enviado');
+  } catch (e) { toast(e.message || 'Não consegui conferir agora', 'err'); return; }
+  // Lançamento que o banco TEM está salvo, mesmo que a tela tenha ficado sem resposta na hora.
+  conferida.filter((x) => x.conferido === 'salvo' && x.status !== 'salvo').forEach((x) => diarioLanc.registrar({ evento: x.evento, status: 'salvo' }));
+  const ok = conferida.filter((x) => x.conferido === 'salvo').length;
+  const canc = conferida.filter((x) => x.conferido === 'cancelado');
+  const falta = conferida.filter((x) => x.conferido === 'nao_chegou');
+  const linha = (x) => `${x.hora} ${x.tipo} ${fmt(x.qtd)} ${x.unidade || ''} de ${x.produto}`;
+  const partes = [`✓ ${ok} de ${conferida.length} lançamentos deste aparelho estão no banco.`];
+  if (canc.length) partes.push('', `↩ ${canc.length} foram cancelados depois:`, ...canc.map(linha));
+  if (falta.length) partes.push('', `⛔ ${falta.length} NÃO chegaram ao banco — lance de novo:`, ...falta.map(linha));
+  avisar(partes.join('\n'), { titulo: falta.length ? 'Faltam lançamentos!' : 'Conferir meu dia', perigo: falta.length > 0 });
+  atualizarRecibo();
+}
+
 async function lancar(forcar = false) {
   if (!prodAtual) { toast('Selecione um produto', 'err'); return; }
   const qtd = numQtd(document.getElementById('f-qtd').value);
@@ -3178,19 +3222,35 @@ async function lancar(forcar = false) {
     const c = numQtd(document.getElementById('f-custo').value);
     if (isFinite(c) && c > 0) custoLancamento = c;
   }
+  // 06/10: a mesma compra de frita lançada 2x em 16 s ("será que salvou?"). Entrada repetida
+  // infla o estoque e vira "sumiço" no inventário — pergunta antes.
+  if (diarioLanc && !forcar && tipoAtual === 'Entrada') {
+    const ev = eventoDoLancamento([prodAtual.id, tipoAtual, qtd, custoLancamento, document.getElementById('f-motivo').value, dataLancamentoEscolhida() || '']);
+    const igual = diarioLanc.repetidoRecente({ produto_id: prodAtual.id, tipo: tipoAtual, qtd, evento: ev, data: dataLancamentoEscolhida() || '' });
+    if (igual && !(await askConfirm(`Você já lançou esta mesma entrada às ${igual.hora}, e ela FICOU SALVA:\n${fmt(qtd)} ${prodAtual.unidade} de ${prodAtual.nome}.\n\nÉ outra compra de verdade?`,
+      { titulo: 'Lançar de novo?', textoOk: 'Sim, é outra compra', textoCancelar: 'Não, era a mesma' }))) return;
+  }
   const btn = document.getElementById('btn-lancar');
   btn.disabled = true; btn.textContent = '⏳ Salvando...';
+  let eventoId = null;
+  let respondeu = false; // só erro do envio (antes da resposta) conta como "sem confirmação"
   try {
     const dataEscolhida = dataLancamentoEscolhida();
     const motivoLanc = document.getElementById('f-motivo').value;
-    const eventoId = eventoDoLancamento([prodAtual.id, tipoAtual, qtd, custoLancamento, motivoLanc, dataEscolhida || '']);
+    eventoId = eventoDoLancamento([prodAtual.id, tipoAtual, qtd, custoLancamento, motivoLanc, dataEscolhida || '']);
+    diarioLanc?.registrar({ evento: eventoId, produto_id: prodAtual.id, produto: prodAtual.nome, tipo: tipoAtual, qtd, unidade: prodAtual.unidade, data: dataEscolhida || '', status: 'enviando' });
+    atualizarRecibo();
+    respondeu = false;
     const resultado = await apiPost('/api/movimentacoes', {
       produto_id: prodAtual.id,
       produto_nome: prodAtual.nome, tipo: tipoAtual, qtd, custo: custoLancamento,
       motivo: motivoLanc, obs: '', forcar, evento_id: eventoId,
       ...(dataEscolhida ? { data: dataEscolhida } : {})
     });
+    respondeu = true;
     if (!resultado._alerta409) eventoPendente = null; // gravou: o próximo lançamento é outro evento
+    diarioLanc?.registrar({ evento: eventoId, status: resultado._alerta409 ? 'nao_enviado' : 'salvo', ...(resultado.mov_id ? { mov_id: resultado.mov_id } : {}) });
+    atualizarRecibo();
     if (resultado._alerta409) {
       btn.disabled = false; btn.textContent = '⬆️ LANÇAR';
       // precisa_gerente: o servidor não aceita a confirmação deste usuário (operador). Abrir
@@ -3226,6 +3286,13 @@ async function lancar(forcar = false) {
     // lançar o próximo item sem ter que clicar no ✕. (Pedido do Rubens, v117.)
     if (tipoAtual === 'Saída' || tipoAtual === 'Perda') clearProd();
   } catch(e) {
+    // Rede caiu ou resposta ilegível: o servidor PODE ter gravado. Reenviar usa o mesmo código e não duplica.
+    const semResposta = !respondeu && (e instanceof TypeError || e instanceof SyntaxError);
+    if (eventoId && !respondeu) { diarioLanc?.registrar({ evento: eventoId, status: semResposta ? 'sem_confirmacao' : 'falhou' }); atualizarRecibo(); }
+    if (semResposta) {
+      erroModal('Sem confirmação do servidor', 'A internet falhou antes da resposta. O lançamento pode ter sido salvo ou não.\n\nToque LANÇAR de novo com os mesmos dados: se já tiver salvo, NÃO duplica.');
+      return;
+    }
     // Erro do servidor — mostrar modal para erros críticos
     const msg = e.message || 'Erro inesperado';
     if (msg.includes('nsuficiente') || msg.includes('stoque')) {
@@ -4348,6 +4415,7 @@ let cropDrag = null;
 let cropFrameSize = 300;
 
 document.addEventListener('DOMContentLoaded', () => {
+  try { diarioLanc?.limparAntigos(); atualizarRecibo(); } catch (e) { /* recibo é extra: nunca derruba a tela */ }
   const fotoInput = document.getElementById('card-prato-foto-input');
   if (fotoInput) fotoInput.addEventListener('change', () => {
     const file = fotoInput.files?.[0];
