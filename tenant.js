@@ -20,6 +20,7 @@ const TABELAS_POR_TENANT = new Set([
   'produtos', 'categorias', 'movimentacoes', 'fechamentos_diarios',
   'pagamentos_comprovantes', 'conta_pendencias', 'conta_memoria',
   'nota_pendencias', 'sinonimos', 'inventarios', 'inventario_itens', 'audit_logs',
+  'compras', // livro de compras (Fase 1, 11/10/2026)
   // Encontradas por varredura em 02/08 — todas são dado de restaurante e estavam
   // passando sem filtro: backup do estoque, cardápio, pratos, agenda da IA e
   // snapshots. Sem isso, o cardápio de um cliente apareceria pro outro.

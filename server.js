@@ -65,6 +65,7 @@ const SCHEMA = process.env.SUPABASE_SCHEMA || 'public';
 // Restaurante de referência: de onde saem as categorias ao abrir um novo.
 const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
 const MULTI_TENANT = /^(1|on|true|sim)$/i.test(String(process.env.MULTI_TENANT || ''));
+const livroCompras = require('./compras');
 const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, SCHEMA !== 'public' ? { db: { schema: SCHEMA } } : undefined);
 const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
@@ -1208,6 +1209,18 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
   if (req.body?.custo !== '' && req.body?.custo !== null && req.body?.custo !== undefined && custoBody === null)
     return res.status(400).json({ erro: 'Custo informado é inválido.' });
 
+  // Livro de compras (Fase 1): Entrada de compra pertence a uma NOTA (compra_id) ou fica marcada
+  // "sem nota" com o motivo. Sem nota de operador espera aprovação do gerente (decisão de 11/10).
+  const ehCompra = tipo === 'Entrada' && /^compra/i.test(motivo || '');
+  let compraIdBody = null;
+  if (ehCompra && req.body?.compra_id !== undefined && req.body?.compra_id !== null && req.body?.compra_id !== '') {
+    const existe = await livroCompras.compraExiste(supabase, req.body.compra_id);
+    if (existe === 'erro') return res.status(503).json({ erro: 'Não consegui conferir a nota agora. Nada foi lançado — tente de novo.' });
+    if (!existe) return res.status(400).json({ erro: 'Nota não encontrada. Escolha a nota de novo na lista ou marque "Sem nota".' });
+    compraIdBody = Number(req.body.compra_id);
+  }
+  const motivoSemNota = sanitizeText(req.body?.motivo_sem_nota, 200);
+
   // Trava de inventário aberto: Ajuste manual (tela de Lançar) num produto que está
   // sendo contado agora num inventário em aberto. SEM bypass por forcar — a contagem
   // em andamento é a fonte da verdade, e um Ajuste concorrente cria exatamente o
@@ -1375,12 +1388,20 @@ app.post('/api/movimentacoes', auth, async (req, res) => {
         await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs, movId: movInsId, data: quando.retroativo ? dataISOFromTimestampSP(quando.ts) : null });
       }
     }
+    if (ehCompra && movInsId && compraIdBody) await livroCompras.ligarMovimento(supabase, movInsId, compraIdBody); // reenvio conserta o vínculo
     const { data: prodAgora } = await supabase.from('produtos').select('*').eq('id', prod.id).single();
     return res.json({ ok: true, repetido: true, produto: prodAgora, mov_id: movInsId });
   }
 
+  if (ehCompra && movInsId) {
+    const cid = compraIdBody || await livroCompras.registrarCompra(supabase, {
+      origem: 'mao', sem_nota: true, motivo_sem_nota: motivoSemNota || 'não informado', remetente: req.user.nome,
+      aprovado_por: PODE_CONFIRMAR(req.user) ? req.user.nome : null,
+    });
+    await livroCompras.ligarMovimento(supabase, movInsId, cid);
+  }
   await audit('movimentacao', {
-    produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo,
+    produto_id: prod.id, produto_nome: prod.nome, tipo, qtd, nova_qtd: novaQtd, motivo, ...(compraIdBody ? { compra_id: compraIdBody } : {}),
     ...(quando.retroativo ? { retroativo: true, data_lancada: String(quando.ts).slice(0, 10), dias_atras: quando.dias } : {}),
   }, req.user, getClientIp(req));
   let avisoContas = null;
@@ -1534,6 +1555,32 @@ app.post('/api/conferir-lancamentos', auth, async (req, res) => {
     console.error('conferir-lancamentos:', e.message);
     res.status(503).json({ erro: 'Não consegui conferir agora. Tente de novo em instantes.' });
   }
+});
+
+// ── LIVRO DE COMPRAS (Fase 1, 11/10/2026) ──────────────────────────────────────────────────────
+// Lista as compras (notas do grupo, cupons do app e compras sem nota) com a conferência de cada uma:
+// soma do que entrou no estoque × total impresso na nota, pendências abertas e aprovação.
+app.get('/api/compras', auth, requirePerm('lancar'), async (req, res) => {
+  const dias = Math.min(Math.max(parseInt(req.query.dias, 10) || 3, 1), 62);
+  try {
+    const desde = new Date(Date.now() - dias * 864e5).toISOString();
+    const r = await livroCompras.listarCompras(supabase, { desdeISO: desde });
+    res.json(r);
+  } catch (e) {
+    console.error('compras:', e.message);
+    res.status(503).json({ erro: 'Não consegui carregar as compras agora.' });
+  }
+});
+
+app.post('/api/compras/:id/aprovar', auth, requireRole('admin', 'gerente'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'Compra inválida.' });
+  const { data, error } = await supabase.from('compras').update({ aprovado_por: req.user.nome, aprovado_em: new Date().toISOString() })
+    .eq('id', id).eq('sem_nota', true).is('aprovado_por', null).select('id');
+  if (error) { console.error('aprovar compra:', error.message); return res.status(503).json({ erro: 'Não consegui aprovar agora.' }); }
+  if (!data || !data.length) return res.status(404).json({ erro: 'Compra não encontrada ou já aprovada.' });
+  await audit('compra_aprovar', { compra_id: id }, req.user, getClientIp(req));
+  res.json({ ok: true });
 });
 
 app.delete('/api/movimentacoes/:id', auth, requireRole('admin', 'gerente'), async (req, res) => {
@@ -5646,7 +5693,7 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
 
 7. EMBALAGEM FECHADA (o erro mais caro): a nota costuma vender por CAIXA/FARDO, mas o estoque conta UNIDADES. Quando a linha indicar quantas unidades vêm na embalagem, devolva esse número no campo "embalagem". Exemplos: "COCA LATA CX C/24" -> embalagem 24 | "AGUA 500ML FD 12" -> embalagem 12 | "CERVEJA PACK 6" -> embalagem 6 | "BROCOLIS CAIXA C/18" -> embalagem 18. Se a linha não indicar embalagem, devolva embalagem 1.
    NÃO multiplique a quantidade você mesmo — só informe a embalagem e a quantidade como está na nota. Quem converte é o sistema.
-   Sinal de que existe embalagem: o valor unitário parece alto demais para uma lata/garrafa (ex: R$47,88 "por lata" é preço de caixa de 24).\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nVALOR TOTAL da linha (campo valor_total): o número da coluna Vl Total do item, em reais, número com PONTO decimal (ex: 42.00). É o valor que você já usa na conferência Total ÷ Unit. Se houver desconto na linha, use o valor final pago. Se não conseguir ler o valor daquela linha, use null — NUNCA invente.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\",\"valor_total\":42.00,\"embalagem\":1,\"gramatura_kg\":0}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN', valor_total:42.00}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN, valor_total:28.80\n'FILE FRANGO CX 20KG 22,90 458,00' -> qtd:20, KG, valor_total:458.00\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)
+   Sinal de que existe embalagem: o valor unitário parece alto demais para uma lata/garrafa (ex: R$47,88 "por lata" é preço de caixa de 24).\n\nREGRA DE UNIDADE (o restaurante compra quase tudo por QUILO):\n- PROTEÍNAS são SEMPRE KG: file de frango, peito, coxa, sobrecoxa, asa, coracao, carne, boi, alcatra, patinho, acem, coxao, musculo, suino, porco, lombo, pernil, costela, linguica, bacon, salsicha, peixe, pescado, tilapia, salmao, camarao, bacalhau, file, mignon, fraldinha, picanha. Para proteína a qtd é o PESO em kg.\n- SACO/SC/CAIXA/CX/FARDO COM PESO de proteína, hortifruti, legume, tubérculo ou grão (ex 'FILE FRANGO CX 20KG', 'SACO BATATA 25KG', 'CX CENOURA 20KG', 'SACO CEBOLA 20KG', 'CARNE 18 KG') -> qtd = o PESO em KG (25, 20...), unidade KG. NÃO é 1 saco nem 1 caixa. Se houver N sacos/caixas, multiplique: '2 SACO BATATA 25KG' -> 50 KG.\n- Hortifruti, grãos, farinhas a granel: KG quando vier em peso.\n- UN só para itens realmente unitários e fechados: latas, garrafas, vidros, potes, pacotes, descartáveis.\n- L para litro. CX só quando for contagem de caixas SEM peso.\n\nVALOR TOTAL da linha (campo valor_total): o número da coluna Vl Total do item, em reais, número com PONTO decimal (ex: 42.00). É o valor que você já usa na conferência Total ÷ Unit. Se houver desconto na linha, use o valor final pago. Se não conseguir ler o valor daquela linha, use null — NUNCA invente.\n\nCABEÇALHO DA NOTA (livro de compras): leia também, se estiverem na foto, o NOME do estabelecimento que vendeu (fornecedor, como impresso no topo), a DATA DE EMISSÃO (AAAA-MM-DD) e o VALOR TOTAL A PAGAR da nota inteira (\"Valor a pagar\"/\"Total\", depois de descontos). O que não estiver legível vai null — NUNCA invente nem some você mesmo.\n\nRESPONDA SOMENTE com JSON válido, sem markdown, no formato:\n{\"fornecedor\":\"Nome do mercado\",\"data_emissao\":\"2026-10-06\",\"total_nota\":115.43,\"itens\":[{\"nome\":\"Nome do produto\",\"qtd\":12,\"unidade\":\"UN\",\"valor_total\":42.00,\"embalagem\":1,\"gramatura_kg\":0}]}\n\nExemplos:\n'COCA-COLA 350ML 12X 3,50 42,00' -> {nome:'Coca-Cola 350ml', qtd:12, unidade:'UN', valor_total:42.00}\n'AGUA 500ML X 24 UN 1,20 28,80' -> qtd:24, UN, valor_total:28.80\n'FILE FRANGO CX 20KG 22,90 458,00' -> qtd:20, KG, valor_total:458.00\n'PEITO FGO 18,5 KG' -> qtd:18.5, KG\n'SACO BATATA 25KG' -> qtd:25, KG\n'CX CENOURA 20KG' -> qtd:20, KG\n'2 SACO CEBOLA 20KG' -> qtd:40, KG (2 sacos x 20kg)
 'COCA LATA CX C/24  2  47,88  95,76' -> {nome:'Coca Lata', qtd:2, unidade:'UN', valor_total:95.76, embalagem:24}  (2 caixas de 24 = 48 latas; quem multiplica e o sistema)\n\nLeia com MUITA atenção cada linha. Em dúvida entre unidade e quilo numa proteína, escolha KG. Se não conseguir ler: {\"itens\":[],\"erro\":\"descrição do problema\"}` }
         ]}]
       })
@@ -5752,7 +5799,7 @@ Sinal: valor unitario alto demais pra um quilo (linguica a R$80/kg, farinha a R$
         ...(problemaQtd ? { problema_qtd: problemaQtd } : {}),
       });
     }
-    return { itens };
+    return { itens, cabecalho: livroCompras.cabecalhoDaNota(parsed, dateSP()) };
 }
 
 app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
@@ -5764,8 +5811,11 @@ app.post('/api/ler-cupom', auth, requirePerm('lancar'), async (req, res) => {
     const r = await lerNotaComIA(listaImg, mediaType, req.user);
     if (r.erro) return res.status(r.status || 500).json({ erro: r.erro });
     if (r.aviso) return res.json({ itens: [], aviso: r.aviso });
-    await audit('ler_cupom', { total_itens: r.itens.length }, req.user, getClientIp(req));
-    res.json({ itens: r.itens });
+    // Livro de compras: a mesma foto lida 2x é a MESMA compra (marca da imagem).
+    const hashCupom = crypto.createHash('sha256').update(listaImg.join('|')).digest('hex').slice(0, 32);
+    const compraId = await livroCompras.registrarCompra(supabase, { origem: 'cupom', nota_hash: hashCupom, ...(r.cabecalho || {}), remetente: req.user.nome });
+    await audit('ler_cupom', { total_itens: r.itens.length, compra_id: compraId }, req.user, getClientIp(req));
+    res.json({ itens: r.itens, compra_id: compraId, cabecalho: r.cabecalho || null });
   } catch(e) {
     console.error('Erro ler-cupom:', e.message);
     await logErroAgenda('ler-cupom', e, req.user);
@@ -6305,6 +6355,8 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
     const r = await lerNotaComIA(listaImg, mediaType, { nome: remetente });
     if (r.erro) return res.json({ resposta: `❌ Não consegui ler a nota: ${r.erro}` });
     if (r.aviso || !r.itens.length) return res.json({ resposta: `⚠️ Não achei itens na nota. ${r.aviso || 'Tente uma foto mais nítida e inteira.'}` });
+    // Livro de compras (Fase 1): a nota vira documento; cada entrada e pendência aponta para ela.
+    const compraId = await livroCompras.registrarCompra(supabase, { origem: 'grupo', nota_hash: hashNota, ...(r.cabecalho || {}), remetente });
 
     // semContas: item que entrou no estoque mas cujo custo NÃO chegou na aba Contas.
     // Vai na resposta do WhatsApp — sem isso o CMV do mês sai menor e ninguém percebe.
@@ -6329,6 +6381,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
           valor_total: item.valor_total || null,
           candidatos: (item.candidatos || []).map(c => ({ id: c.id, nome: c.nome, unidade: c.unidade, codigo: c.codigo || null })),
           remetente, status: 'pendente', created_at: nowSP(),
+          ...(compraId ? { compra_id: compraId } : {}),
         });
         const motivoQtd = item.problema_qtd ? ` — ${item.problema_qtd}, confira a quantidade` : '';
         if (item.candidatos && item.candidatos.length) confirmar.push({ nome_cupom: item.nome_cupom, qtd: item.qtd, sugestao: item.candidatos[0].nome + motivoQtd });
@@ -6383,6 +6436,7 @@ app.post('/api/webhook/ler-nota', webhookLimiter, webhookTenantDoGrupo, async (r
         movNota = movIns;
       }
       const custoAntes = Number(item.produto.custo || 0);
+      await livroCompras.ligarMovimento(supabase, movNota?.id, compraId);
       const rc = await lancarCompraNasContas({ produto: item.produto, qtd: item.qtd, custoUnit, responsavel: remetente, obs: 'nota via WhatsApp', movId: movNota?.id, valorDocumento: valorDocNota });
       if (!rc.ok) semContas.push(`${item.produto.nome} — ${fmtBRL(valorNota)}`);
       lancados.push({ nome: item.produto.nome, qtd: item.qtd, unidade: item.produto.unidade, estoque: novaQtd,
@@ -6671,6 +6725,7 @@ app.post('/api/pendencias/:id/resolver', auth, requirePerm('pendencias'), async 
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: prod.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
   }
+  await livroCompras.ligarMovimento(supabase, movPend?.id, pend.compra_id);
   const rcPend = await lancarCompraNasContas({ produto: prod, qtd, custoUnit, responsavel: req.user.nome, obs: 'nota WhatsApp (pendência)', movId: movPend?.id, valorDocumento: valorDocPend });
   // Status que não sobe = pendência volta pra lista = item entra no estoque duas vezes.
   const { error: errStatusPend } = await supabase.from('nota_pendencias').update({ status: 'resolvido', resolvido_em: nowSP(), resolvido_por: req.user.nome }).eq('id', pend.id);
@@ -6747,6 +6802,7 @@ app.post('/api/pendencias/:id/criar-produto', auth, requirePerm('pendencias'), a
     }
     movNovo = movIns;
   }
+  await livroCompras.ligarMovimento(supabase, movNovo?.id, pend.compra_id);
   const rcNovo = await lancarCompraNasContas({ produto: novo, qtd, custoUnit: custo, responsavel: req.user.nome, obs: 'produto novo via nota', movId: movNovo?.id, valorDocumento: valorDocNovo });
   if (memorizar && pend.produto_cupom) {
     try { await supabase.from('sinonimos').upsert({ termo: normalizeSearch(pend.produto_cupom), produto_nome: novo.nome }, { onConflict: chaveConflito('termo') }); } catch (e) {}
@@ -8257,6 +8313,8 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
     }
     let avisoContasW = '';
     if (tipo === 'Entrada') {
+      const cidW = await livroCompras.registrarCompra(supabase, { origem: 'mao', sem_nota: true, motivo_sem_nota: 'entrada por mensagem no WhatsApp', remetente: remetente || 'WhatsApp' });
+      await livroCompras.ligarMovimento(supabase, movWpp?.id, cidW);
       const rcW = await lancarCompraNasContas({ produto: prod, qtd, custoUnit: custoUnitW, responsavel: remetente || 'WhatsApp', obs: 'via WhatsApp', movId: movWpp?.id, valorDocumento: valorDocW });
       if (!rcW.ok) avisoContasW = `\n\n🔴 *Mas o custo NÃO entrou nas Contas.* Lance essa compra manualmente no app em *Contas*, senão o CMV do mês sai menor.`;
     }
