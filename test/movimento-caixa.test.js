@@ -144,3 +144,20 @@ test('textos reais de Desktop/fechamento: recebimentos iguais ao leitor antigo e
   }
   assert.deepEqual(diferentes, []);
 });
+
+test('balança escrita de outros jeitos, inclusive começando com TOTAL', () => {
+  const com = (linha) => mc.lerMovimento(TEXTO.replace('TOTAL VENDIDO: R$ 6.358,07', `TOTAL VENDIDO: R$ 6.358,07\n${linha}`));
+  for (const linha of ['TOTAL PESADO BALANÇA: 70,402KG', 'TOTAL PESADO BALANÇA 70,402 KG', 'PESO DA BALANÇA: 70,402 KG', 'BALANÇA TOTAL KG 70,402', 'KG BALANÇA 70,402']) {
+    const r = com(linha);
+    assert.equal(r.balancaKg, 70.402, linha);
+    assert.equal(r.totalDeclarado, 6358.07, `${linha}: não pode virar o TOTAL`);
+    assert.equal(Math.round(r.pagamentos.reduce((s, x) => s + x.valor, 0) * 100) / 100, 6468.07, `${linha}: não pode virar recebimento`);
+  }
+});
+
+test('"01 BALANÇA 49,67" (valor em reais, 09/08) continua recebimento, não peso', () => {
+  const r = mc.lerMovimento(TEXTO.replace('DINHEIRO: 918,79', 'DINHEIRO: 918,79\n01 BALANÇA 49,67'));
+  assert.equal(r.balancaKg, null);
+  assert.ok(r.pagamentos.some((p) => p.valor === 49.67));
+  assert.equal(mc.lerMovimento(TEXTO.replace('DINHEIRO', 'BALANÇA: 70,402\nDINHEIRO')).balancaKg, 70.402, '3 casas sem KG = peso');
+});

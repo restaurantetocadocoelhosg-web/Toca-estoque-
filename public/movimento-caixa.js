@@ -98,7 +98,11 @@
       if (!temDigito && /^lixo\b/.test(n)) { secao = 'lixo'; continue; }
       if (/^despesa/.test(n)) secao = 'despesas';
 
-      if (/^balan[c]a\b/.test(n)) { const g = gramas(linha); if (g != null) r.balancaKg = g / 1000; continue; }
+      // Balança em qualquer lugar da linha ("TOTAL PESADO BALANÇA 70,402KG", "PESO DA BALANÇA ...").
+      // Vem antes do TOTAL: senão "TOTAL PESADO BALANÇA" virava o total vendido e o peso se perdia.
+      // Só é PESO com "KG" ou 3 casas (70,402); "01 BALANÇA 49,67" (09/08) é recebimento em reais.
+      const ehPesoBalanca = /\bbalanca\b/.test(n) && (/kg/i.test(linha) || (/\d[.,]\d{3}(?!\d)/.test(linha) && !/R\$/i.test(linha)));
+      if (ehPesoBalanca) { const g = gramas(linha); if (g != null) r.balancaKg = g / 1000; continue; }
 
       // Peso: dentro da seção LIXO, ou qualquer linha com "lixo" (jeito antigo).
       if (secao === 'lixo' || /\blixo\b/.test(n)) {
