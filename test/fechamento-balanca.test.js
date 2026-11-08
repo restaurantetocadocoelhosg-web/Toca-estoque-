@@ -94,6 +94,55 @@ test('peso inválido não salva lixo absurdo nem balança negativa', async () =>
   assert.equal(l.perdas.lixo_salada_g, null, 'acima de 500 kg é erro de digitação');
 });
 
+test('Planilha do mês: balança, bebidas e as 5 perdas por dia e no total', async () => {
+  const p = await ctx.api('admin', 'GET', '/api/planilha-mensal?mes=2026-11');
+  assert.equal(p.status, 200);
+  const d8 = p.json.dias.find((d) => d.data === '2026-11-08');
+  assert.equal(d8.balanca_kg, 70.402);
+  assert.equal(d8.preco_kg, 89.99);
+  assert.equal(d8.bebidas, 830.98);
+  assert.equal(d8.perdas_buffet.fritura_g, 1750);
+  const d9 = p.json.dias.find((d) => d.data === '2026-11-09');
+  assert.equal(d9.bebidas, null, 'dia sem lançamento não inventa bebidas');
+  assert.ok(p.json.totais.bebidas >= 830.98);
+  assert.ok(p.json.totais.balanca_kg >= 70.402);
+  assert.ok(p.json.totais.perdas_g.fritura_g >= 1750);
+});
+
+test('CSV do mês traz Balança (kg), Bebidas e as perdas', async () => {
+  const r = await fetch(`${ctx.base}/api/exportar/fechamentos?mes=2026-11`, { headers: { authorization: `Bearer ${(await ctx.novaSessao('admin')).token}` } });
+  const csv = await r.text();
+  const [cab, ...linhas] = csv.split(/\r?\n/);
+  assert.ok(cab.includes('Balança (kg)') && cab.includes('Bebidas') && cab.includes('Fritura (kg)'), cab);
+  const l8 = linhas.find((l) => l.replace(/^"/, '').startsWith('08/11/2026'));
+  assert.ok(l8.includes('70.402') && l8.includes('830.98') && l8.includes('1.750'), l8);
+});
+
+test('mensagem do dia no WhatsApp mostra balança, bebidas e perdas', async () => {
+  const { extrairFuncao } = require('./helpers/extrair-funcao');
+  const fmtBRL = (n) => 'R$ ' + Number(n || 0).toFixed(2).replace('.', ',');
+  const msgDe = extrairFuncao('server.js', 'montarMensagemFechamentoDia', {
+    fmtBRL, linhaFinanceiraTexto: (r) => `${r.descricao} ${fmtBRL(r.valor)}`, resumirResponsaveis: () => '',
+    movimentoCaixa: require('../public/movimento-caixa.js'),
+  });
+  const g = await ctx.api('operador', 'GET', '/api/realidade-dia?data=2026-11-08');
+  const msg = msgDe(g.json);
+  assert.ok(msg.includes('Balança: 70,402 kg'), msg);
+  assert.ok(msg.includes('Bebidas e derivados: R$ 830,98'), msg);
+  assert.ok(msg.includes('Fritura: 1,750 kg'), msg);
+  const antigo = await ctx.api('operador', 'GET', '/api/realidade-dia?data=2026-10-05');
+  assert.ok(!msgDe(antigo.json).includes('Bebidas'), 'dia sem balança não fala de bebidas');
+});
+
+test('PDF oficial do mês tem balança, bebidas e perdas no resumo', async () => {
+  const r = await fetch(`${ctx.base}/api/relatorio/fechamento?mes=2026-11`, { headers: { authorization: `Bearer ${(await ctx.novaSessao('admin')).token}` } });
+  const html = (await r.text()).replace(/ /g, ' ');
+  assert.equal(r.status, 200);
+  assert.ok(html.includes('Balança no mês'), 'faltou balança');
+  assert.ok(html.includes('Bebidas e derivados no mês'), 'faltou bebidas');
+  assert.ok(html.includes('Fritura no mês'), 'faltou perdas');
+});
+
 test('ANTES da migração rodar (sem as colunas novas): salvar e abrir o dia continua funcionando', async () => {
   await ctx.db.query('alter table fechamentos_diarios drop column balanca_kg, drop column preco_kg, drop column perdas, drop column feriado');
   await ctx.db.query(`notify pgrst, 'reload schema'`);

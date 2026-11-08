@@ -1154,7 +1154,7 @@ select.big-input { font-size: 14px; }
         <div class="real-loss-list" id="real-perdas-list"></div>
       </div>
 
-      <div class="real-card" id="real-porc-semana-card" hidden>
+      <div class="real-card" id="real-porc-semana-card" hidden style="display:none">
         <div class="real-card-title">🧀 Porcionamento — últimos 7 dias <button class="btn-sm" onclick="carregarPorcSemana()">↻</button></div>
         <div id="real-porc-semana"><div class="loading">Carregando...</div></div>
       </div>
@@ -5108,7 +5108,7 @@ function renderRealidade(d) {
   obsInput.value = d.observacao || '';
   // Balança e perdas (08/11/2026). Porcionamento não aparece mais na tela (Rubens: só o que está no
   // texto do movimento); o que já foi salvo nele continua no banco, intocado.
-  renderCamposPerdas(d.perdas);
+  renderCamposPerdas(d.perdas_buffet);
   const balancaInput = document.getElementById('real-balanca');
   if (balancaInput) balancaInput.value = d.balanca_kg != null ? kgTexto(Number(d.balanca_kg) * 1000) : '';
   const feriadoInput = document.getElementById('real-feriado');
@@ -5235,21 +5235,13 @@ function imprimirDia() {
   const somaCortes = cortes.reduce((s, r) => s + Number(r.valor || 0), 0);
   const somaDesp = despesas.reduce((s, r) => s + Number(r.valor || 0), 0);
   const pratos = Number(document.getElementById('real-pratos')?.value || 0);
-  const lixoRaw = document.getElementById('real-lixo')?.value;
-  const lixo = lixoRaw ? Number(lixoRaw) : null;
-  const obs = document.getElementById('real-obs')?.value.trim() || '';
-  // Lê o porcionamento COMO ESTÁ NA TELA (readonly div ou input), não o coletor
-  // do backend — que pra operador não traz "tinha".
-  const lerNum = (el) => porcInt(el ? (el.tagName === 'INPUT' ? el.value : el.dataset.v) : 0);
-  const porc = [...document.querySelectorAll('#real-porc-list .porc-item')].map(it => ({
-    item: it.dataset.item,
-    linhas: [...it.querySelectorAll('.porc-row:not(.cab)')].map(r => ({
-      peso_g: Number(r.dataset.peso),
-      tinha: lerNum(r.querySelector('.porc-tinha')),
-      porcionei: lerNum(r.querySelector('.porc-porcionei')),
-      saiu: lerNum(r.querySelector('.porc-saiu')),
-    })),
-  }));
+  // Balança e perdas (08/11/2026) — como estão na tela. Porcionamento e Observação saíram da tela
+  // e da impressão (Rubens: só o que está no texto do movimento).
+  const balancaG = lerKgCampo(document.getElementById('real-balanca')?.value);
+  const { preco: precoKg, rotulo: rotuloPreco } = precoKgTela();
+  const conta = contaBalancaTela();
+  const perdasBuffet = coletarPerdas();
+  const kgTxt = (g) => kgTexto(g) + ' kg';
 
   const tabelaDin = (titulo, linhas, total) => {
     if (!linhas.length && total == null) return '';
@@ -5261,17 +5253,20 @@ function imprimirDia() {
       <tfoot><tr><td>Total</td><td></td><td class="n">${brl(total)}</td></tr></tfoot></table>`;
   };
 
-  let porcHtml = '';
-  if (porc && porc.length) {
-    porcHtml = '<h3>🧀 Porcionamento (anotação)</h3>' + porc.map(it => {
-      const rows = it.linhas.map(l => {
-        const sob = (l.tinha || 0) + (l.porcionei || 0) - (l.saiu || 0);
-        return `<tr><td>${porcPesoLabel(l.peso_g)}</td><td class="n">${l.tinha ?? 0}</td><td class="n">${l.porcionei ?? 0}</td><td class="n">${l.saiu ?? 0}</td><td class="n">${sob}</td></tr>`;
-      }).join('');
-      return `<div class="porc-bloco"><b>${esc(it.item)}</b>
-        <table><thead><tr><th>Peso</th><th class="n">Tinha</th><th class="n">+Porc.</th><th class="n">Saíram</th><th class="n">Sobrou</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-    }).join('');
-  }
+  const balancaHtml = balancaG == null ? '' : `<h3>⚖️ Balança</h3><table><tbody>
+    <tr><td>Total pesado</td><td class="n">${kgTxt(balancaG)}</td></tr>
+    <tr><td>Preço do quilo (${esc(rotuloPreco)})</td><td class="n">${brl(precoKg)}</td></tr>
+    ${conta ? `<tr><td>Comida pesada</td><td class="n">${brl(conta.comidaPesada)}</td></tr>
+    <tr><td>(−) Relatório: pesado e não pago</td><td class="n">${brl(conta.relatorio)}</td></tr>
+    <tr><td>= Comida vendida</td><td class="n">${brl(conta.comidaVendida)}</td></tr>
+    <tr><td>Total vendido</td><td class="n">${brl(somaPag)}</td></tr>
+    <tr><td><b>🥤 Bebidas e derivados</b></td><td class="n"><b>${brl(conta.bebidas)}</b></td></tr>` : ''}
+  </tbody></table>`;
+  const linhasPerdas = Object.entries(MovimentoCaixa.ROTULOS_PERDAS)
+    .map(([k, r]) => `<tr><td>${esc(r)}</td><td class="n">${perdasBuffet[k] != null ? kgTxt(perdasBuffet[k]) : '—'}</td></tr>`).join('');
+  const valorPerdasBuffet = MovimentoCaixa.valorPerdas(perdasBuffet, precoKg);
+  const perdasBuffetHtml = `<h3>🥡 Lixo final buffet (perdas em kg — não entra nas contas)</h3><table><tbody>${linhasPerdas}
+    ${valorPerdasBuffet > 0 ? `<tr><td class="sub">Valem pelo preço do quilo (só informação)</td><td class="n">${brl(valorPerdasBuffet)}</td></tr>` : ''}</tbody></table>`;
 
   const perdas = d.movimentos?.perdas_itens || [];
   const perdasHtml = perdas.length
@@ -5314,9 +5309,9 @@ function imprimirDia() {
   <table><tbody>
     <tr><td>Pratos vendidos</td><td class="n">${pratos || '—'}</td></tr>
     <tr><td>Ticket médio</td><td class="n">${pratos ? brl(somaPag / pratos) : '—'}</td></tr>
-    <tr><td>🥡 Lixo final do buffet</td><td class="n">${lixo != null ? (lixo >= 1000 ? (lixo / 1000).toFixed(2).replace('.', ',') + ' kg' : lixo + ' g') : '—'}</td></tr>
   </tbody></table>
-  ${porcHtml}
+  ${balancaHtml}
+  ${perdasBuffetHtml}
 
   <h2>📊 Realidade do dia</h2>
   <table><tbody>
@@ -5335,7 +5330,6 @@ function imprimirDia() {
 
   ${perdasHtml}
 
-  ${obs ? `<h2>Observação</h2><div class="obs">${esc(obs)}</div>` : ''}
 
   <div class="rodape">Toca Estoque ${document.querySelector('.app-ver')?.textContent || ''} · impresso ${new Date().toLocaleString('pt-BR')}</div>
   <${''}script>window.onload=function(){window.print()}<${''}/script>

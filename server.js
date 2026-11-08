@@ -3078,7 +3078,7 @@ async function montarRealidadeDia(dataDiaParam) {
     feriado_automatico: feriadoAutomatico,
     preco_kg_sugerido: precoSugerido.preco,
     preco_kg_tipo: row?.preco_kg != null ? null : precoSugerido.tipo,
-    perdas: perdasDia,
+    perdas_buffet: perdasDia,
     valor_perdas: perdasDia ? movimentoCaixa.valorPerdas(perdasDia, precoKg || precoSugerido.preco) : 0,
     conta_balanca: contaEmSnake(conta),
     media_bebidas_14d: await mediaBebidas14d(dataDia),
@@ -3482,11 +3482,11 @@ async function montarPlanilhaMensal(mesParam) {
   }
 
   let fechamentos = [];
-  const { data: fechData, error: fechErr } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g')
-    .gte('data', inicio)
-    .lte('data', fim)
-    .order('data', { ascending: true });
+  const lerMes = (colunas) => supabase.from('fechamentos_diarios').select(colunas)
+    .gte('data', inicio).lte('data', fim).order('data', { ascending: true });
+  const colunasMes = 'data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g';
+  let { data: fechData, error: fechErr } = await lerMes(`${colunasMes}, ${COLUNAS_BALANCA}`);
+  if (fechErr && faltaColunaBalanca(fechErr)) ({ data: fechData, error: fechErr } = await lerMes(colunasMes));
   if (fechErr) {
     if (isTabelaFechamentoMissing(fechErr)) configuracaoPendente = true;
     else throw fechErr;
@@ -3555,6 +3555,11 @@ async function montarPlanilhaMensal(mesParam) {
     ticket_medio: null,
     lixo_buffet_g: 0, // anotação acumulada do mês (gramas) — fora das somas financeiras
     dias_com_lixo: 0,
+    // Balança (08/11/2026): kg pesados, bebidas e perdas (gramas) — só dias que têm balança/perdas.
+    balanca_kg: 0,
+    bebidas: 0,
+    dias_com_balanca: 0,
+    perdas_g: { lixo_buffet_g: 0, lixo_salada_g: 0, desperdicio_g: 0, fritura_g: 0, doacao_corte_g: 0 },
   };
 
   const dias = datas.map(dataDia => {
@@ -3625,6 +3630,12 @@ async function montarPlanilhaMensal(mesParam) {
     totais.anomalias += mov.anomalias;
     const lixoDia = row?.lixo_buffet_g != null ? Number(row.lixo_buffet_g) : null;
     if (lixoDia != null && lixoDia > 0) { totais.lixo_buffet_g += lixoDia; totais.dias_com_lixo += 1; }
+    const balancaDia = row?.balanca_kg != null ? Number(row.balanca_kg) : null;
+    const precoKgDia = row?.preco_kg != null ? Number(row.preco_kg) : null;
+    const contaDia = movimentoCaixa.contaBalanca({ balancaKg: balancaDia, precoKg: precoKgDia, cortes, totalVendido: totalPagamentos });
+    const perdasDia = row?.perdas || null;
+    if (contaDia) { totais.balanca_kg += balancaDia; totais.bebidas += contaDia.bebidas; totais.dias_com_balanca += 1; }
+    if (perdasDia) for (const k of Object.keys(totais.perdas_g)) totais.perdas_g[k] += Number(perdasDia[k]) || 0;
 
     return {
       data: dataDia,
@@ -3661,9 +3672,16 @@ async function montarPlanilhaMensal(mesParam) {
       responsavel: row?.responsavel || '',
       observacao: row?.observacao || '',
       lixo_buffet_g: row?.lixo_buffet_g ?? null,
+      balanca_kg: balancaDia,
+      preco_kg: precoKgDia,
+      bebidas: contaDia ? contaDia.bebidas : null,
+      comida_vendida: contaDia ? contaDia.comidaVendida : null,
+      perdas_buffet: perdasDia,
       atualizado_em: row?.updated_at || row?.created_at || null,
     };
   });
+  totais.balanca_kg = Math.round(totais.balanca_kg * 1000) / 1000;
+  totais.bebidas = Number(totais.bebidas.toFixed(2));
 
   for (const key of ['vendas','total_pagamentos','cortes','despesas','compras_estoque','consumo_estoque','perdas','ajustes','lucro_bruto_estimado','resultado_dia_estimado','fluxo_caixa','saida_contas','resultado_caixa','espelho_furado']) {
     totais[key] = Number(totais[key].toFixed(2));
@@ -4182,7 +4200,15 @@ function montarMensagemFechamentoDia(d) {
   msg += `🍳 Consumo do estoque: ${fmtBRL(d.consumo_estoque)}\n`;
   msg += `🗑️ Perdas do estoque: ${fmtBRL(d.perdas)}\n`;
   if (d.despesas > 0) msg += `💸 Despesas do caixa: ${fmtBRL(d.despesas)}\n`;
-  if (d.lixo_buffet_g != null && d.lixo_buffet_g > 0) msg += `🥡 Lixo final do buffet: ${d.lixo_buffet_g}g (anotação — não entra nas contas)\n`;
+  // Balança (08/11/2026): kg pesados, bebidas e as 5 perdas. Dia antigo sem balança fica como antes.
+  const kg = (g) => (Number(g) / 1000).toFixed(3).replace('.', ',') + ' kg';
+  if (d.balanca_kg != null) {
+    msg += `⚖️ Balança: ${kg(d.balanca_kg * 1000)} × ${fmtBRL(d.preco_kg)}\n`;
+    if (d.conta_balanca) msg += `🥤 Bebidas e derivados: ${fmtBRL(d.conta_balanca.bebidas)} (comida vendida ${fmtBRL(d.conta_balanca.comida_vendida)})\n`;
+  }
+  const perdasMsg = d.perdas_buffet ? Object.entries(movimentoCaixa.ROTULOS_PERDAS).filter(([k]) => d.perdas_buffet[k] > 0) : [];
+  if (perdasMsg.length) msg += `🥡 Perdas (anotação — não entra nas contas): ${perdasMsg.map(([k, r]) => `${r}: ${kg(d.perdas_buffet[k])}`).join(' · ')}\n`;
+  else if (d.lixo_buffet_g != null && d.lixo_buffet_g > 0) msg += `🥡 Lixo final do buffet: ${d.lixo_buffet_g}g (anotação — não entra nas contas)\n`;
 
   if (d.pagamentos?.length) {
     msg += `\n💳 *Recebimentos:*\n`;
@@ -5400,7 +5426,7 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
     const planilha = await montarPlanilhaMensal(req.query?.mes);
     // v58: colunas por TIPO de pagamento (v55) — antes exportava Stone/PagBank, chaves
     // que não existem mais (saíam 0,00). + Lixo do buffet (anotação em gramas).
-    headers = ['Data','Dia','Status','Pratos','Vendas','Dinheiro','Crédito','Débito','Voucher','Pix','Cartão (maq.)','Ifood/Entrega','Outros','Cortes','Despesas','Compras Estoque','Consumo Estoque','Perdas','Resultado','Caixa','Lixo Buffet (g)','Mov. Estoque','Responsável','Observação'];
+    headers = ['Data','Dia','Status','Pratos','Vendas','Dinheiro','Crédito','Débito','Voucher','Pix','Cartão (maq.)','Ifood/Entrega','Outros','Cortes','Despesas','Compras Estoque','Consumo Estoque','Perdas','Resultado','Caixa','Lixo Buffet (g)','Balança (kg)','Preço kg','Bebidas','Lixo buffet (kg)','Lixo salada (kg)','Desperdício (kg)','Fritura (kg)','Doação/corte (kg)','Mov. Estoque','Responsável','Observação'];
     rows = planilha.dias.map(d => [
       d.data_br,
       d.dia_semana,
@@ -5423,6 +5449,11 @@ app.get('/api/exportar/:tipo', auth, async (req, res) => {
       d.resultado_dia_estimado.toFixed(2),
       d.fluxo_caixa.toFixed(2),
       d.lixo_buffet_g != null ? d.lixo_buffet_g : '',
+      d.balanca_kg != null ? d.balanca_kg.toFixed(3) : '',
+      d.preco_kg != null ? d.preco_kg.toFixed(2) : '',
+      d.bebidas != null ? d.bebidas.toFixed(2) : '',
+      ...['lixo_buffet_g', 'lixo_salada_g', 'desperdicio_g', 'fritura_g', 'doacao_corte_g']
+        .map(k => (d.perdas_buffet?.[k] != null ? (d.perdas_buffet[k] / 1000).toFixed(3) : '')),
       d.movimentos_total,
       d.responsavel,
       d.observacao,
@@ -5717,6 +5748,9 @@ app.get('/api/relatorio/:tipo', auth, async (req, res) => {
           <tr class="zebra"><td>Despesas sobre vendas</td><td class="num">${t.despesas_sobre_vendas_pct != null ? String(t.despesas_sobre_vendas_pct).replace('.', ',') + '%' : '—'}</td></tr>
           <tr><td>Cortes (erro/tara/patrões/funcionário)</td><td class="num">${brl(t.cortes)}</td></tr>
           <tr class="zebra"><td>🥡 Lixo do buffet no mês</td><td class="num">${t.lixo_buffet_g > 0 ? (t.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + ' kg em ' + t.dias_com_lixo + ' dia(s)' : 'sem anotações'}</td></tr>
+          ${t.dias_com_balanca > 0 ? `<tr><td>⚖️ Balança no mês</td><td class="num">${t.balanca_kg.toFixed(3).replace('.', ',')} kg em ${t.dias_com_balanca} dia(s)</td></tr>
+          <tr class="zebra"><td>🥤 Bebidas e derivados no mês</td><td class="num">${brl(t.bebidas)}</td></tr>` : ''}
+          ${Object.entries(movimentoCaixa.ROTULOS_PERDAS).filter(([k]) => t.perdas_g[k] > 0).map(([k, r]) => `<tr><td>🥡 ${r} no mês</td><td class="num">${(t.perdas_g[k] / 1000).toFixed(3).replace('.', ',')} kg</td></tr>`).join('')}
           <tr><td>Caixa do mês (vendas − despesas)</td><td class="num">${brl(t.fluxo_caixa)}</td></tr>
         </tbody>
       </table>

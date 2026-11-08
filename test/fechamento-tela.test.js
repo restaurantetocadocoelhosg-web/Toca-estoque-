@@ -55,6 +55,7 @@ test('colar o texto preenche balança, 5 perdas e a conta das bebidas', async ()
 test('Porcionamento e Observação não aparecem na tela', async () => {
   assert.equal(await pagina.isVisible('#real-porc-block'), false);
   assert.equal(await pagina.isVisible('#real-obs'), false);
+  assert.equal(await pagina.isVisible('#real-porc-semana-card'), false);
 });
 
 test('marcar feriado num dia útil troca o preço para 89,99', async () => {
@@ -81,4 +82,29 @@ test('salvar grava balança, perdas e preço do dia no banco', async () => {
   assert.equal(l.perdas.fritura_g, 1750);
   assert.equal(Number(l.vendas), 6468.07);
   assert.ok((await txt('#real-conta-balanca')).includes('R$ 830,98'), 'conta continua na tela depois de salvar');
+});
+
+test('reabrir um dia salvo mostra balança, perdas e a conta de novo', async () => {
+  await pagina.fill('#real-data', '2026-11-09');
+  await pagina.evaluate(() => loadRealidade());
+  await pagina.waitForFunction(() => realidadeCache?.data === '2026-11-09');
+  await pagina.fill('#real-data', '2026-11-08');
+  await pagina.evaluate(() => loadRealidade());
+  await pagina.waitForFunction(() => realidadeCache?.data === '2026-11-08');
+  assert.equal(await pagina.inputValue('#real-balanca'), '70,402');
+  assert.equal(await pagina.inputValue('#real-perda-fritura_g'), '1,750');
+  assert.equal(await pagina.inputValue('#real-perda-lixo_salada_g'), '6,200');
+  assert.ok((await txt('#real-conta-balanca')).includes('R$ 830,98'));
+});
+
+test('impressão do dia mostra balança, bebidas e as perdas em kg (sem porcionamento)', async () => {
+  await colar(TEXTO);
+  const [popup] = await Promise.all([pagina.waitForEvent('popup'), pagina.evaluate(() => imprimirDia())]);
+  await popup.waitForLoadState('domcontentloaded');
+  const html = (await popup.evaluate(() => document.body.innerText)).replace(/\u00a0/g, ' ');
+  for (const t of ['Balança', '70,402 kg', 'R$ 89,99', 'Bebidas e derivados', 'R$ 830,98', 'Fritura', '1,750 kg', 'Lixo salada', '6,200 kg']) {
+    assert.ok(html.includes(t), `faltou "${t}" na impressão`);
+  }
+  assert.ok(!html.includes('Porcionamento'), 'porcionamento saiu da tela, sai da impressão');
+  await popup.close();
 });
