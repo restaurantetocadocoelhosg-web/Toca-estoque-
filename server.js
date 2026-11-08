@@ -67,6 +67,7 @@ const TENANT_MODELO = Number(process.env.TENANT_MODELO || 1);
 const MULTI_TENANT = /^(1|on|true|sim)$/i.test(String(process.env.MULTI_TENANT || ''));
 const livroCompras = require('./compras');
 const { lerListaEntrada, sugerirProdutos, ajustarAoProduto } = require('./entrada-texto');
+const movimentoCaixa = require('./public/movimento-caixa.js');
 const supabaseRaw = createClient(SUPABASE_URL, SUPABASE_KEY, SCHEMA !== 'public' ? { db: { schema: SCHEMA } } : undefined);
 const supabase = MULTI_TENANT ? clienteMultiTenant(supabaseRaw) : supabaseRaw;
 
@@ -2959,16 +2960,68 @@ async function resumoMovimentosDia(dataDia) {
   return resumo;
 }
 
+// Colunas da balança (migração 2026-11-08-fechamento-balanca.sql). Antes da migração rodar, o app
+// segue lendo/salvando como antes — por isso toda leitura/gravação tenta com elas e cai para o jeito antigo.
+const COLUNAS_FECHAMENTO = 'data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g, porcionamento';
+const COLUNAS_BALANCA = 'balanca_kg, preco_kg, perdas, feriado';
+const faltaColunaBalanca = (error) => /balanca_kg|preco_kg|perdas|feriado|precos_kg/i.test(String(error?.message || error?.details || ''));
+
 async function buscarFechamentoDia(dataDia) {
-  const { data, error } = await supabase.from('fechamentos_diarios')
-    .select('data, vendas, observacao, responsavel, updated_at, created_at, pratos_vendidos, pagamentos, cortes, despesas, relatorio_texto, lixo_buffet_g, porcionamento')
+  let { data, error } = await supabase.from('fechamentos_diarios')
+    .select(`${COLUNAS_FECHAMENTO}, ${COLUNAS_BALANCA}`)
     .eq('data', dataDia)
     .maybeSingle();
+  if (error && faltaColunaBalanca(error)) {
+    ({ data, error } = await supabase.from('fechamentos_diarios').select(COLUNAS_FECHAMENTO).eq('data', dataDia).maybeSingle());
+  }
   if (error) {
     if (isTabelaFechamentoMissing(error)) return { row: null, configuracao_pendente: true };
     throw error;
   }
   return { row: data || null, configuracao_pendente: false };
+}
+
+// Tabela de preços do quilo (com data de início). Sem tabela/linhas → padrão 64,99 / 89,99 do módulo.
+async function carregarPrecosKg() {
+  try {
+    const { data, error } = await supabase.from('precos_kg').select('inicio, preco_util, preco_fim_semana').order('inicio', { ascending: false });
+    if (error) return [];
+    return (data || []).map((p) => ({ inicio: String(p.inicio).slice(0, 10), util: Number(p.preco_util), fimSemana: Number(p.preco_fim_semana) }));
+  } catch { return []; }
+}
+
+const MAX_BALANCA_KG = 2000;
+const MAX_PERDA_G = 500000;
+function normalizarBalancaKg(v) {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(String(v).replace(',', '.'));
+  return Number.isFinite(n) && n > 0 && n <= MAX_BALANCA_KG ? Math.round(n * 1000) / 1000 : null;
+}
+function normalizarPerdas(v) {
+  if (!v || typeof v !== 'object') return null;
+  const saida = movimentoCaixa.PERDAS_VAZIAS();
+  for (const k of Object.keys(saida)) {
+    const n = Number(v[k]);
+    saida[k] = v[k] !== null && v[k] !== '' && Number.isInteger(n) && n >= 0 && n <= MAX_PERDA_G ? n : null;
+  }
+  return saida;
+}
+
+const contaEmSnake = (c) => c && ({
+  comida_pesada: c.comidaPesada, relatorio: c.relatorio, comida_vendida: c.comidaVendida, bebidas: c.bebidas, peso_cortes_kg: c.pesoCortesKg,
+});
+
+// Média das bebidas dos últimos 14 dias com balança (para o aviso de "fora do normal").
+async function mediaBebidas14d(dataDia) {
+  try {
+    const { data, error } = await supabase.from('fechamentos_diarios').select('pagamentos, cortes, balanca_kg, preco_kg')
+      .gte('data', addDiasISO(dataDia, -14)).lt('data', dataDia).not('balanca_kg', 'is', null);
+    if (error) return null;
+    const valores = (data || []).map((r) => movimentoCaixa.contaBalanca({
+      balancaKg: Number(r.balanca_kg), precoKg: Number(r.preco_kg), cortes: r.cortes || [], totalVendido: somaLinhasFinanceiras(r.pagamentos || []),
+    })).filter(Boolean).map((c) => c.bebidas);
+    return valores.length ? Math.round((valores.reduce((s, v) => s + v, 0) / valores.length) * 100) / 100 : null;
+  } catch { return null; }
 }
 
 async function montarRealidadeDia(dataDiaParam) {
@@ -3009,7 +3062,26 @@ async function montarRealidadeDia(dataDiaParam) {
   const lucroOntem = movOntem ? Number((vendasOntem - movOntem.consumo - movOntem.perdas).toFixed(2)) : 0;
   const resultadoOntem = Number((lucroOntem - despesasOntem).toFixed(2));
 
+  // Balança: dia salvo usa o preço CONGELADO; dia novo recebe a sugestão (dia útil × fim de semana/feriado).
+  const feriadoAutomatico = movimentoCaixa.feriadoAutomatico(dataDia);
+  const feriadoDia = row?.feriado ?? !!feriadoAutomatico;
+  const precoSugerido = movimentoCaixa.precoKgDoDia(dataDia, { feriado: feriadoDia, tabela: await carregarPrecosKg() });
+  const balancaKg = row?.balanca_kg != null ? Number(row.balanca_kg) : null;
+  const precoKg = row?.preco_kg != null ? Number(row.preco_kg) : null;
+  const conta = movimentoCaixa.contaBalanca({ balancaKg, precoKg, cortes, totalVendido: totalPagamentos });
+  const perdasDia = row?.perdas || (row?.lixo_buffet_g != null ? { ...movimentoCaixa.PERDAS_VAZIAS(), lixo_buffet_g: row.lixo_buffet_g } : null);
+
   return {
+    balanca_kg: balancaKg,
+    preco_kg: precoKg,
+    feriado: feriadoDia,
+    feriado_automatico: feriadoAutomatico,
+    preco_kg_sugerido: precoSugerido.preco,
+    preco_kg_tipo: row?.preco_kg != null ? null : precoSugerido.tipo,
+    perdas: perdasDia,
+    valor_perdas: perdasDia ? movimentoCaixa.valorPerdas(perdasDia, precoKg || precoSugerido.preco) : 0,
+    conta_balanca: contaEmSnake(conta),
+    media_bebidas_14d: await mediaBebidas14d(dataDia),
     data: dataDia,
     data_br: dataBR(dataDia),
     vendas,
@@ -4209,7 +4281,17 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
         req.user.role === 'admin');
     }
 
-    const { error } = await supabase.from('fechamentos_diarios').upsert({
+    // Balança (08/11/2026): o preço do quilo é decidido AQUI (dia útil × fim de semana/feriado, tabela
+    // precos_kg) e congelado no dia — o aparelho não escolhe preço. Sem balança, nada disso é gravado.
+    const balancaKg = normalizarBalancaKg(req.body?.balanca_kg);
+    const perdas = normalizarPerdas(req.body?.perdas);
+    const feriado = typeof req.body?.feriado === 'boolean' ? req.body.feriado : null;
+    const precoKg = balancaKg != null
+      ? movimentoCaixa.precoKgDoDia(dataDia, { feriado: feriado ?? !!movimentoCaixa.feriadoAutomatico(dataDia), tabela: await carregarPrecosKg() }).preco
+      : null;
+    const camposBalanca = { balanca_kg: balancaKg, preco_kg: precoKg, perdas, feriado };
+
+    const linhaFechamento = {
       data: dataDia,
       vendas,
       observacao,
@@ -4218,11 +4300,16 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
       cortes,
       despesas,
       relatorio_texto: relatorioTexto,
-      lixo_buffet_g: lixoBuffetG,
+      lixo_buffet_g: perdas ? perdas.lixo_buffet_g : lixoBuffetG,
       ...(porcionamentoSalvar ? { porcionamento: porcionamentoSalvar } : {}),
       responsavel: req.user.nome || req.user.username,
       updated_at: nowSP(),
-    }, { onConflict: chaveConflito('data') });
+    };
+    let { error } = await supabase.from('fechamentos_diarios')
+      .upsert({ ...linhaFechamento, ...camposBalanca }, { onConflict: chaveConflito('data') });
+    if (error && faltaColunaBalanca(error)) {
+      ({ error } = await supabase.from('fechamentos_diarios').upsert(linhaFechamento, { onConflict: chaveConflito('data') }));
+    }
     if (error) {
       if (isTabelaFechamentoMissing(error)) {
         return res.status(500).json({ erro: 'Tabela fechamentos_diarios precisa ser atualizada. Rode o arquivo SUPABASE_REALIDADE_DIA.sql no Supabase.' });
@@ -4256,6 +4343,38 @@ app.post('/api/realidade-dia', auth, requirePerm('dia'), async (req, res) => {
   } catch(e) {
     console.error(e);
     res.status(500).json({ erro: 'Erro ao salvar movimento do dia.' });
+  }
+});
+
+// Preço do quilo da balança (08/11/2026). Todos com acesso ao Dia veem; só o admin muda.
+app.get('/api/precos-kg', auth, requirePerm('dia'), async (req, res) => {
+  const tabela = await carregarPrecosKg();
+  res.json({
+    precos: tabela.map((p) => ({ inicio: p.inicio, preco_util: p.util, preco_fim_semana: p.fimSemana })),
+    padrao: { preco_util: movimentoCaixa.PRECOS_PADRAO.util, preco_fim_semana: movimentoCaixa.PRECOS_PADRAO.fimSemana },
+  });
+});
+
+app.post('/api/precos-kg', auth, requireRole('admin'), async (req, res) => {
+  try {
+    const inicio = req.body?.inicio;
+    const util = Number(req.body?.preco_util);
+    const fimSemana = Number(req.body?.preco_fim_semana);
+    if (!isDataISO(inicio)) return res.status(400).json({ erro: 'Informe a data de início.' });
+    if (!(util > 0 && util < 1000) || !(fimSemana > 0 && fimSemana < 1000)) return res.status(400).json({ erro: 'Preço do quilo inválido.' });
+    const { error } = await supabase.from('precos_kg').upsert({
+      inicio, preco_util: Math.round(util * 100) / 100, preco_fim_semana: Math.round(fimSemana * 100) / 100,
+      criado_por: req.user.nome || req.user.username,
+    }, { onConflict: chaveConflito('inicio') });
+    if (error) {
+      if (faltaColunaBalanca(error)) return res.status(503).json({ erro: 'Rode a migração 2026-11-08-fechamento-balanca.sql primeiro.' });
+      throw error;
+    }
+    await audit('preco_kg_alterar', { inicio, preco_util: util, preco_fim_semana: fimSemana }, req.user, getClientIp(req));
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar o preço do quilo.' });
   }
 });
 
