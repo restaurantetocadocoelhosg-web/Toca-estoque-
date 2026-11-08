@@ -106,9 +106,9 @@ test('avisos: total que não bate, bebidas negativa, balança faltando só a par
   assert.ok(fora.some((a) => a.includes('XPTO 12,00')));
 });
 
-// Leitor antigo (public/index.html) só para comparar os recebimentos nos textos reais.
+// Leitor antigo (cópia congelada do public/index.html da v126) só para comparar os recebimentos nos textos reais.
 function leitorAntigo() {
-  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, 'fixtures', 'leitor-antigo-v126.js.txt'), 'utf8');
   const pegar = (nome) => {
     const ini = html.search(new RegExp(String.raw`(^|\n)[ \t]*(async[ \t]+)?function[ \t]+${nome}[ \t]*\(`));
     let i = html.indexOf('{', ini), n = 0;

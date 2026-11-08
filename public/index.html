@@ -1111,12 +1111,22 @@ select.big-input { font-size: 14px; }
             <div class="real-money-list" id="real-despesas-list"></div>
           </div>
 
-          <div class="real-block">
-            <div class="real-block-head"><span>🥡 Lixo final do buffet (anotação — não entra nas contas)</span></div>
-            <input class="small-input" id="real-lixo" type="number" step="1" min="0" max="99999" inputmode="numeric" placeholder="Peso em gramas (ex: 2785)">
+          <div class="real-block" id="real-balanca-block">
+            <div class="real-block-head"><span>⚖️ Balança</span></div>
+            <div class="real-mini-grid">
+              <input class="small-input" id="real-balanca" type="text" inputmode="decimal" placeholder="Total pesado (kg, ex: 70,402)" oninput="atualizarContaBalanca()">
+              <label class="sheet-muted" style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="real-feriado" onchange="atualizarContaBalanca()"> Feriado</label>
+            </div>
+            <div class="sheet-muted" id="real-preco-kg"></div>
+            <div id="real-conta-balanca"></div>
           </div>
 
-          <div class="real-block" id="real-porc-block" hidden>
+          <div class="real-block">
+            <div class="real-block-head"><span>🥡 Lixo final buffet — perdas em kg (não entra nas contas)</span></div>
+            <div id="real-perdas-campos"></div>
+          </div>
+
+          <div class="real-block" id="real-porc-block" hidden style="display:none">
             <div class="real-block-head">
               <span>🧀 Porcionamento (anotação — não entra nas contas)</span>
               <button type="button" class="btn-sm" id="real-porc-cfg-btn" hidden onclick="abrirPorcConfig()">⚙︎ itens</button>
@@ -1124,7 +1134,7 @@ select.big-input { font-size: 14px; }
             <div id="real-porc-list"></div>
           </div>
 
-          <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação">
+          <input class="small-input" id="real-obs" type="text" maxlength="300" placeholder="Observação" hidden style="display:none">
           <button class="btn-export btn-success" id="real-btn-salvar" onclick="salvarRealidade()">Salvar movimento</button>
           <div class="real-danger-actions">
             <button class="btn-sm" onclick="moverRealidadeDia()">Mover data</button>
@@ -2109,6 +2119,7 @@ select.big-input { font-size: 14px; }
 <div id="toast"></div>
 
 <script src="/recibo-lancamentos.js"></script>
+<script src="/movimento-caixa.js"></script>
 <script>
 const API = '';
 let authToken = localStorage.getItem('toca_token') || '';
@@ -3926,7 +3937,7 @@ function atualizarRealTotais() {
     const resultado = totalPag - Number(realidadeCache.consumo_estoque || 0) - Number(realidadeCache.perdas || 0) - totalDespesas;
     insight.textContent = `Recebido ${fmtBRLMoney(totalPag)}, cortes ${fmtBRLMoney(totalCortes)} e despesas ${fmtBRLMoney(totalDespesas)}. Resultado estimado: ${fmtBRLMoney(resultado)}.`;
   }
-  atualizarConferenciaCaixa();
+  atualizarContaBalanca();
 }
 
 // ==================== BANCO DE CARDÁPIOS SALVOS (com catálogo de pratos + foto) ====================
@@ -4867,6 +4878,19 @@ function conferirMovimentoCaixa() {
     }
   }
 
+  // Balança (08/11/2026): bebidas negativa/fora do normal, balança faltando, linha não entendida.
+  // O aviso do TOTAL já está acima; aqui só o que é novo.
+  if (typeof MovimentoCaixa !== 'undefined') {
+    const extra = MovimentoCaixa.avisosMovimento({
+      totalDeclarado: null, totalVendido: totalPagamentos, conta: contaBalancaTela(),
+      data: document.getElementById('real-data')?.value || '',
+      balancaKg: lerKgCampo(document.getElementById('real-balanca')?.value),
+      mediaBebidas14d: realidadeCache?.media_bebidas_14d || null, naoEntendidas: ultimaLeituraNaoEntendidas,
+    });
+    // "balança faltando" só cobra depois que algo foi lançado no dia
+    problemas.push(...extra.filter(a => pagamentos.length || !/BALANÇA/.test(a)));
+  }
+
   return { totalDeclarado, totalPagamentos, qtdPagamentos, pratos, problemas, oks };
 }
 
@@ -4929,50 +4953,107 @@ async function checarDataRelatorio(texto, opts = {}) {
   return await askConfirm('Deseja continuar assim mesmo?', { titulo: `Atenção: o relatório colado parece ser do dia ${dataBRClient(dataTexto)}, mas você está salvando em ${dataBRClient(dataTela)}` });
 }
 
+// ─── Balança e perdas (08/11/2026) ───────────────────────────────────────────
+let ultimaLeituraNaoEntendidas = [];
+let precosKgCache = null; // tabela do servidor (/api/precos-kg); null = padrão do módulo
+
+// gramas → "2,890" (kg com 3 casas, vírgula)
+function kgTexto(g) {
+  return g == null || g === '' ? '' : (Number(g) / 1000).toFixed(3).replace('.', ',');
+}
+// "2,890" / "2.890" / "2890g" → gramas (null se vazio/inválido)
+function lerKgCampo(v) {
+  const s = String(v ?? '').trim();
+  if (!s) return null;
+  const g = MovimentoCaixa.gramas(/[a-z]/i.test(s) ? s : s + ' kg');
+  return g != null && g >= 0 ? g : null;
+}
+
+function renderCamposPerdas(perdas) {
+  const el = document.getElementById('real-perdas-campos');
+  if (!el) return;
+  const p = perdas || MovimentoCaixa.PERDAS_VAZIAS();
+  el.innerHTML = Object.entries(MovimentoCaixa.ROTULOS_PERDAS).map(([k, rotulo]) => `
+    <label class="real-money-row no-qtd" style="align-items:center">
+      <span class="sheet-muted" style="flex:1">${escapeHtml(rotulo)}</span>
+      <input class="small-input" id="real-perda-${k}" type="text" inputmode="decimal" placeholder="kg" value="${escapeHtml(kgTexto(p[k]))}" oninput="atualizarContaBalanca()">
+    </label>`).join('');
+}
+
+function coletarPerdas() {
+  const saida = MovimentoCaixa.PERDAS_VAZIAS();
+  for (const k of Object.keys(saida)) saida[k] = lerKgCampo(document.getElementById(`real-perda-${k}`)?.value);
+  return saida;
+}
+
+const DIAS_SEMANA = ['domingo', 'segunda', 'terça', 'quarta', 'quinta', 'sexta', 'sábado'];
+function precoKgTela() {
+  const data = document.getElementById('real-data')?.value || hojeSPClient();
+  const feriado = !!document.getElementById('real-feriado')?.checked;
+  const tabela = (precosKgCache || []).map(p => ({ inicio: p.inicio, util: p.preco_util, fimSemana: p.preco_fim_semana }));
+  const p = MovimentoCaixa.precoKgDoDia(data, { feriado, tabela });
+  // Dia já salvo sem mudar o feriado: vale o preço congelado no servidor.
+  const salvo = realidadeCache?.data === data && realidadeCache?.preco_kg != null && feriado === !!realidadeCache.feriado;
+  const [a, m, d] = data.split('-').map(Number);
+  const nomeDia = DIAS_SEMANA[new Date(Date.UTC(a, m - 1, d)).getUTCDay()];
+  const nomeFeriado = MovimentoCaixa.feriadoAutomatico(data);
+  const rotulo = p.tipo === 'feriado' ? `feriado${nomeFeriado ? ': ' + nomeFeriado : ''}` : p.tipo === 'fim_semana' ? nomeDia : `dia útil (${nomeDia})`;
+  return { preco: salvo ? Number(realidadeCache.preco_kg) : p.preco, rotulo };
+}
+
+function contaBalancaTela() {
+  const balancaG = lerKgCampo(document.getElementById('real-balanca')?.value);
+  const { preco } = precoKgTela();
+  return MovimentoCaixa.contaBalanca({
+    balancaKg: balancaG != null ? balancaG / 1000 : null, precoKg: preco,
+    cortes: coletarRealRows('cortes'), totalVendido: totalRealRows('pagamentos'),
+  });
+}
+
+function atualizarContaBalanca() {
+  const precoEl = document.getElementById('real-preco-kg');
+  const contaEl = document.getElementById('real-conta-balanca');
+  if (!precoEl || !contaEl || typeof MovimentoCaixa === 'undefined') { atualizarConferenciaCaixa(); return; }
+  const { preco, rotulo } = precoKgTela();
+  precoEl.textContent = `Preço do quilo: ${fmtBRLMoney(preco)} (${rotulo})`;
+  const c = contaBalancaTela();
+  const valorPerdas = MovimentoCaixa.valorPerdas(coletarPerdas(), preco);
+  const perdasLinha = valorPerdas > 0 ? `<div class="sheet-muted">🥡 Perdas do dia valem ${fmtBRLMoney(valorPerdas)} pelo preço do quilo (só informação)</div>` : '';
+  if (!c) { contaEl.innerHTML = perdasLinha; atualizarConferenciaCaixa(); return; }
+  const cortes = coletarRealRows('cortes');
+  const pesos = cortes.map((r, i) => `${escapeHtml(r.descricao)} ${String(c.pesoCortesKg[i].toFixed(3)).replace('.', ',')} kg`).join(' · ');
+  contaEl.innerHTML = `
+    <div class="real-total-line"><span>Comida pesada (balança × ${fmtBRLMoney(preco)})</span><b>${fmtBRLMoney(c.comidaPesada)}</b></div>
+    <div class="real-total-line"><span>(−) Relatório: pesado e não pago</span><b>${fmtBRLMoney(c.relatorio)}</b></div>
+    ${pesos ? `<div class="sheet-muted">${pesos}</div>` : ''}
+    <div class="real-total-line"><span>= Comida vendida</span><b>${fmtBRLMoney(c.comidaVendida)}</b></div>
+    <div class="real-total-line"><span>Total vendido</span><b>${fmtBRLMoney(totalRealRows('pagamentos'))}</b></div>
+    <div class="real-total-line"><span>🥤 Bebidas e derivados</span><b class="${c.bebidas < 0 ? 'red' : 'green'}">${fmtBRLMoney(c.bebidas)}</b></div>
+    ${perdasLinha}`;
+  atualizarConferenciaCaixa();
+}
+
+async function carregarPrecosKg() {
+  try { precosKgCache = (await api('/api/precos-kg')).precos || []; } catch { precosKgCache = null; }
+}
+
 async function lerRelatorioColado() {
   const textoEl = document.getElementById('real-relatorio-texto');
   const texto = textoEl?.value || '';
   if (!texto.trim()) { toast('Cole o movimento primeiro', 'err'); return; }
   await checarDataRelatorio(texto, { aoLer: true });
-  const linhas = texto.split(/\n+/).map(l => l.trim()).filter(Boolean);
-  const pagamentos = [], cortes = [], despesas = [];
-  let emDespesas = false;
-  let passouTotal = false;
-  let pratos = 0;
-  let lixoBuffetG = null;
-
-  for (const linha of linhas) {
-    const linhaNorm = normalizarLinhaRelatorio(linha);
-    // LIXO vem ANTES de tudo: é anotação em gramas, nunca despesa/recebimento
-    // (sem isso, "LIXO FINAL BUFFET 2.785g" virava despesa de R$2,78).
-    if (/\blixo\b/.test(linhaNorm)) {
-      const g = extrairLixoBuffet(linha);
-      if (g != null) lixoBuffetG = g;
-      continue;
-    }
-    if (/^despesa\b/i.test(linhaNorm)) { emDespesas = true; continue; }
-    if (deveIgnorarLinhaFinanceira(linha)) continue;
-    const pratosMatch = linha.match(/(\d+)\s+pratos?\s+vendidos?/i);
-    if (pratosMatch) { pratos = Number(pratosMatch[1]) || pratos; continue; }
-    if (/^total\b/i.test(linhaNorm)) { passouTotal = true; continue; }
-    const achado = extrairValorLinha(linha);
-    if (!achado) continue;
-
-    if (emDespesas) {
-      const descricao = linha.replace(achado.raw, '').replace(/\bR\$/i, '').replace(/^[.\-\s]+/, '').replace(/\s+/g, ' ').trim();
-      despesas.push({ descricao, valor: achado.valor });
-      continue;
-    }
-
-    const m = linha.match(/^(\d+)\s+(.+)$/);
-    const qtd = m ? Number(m[1]) : null;
-    let descricao = (m ? m[2] : linha).replace(achado.raw, '').replace(/\bR\$/i, '').replace(/^[.\-\s]+/, '').replace(/\s+/g, ' ').trim();
-    const destino = passouTotal || /erro|tara|canc|patr|funcion/i.test(descricao.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()) ? cortes : pagamentos;
-    destino.push({ qtd, descricao, valor: achado.valor });
-  }
+  // Leitor único (public/movimento-caixa.js), o mesmo testado com os 253 fechamentos reais:
+  // seção LIXO é peso (nunca dinheiro) e a linha BALANÇA vai para o campo da balança.
+  const anoPadrao = Number(String(document.getElementById('real-data')?.value || hojeSPClient()).slice(0, 4));
+  const lido = MovimentoCaixa.lerMovimento(texto, { anoPadrao });
+  const { pagamentos, cortes, despesas, pratos } = lido;
+  ultimaLeituraNaoEntendidas = lido.naoEntendidas;
 
   if (pratos) document.getElementById('real-pratos').value = pratos;
-  if (lixoBuffetG != null) { const lx = document.getElementById('real-lixo'); if (lx) lx.value = lixoBuffetG; }
+  renderCamposPerdas(lido.perdas);
+  const balEl = document.getElementById('real-balanca');
+  if (balEl) balEl.value = lido.balancaKg != null ? kgTexto(lido.balancaKg * 1000) : '';
+  if (lido.feriadoNoTexto) { const fer = document.getElementById('real-feriado'); if (fer) fer.checked = true; }
   if (pagamentos.length) renderRealMoneyRows('pagamentos', pagamentos);
   if (cortes.length) renderRealMoneyRows('cortes', cortes);
   if (despesas.length) renderRealMoneyRows('despesas', despesas);
@@ -4999,6 +5080,7 @@ async function loadRealidade() {
   resumoEl.innerHTML = '<div class="loading">Carregando...</div>';
   perdasEl.innerHTML = '';
   try {
+    if (precosKgCache === null) await carregarPrecosKg();
     const d = await api('/api/realidade-dia?data=' + encodeURIComponent(dataEl.value));
     if (!ehAtual()) return;
     realidadeCache = d;
@@ -5024,9 +5106,14 @@ function renderRealidade(d) {
   pratosInput.value = d.pratos_vendidos || '';
   relatorioInput.value = d.relatorio_texto || '';
   obsInput.value = d.observacao || '';
-  const lixoInput = document.getElementById('real-lixo');
-  if (lixoInput) lixoInput.value = d.lixo_buffet_g != null ? d.lixo_buffet_g : '';
-  renderPorcionamento(d);
+  // Balança e perdas (08/11/2026). Porcionamento não aparece mais na tela (Rubens: só o que está no
+  // texto do movimento); o que já foi salvo nele continua no banco, intocado.
+  renderCamposPerdas(d.perdas);
+  const balancaInput = document.getElementById('real-balanca');
+  if (balancaInput) balancaInput.value = d.balanca_kg != null ? kgTexto(Number(d.balanca_kg) * 1000) : '';
+  const feriadoInput = document.getElementById('real-feriado');
+  if (feriadoInput) feriadoInput.checked = !!d.feriado;
+  ultimaLeituraNaoEntendidas = [];
   const pagamentosRows = d.pagamentos?.length ? d.pagamentos : (d.venda_lancada && Number(d.vendas || 0) > 0 ? [{ descricao: 'TOTAL DO DIA', valor: d.vendas }] : []);
   renderRealMoneyRows('pagamentos', pagamentosRows);
   renderRealMoneyRows('cortes', d.cortes || []);
@@ -5277,8 +5364,12 @@ async function salvarRealidade() {
   const btn = document.getElementById('real-btn-salvar');
   btn.disabled = true; btn.textContent = 'Salvando...';
   try {
-    const lixoRaw = document.getElementById('real-lixo')?.value ?? '';
+    const perdas = coletarPerdas();
+    const balancaG = lerKgCampo(document.getElementById('real-balanca')?.value);
     const d = await apiPost('/api/realidade-dia', {
+      balanca_kg: balancaG != null ? balancaG / 1000 : null,
+      perdas,
+      feriado: !!document.getElementById('real-feriado')?.checked,
       data,
       vendas,
       observacao,
@@ -5287,7 +5378,7 @@ async function salvarRealidade() {
       cortes,
       despesas,
       relatorio_texto: relatorioTexto,
-      lixo_buffet_g: lixoRaw === '' ? null : Math.floor(Number(lixoRaw) || 0),
+      lixo_buffet_g: perdas.lixo_buffet_g,
       ...(porc ? { porcionamento: porc } : {}),
     });
     realidadeCache = d;
