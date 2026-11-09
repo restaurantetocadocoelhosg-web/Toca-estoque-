@@ -8435,17 +8435,25 @@ app.post('/api/webhook/whatsapp', webhookLimiter, webhookTenantDoGrupo, async (r
     let parados = [];
     const dataParaGiro = data.filter(p => !CATEGORIAS_SEM_GIRO.includes(p.categoria));
     if (dataParaGiro.length) {
-      const ids = dataParaGiro.map(p => p.id);
-      const { data: movs } = await supabase.from('movimentacoes')
-        .select('produto_id, created_at').eq('tipo', 'Saída').in('produto_id', ids)
-        .order('created_at', { ascending: false });
-      const ultimaSaida = {};
-      for (const m of (movs || [])) { if (!ultimaSaida[m.produto_id]) ultimaSaida[m.produto_id] = m.created_at; }
-      for (const p of dataParaGiro) {
-        const last = ultimaSaida[p.id];
+      // 09/11: antes buscava "todas as saídas" de uma vez — o PostgREST corta em 1.000 linhas
+      // (≈2 semanas), então quem saiu antes disso aparecia "sem histórico" (detergente com 26
+      // saídas). E compra nova não contava: H2O comprada ontem saía "17d parado".
+      // Agora: 1) quem teve saída OU entrada nos últimos N dias está rodando (paginado);
+      //        2) só pros que sobraram, busca a última saída de cada um (1 linha por produto).
+      const desde = new Date(Date.now() - DIAS_PARADO_MIN * 86400000).toISOString();
+      const recentes = await fetchTodas(() => supabase.from('movimentacoes')
+        .select('id, produto_id').in('tipo', ['Saída', 'Entrada']).gte('created_at', desde).order('id'));
+      const mexeu = new Set(recentes.map(m => m.produto_id));
+      const candidatos = dataParaGiro.filter(p => !mexeu.has(p.id));
+      const ultimas = await Promise.all(candidatos.map(p => supabase.from('movimentacoes')
+        .select('created_at').eq('produto_id', p.id).eq('tipo', 'Saída')
+        .order('created_at', { ascending: false }).limit(1)));
+      candidatos.forEach((p, i) => {
+        if (ultimas[i].error) throw ultimas[i].error;
+        const last = ultimas[i].data?.[0]?.created_at;
         const dias = last ? Math.floor((Date.now() - new Date(last).getTime()) / 86400000) : null;
-        if (dias === null || dias >= DIAS_PARADO_MIN) parados.push({ ...p, dias_parado: dias });
-      }
+        parados.push({ ...p, dias_parado: dias });
+      });
       parados.sort((a, b) => Number(b.qtd) - Number(a.qtd)); // o que mais tem parado primeiro
     }
 
