@@ -108,3 +108,16 @@ test('impressão do dia mostra balança, bebidas e as perdas em kg (sem porciona
   assert.ok(!html.includes('Porcionamento'), 'porcionamento saiu da tela, sai da impressão');
   await popup.close();
 });
+
+test('planilha do mês na tela mostra balança, bebidas e as perdas em kg', async () => {
+  await pagina.evaluate(() => goPage('planilha', document.getElementById('nav-planilha')));
+  await pagina.fill('#planilha-mes', '2026-11');
+  await pagina.evaluate(() => loadPlanilhaMensal());
+  await pagina.waitForFunction(() => planilhaCache?.totais?.dias_com_balanca >= 1);
+  const resumo = await txt('#planilha-resumo');
+  for (const t of ['Bebidas e derivados', 'R$ 830,98', 'Balança no mês', '70,402 kg', 'Fritura', '1,750 kg', 'Lixo salada', '6,200 kg']) {
+    assert.ok(resumo.includes(t), `faltou "${t}" no resumo do mês`);
+  }
+  const tabela = await txt('#planilha-tabela');
+  for (const t of ['Balança', 'Bebidas', '70,402', '830,98']) assert.ok(tabela.includes(t), `faltou "${t}" na tabela do mês`);
+});

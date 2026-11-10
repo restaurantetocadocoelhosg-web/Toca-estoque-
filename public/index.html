@@ -1724,7 +1724,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v129</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v130</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -5664,6 +5664,16 @@ async function loadPlanilhaMensal() {
   }
 }
 
+// Perdas do buffet somadas no mês (gramas → "1,750 kg"), uma linha por tipo; só os anotados.
+function planilhaPerdasKg(t) {
+  const rot = (window.MovimentoCaixa && MovimentoCaixa.ROTULOS_PERDAS) || {};
+  const g = Object.assign({}, t.perdas_g || {});
+  if (!Object.keys(g).length && t.lixo_buffet_g > 0) g.lixo_buffet_g = t.lixo_buffet_g;
+  const linhas = Object.keys(rot).filter(k => Number(g[k]) > 0)
+    .map(k => '<div class="real-sub"><b>' + escapeHtml(rot[k]) + ':</b> ' + kgTexto(g[k]) + ' kg</div>');
+  return linhas.length ? linhas.join('') : '<div class="real-val">—</div>';
+}
+
 function renderPlanilhaMensal(d) {
   const t = d.totais || {};
   const configEl = document.getElementById('planilha-config');
@@ -5751,9 +5761,19 @@ function renderPlanilhaMensal(d) {
       <div class="real-sub">${t.dias_sem_caixa || 0} com estoque sem caixa</div>
     </div>
     <div class="real-kpi">
-      <div class="real-label">🥡 Lixo buffet no mês</div>
-      <div class="real-val">${t.lixo_buffet_g > 0 ? (t.lixo_buffet_g / 1000).toFixed(2).replace('.', ',') + ' kg' : '—'}</div>
-      <div class="real-sub">${t.dias_com_lixo || 0} dia(s) anotado(s) — fora das contas</div>
+      <div class="real-label">🥤 Bebidas e derivados</div>
+      <div class="real-val green">${t.dias_com_balanca ? fmtBRLMoney(t.bebidas) : '—'}</div>
+      <div class="real-sub">${t.dias_com_balanca ? 'total vendido − comida da balança' : 'só nos dias com peso da balança'}</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">⚖️ Balança no mês</div>
+      <div class="real-val">${t.dias_com_balanca ? kgTexto(Math.round(Number(t.balanca_kg) * 1000)) + ' kg' : '—'}</div>
+      <div class="real-sub">${t.dias_com_balanca || 0} dia(s) com peso anotado</div>
+    </div>
+    <div class="real-kpi">
+      <div class="real-label">🗑️ Perdas do buffet (kg)</div>
+      ${planilhaPerdasKg(t)}
+      <div class="real-sub">anotado no fechamento — fora das contas</div>
     </div>`;
 
   insightEl.textContent = `Mês ${d.mes_label}: ${t.dias_com_movimento || 0} dia(s) com movimento. Compras aparecem separadas do resultado, igual combinamos.`;
@@ -5772,7 +5792,7 @@ function renderPlanilhaMensal(d) {
     <thead><tr>
       <th>Data</th><th>Dia</th><th>Status</th><th class="num">Pratos</th><th class="num">Vendas</th>
       <th class="num">Dinheiro</th><th class="num">Crédito</th><th class="num">Débito</th><th class="num">Voucher</th><th class="num">Pix</th><th class="num">Cartão(maq.)</th>
-      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Lixo</th><th class="num">Mov.</th>
+      <th class="num">Cortes</th><th class="num">Despesas</th><th class="num">Consumo</th><th class="num">Perdas</th><th class="num">Resultado</th><th class="num">Balança</th><th class="num">Bebidas</th><th class="num">Lixo</th><th class="num">Mov.</th>
     </tr></thead>
     <tbody>${(d.dias || []).map(row => `
       <tr class="sheet-row-open" onclick="abrirDiaPlanilha('${row.data}')">
@@ -5792,6 +5812,8 @@ function renderPlanilhaMensal(d) {
         <td class="num">${fmtSheetMoney(row.consumo_estoque)}</td>
         <td class="num">${fmtSheetMoney(row.perdas)}</td>
         <td class="num"><b class="${Number(row.resultado_dia_estimado || 0) < 0 ? 'red' : 'green'}">${fmtSheetMoney(row.resultado_dia_estimado)}</b></td>
+        <td class="num">${row.balanca_kg != null ? kgTexto(Math.round(Number(row.balanca_kg) * 1000)) : '—'}</td>
+        <td class="num">${row.bebidas != null ? fmtSheetMoney(row.bebidas) : '—'}</td>
         <td class="num">${row.lixo_buffet_g != null && row.lixo_buffet_g > 0 ? row.lixo_buffet_g + 'g' : '—'}</td>
         <td class="num">${row.movimentos_total || '—'}</td>
       </tr>`).join('')}</tbody>`;
