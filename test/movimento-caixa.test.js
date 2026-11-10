@@ -137,7 +137,10 @@ test('textos reais de Desktop/fechamento: recebimentos iguais ao leitor antigo e
     const t = fs.readFileSync(arq, 'utf8');
     const novo = mc.lerMovimento(t);
     const velho = antigo(t);
-    if (soma(novo.pagamentos) !== soma(velho.pagamentos)) diferentes.push(`${path.basename(arq)}: novo ${soma(novo.pagamentos)} × antigo ${soma(velho.pagamentos)}`);
+    // Diferença só é aceita quando o leitor NOVO bate com o TOTAL escrito no texto e o antigo não
+    // (10/11: "DINHEIRO: R$ 236,00 SOBROU 1,75" e "sobrou" na linha de baixo viravam recebimento).
+    const novoBateTotal = novo.totalDeclarado != null && soma(novo.pagamentos) === novo.totalDeclarado;
+    if (soma(novo.pagamentos) !== soma(velho.pagamentos) && !novoBateTotal) diferentes.push(`${path.basename(arq)}: novo ${soma(novo.pagamentos)} × antigo ${soma(velho.pagamentos)}`);
     for (const d of novo.despesas) {
       assert.ok(!/\b(lixo|fritura|doa[cç]|desperd)/i.test(d.descricao), `${path.basename(arq)}: peso como despesa "${d.descricao}"`);
     }
@@ -160,4 +163,21 @@ test('"01 BALANÇA 49,67" (valor em reais, 09/08) continua recebimento, não pes
   assert.equal(r.balancaKg, null);
   assert.ok(r.pagamentos.some((p) => p.valor === 49.67));
   assert.equal(mc.lerMovimento(TEXTO.replace('DINHEIRO', 'BALANÇA: 70,402\nDINHEIRO')).balancaKg, 70.402, '3 casas sem KG = peso');
+});
+
+test('04/11: comentário depois do dinheiro não troca o valor nem vira pagamento', () => {
+  const r = mc.lerMovimento(`MOVIMENTO
+04/11/2026
+VOUCHER STONE: R$ 427,52
+CRED PAG BANK:R$ 976,99
+DEB PAG BANK: R$ 1.087,59
+PIX PAG BANK:R$ 750,63
+DINHEIRO: R$ 236,00 SOBROU 1,75, SENDO QUE
+1,00 CLIENTE DEIXOU DE CAIXINHA E 0,75 DA NAYARA
+QUE TINHA PEGO PRA PODER DAR TROCO
+TOTAL VENDIDO: R$ 3.478,73`, { anoPadrao: 2026 });
+  const din = r.pagamentos.find((p) => /DINHEIRO/i.test(p.descricao));
+  assert.equal(din.valor, 236);
+  assert.equal(r.pagamentos.length, 5, 'a frase de baixo não é pagamento');
+  assert.equal(Math.round(r.pagamentos.reduce((s, p) => s + p.valor, 0) * 100) / 100, 3478.73);
 });

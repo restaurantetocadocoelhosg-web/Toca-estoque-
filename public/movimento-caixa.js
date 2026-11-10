@@ -25,10 +25,10 @@
     return Number.isFinite(n) ? n : 0;
   }
 
-  function valorDaLinha(linha) {
+  function valorDaLinha(linha, primeiro = false) {
     const m = String(linha || '').match(/(?:R\$?\s*)?\d{1,3}(?:\.\d{3})*,\d{2}|(?:R\$?\s*)?\d+[,.]\d{2}/g);
     if (!m || !m.length) return null;
-    const raw = m[m.length - 1];
+    const raw = primeiro ? m[0] : m[m.length - 1];
     return { raw, valor: dinheiro(raw) };
   }
 
@@ -121,7 +121,14 @@
         if (v && r.totalDeclarado === null) r.totalDeclarado = v.valor;
         continue;
       }
-      const achado = valorDaLinha(linha);
+      // Recebimento (antes do TOTAL): "DINHEIRO: R$ 236,00 SOBROU 1,75..." → vale o 1º valor depois do ":"
+      // (04/11). Linha que já COMEÇA com valor ("1,00 CLIENTE DEIXOU...") é continuação de comentário.
+      const ehRecebimento = secao === 'topo' && !passouTotal;
+      if (ehRecebimento && /^\s*(R\$\s*)?\d+,\d{2}\b/.test(linha)) { r.naoEntendidas.push(linha); continue; }
+      const doisPontos = linha.indexOf(':');
+      const achado = ehRecebimento && doisPontos >= 0
+        ? valorDaLinha(linha.slice(doisPontos + 1), true)
+        : valorDaLinha(linha);
       if (!achado) continue;
 
       if (secao === 'despesas') {
