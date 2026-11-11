@@ -1724,7 +1724,7 @@ select.big-input { font-size: 14px; }
     <div class="admin-section">
 
       <!-- VERSÃO DO APP — bumpar aqui a cada atualização (v35 → v36 → v37…) -->
-      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v131</b></span></div>
+      <div class="app-ver-row"><span class="app-ver">📌 versão <b>v132</b></span></div>
 
       <!-- FERRAMENTAS — Auditoria/Exportar/Inventário saíram do menu inferior (ficava
            apertado no celular) e viraram atalhos aqui dentro, mesma permissão de sempre. -->
@@ -2120,6 +2120,7 @@ select.big-input { font-size: 14px; }
 
 <script src="/recibo-lancamentos.js"></script>
 <script src="/movimento-caixa.js"></script>
+<script src="/inventario-rascunho.js"></script>
 <script>
 const API = '';
 let authToken = localStorage.getItem('toca_token') || '';
@@ -8059,6 +8060,7 @@ async function loadInventario() {
     invAberto = ab.inventario;
     invItens = ab.itens || [];
     invHistorico = hist || [];
+    invRascunho.limparOutros(invAberto ? invAberto.id : 'nenhum');
     await renderInventario();
     renderInvHistorico(invHistorico);
   } catch(e) {
@@ -8095,7 +8097,8 @@ async function renderInventario() {
         '<button onclick="salvarContagem()" style="padding:9px 12px;border:none;border-radius:8px;background:#2563eb;color:#fff;font-weight:700;cursor:pointer">💾 Salvar</button>' +
         (invPodeGerir() ? '<button onclick="fecharInventario()" style="padding:9px 12px;border:none;border-radius:8px;background:#16a34a;color:#fff;font-weight:700;cursor:pointer">✅ Fechar</button>' : '') +
       '</div>' +
-    '</div>';
+    '</div>' +
+    '<div id="inv-estado" style="font-size:12px;font-weight:600;margin-bottom:8px;min-height:16px"></div>';
   html += '<input id="inv-busca" type="search" placeholder="🔍 Buscar item…" oninput="filtrarInvItens(this.value)" ' +
     'style="width:100%;padding:10px 12px;margin-bottom:10px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);font-size:14px">';
   for (const cat of Object.keys(porCat)) {
@@ -8111,7 +8114,7 @@ async function renderInventario() {
             '<div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + escapeHtml(it.produto_nome) + '</div>' +
             '<div style="font-size:10px;color:var(--muted)">sistema: ' + it.qtd_sistema + ' ' + escapeHtml(it.unidade) + ' · ' + badge + '</div>' +
           '</div>' +
-          '<input type="text" inputmode="decimal" autocomplete="off" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" ' +
+          '<input type="text" inputmode="decimal" autocomplete="off" placeholder="contar" value="' + val + '" data-pid="' + it.produto_id + '" class="inv-input" oninput="invDigitou(this)" onchange="invEnviarPendentes()" ' +
             'style="width:84px;padding:8px;border-radius:8px;background:var(--s2);color:var(--text);border:1px solid var(--border);text-align:right;font-size:14px">' +
           '<span style="font-size:11px;color:var(--muted);width:24px">' + escapeHtml(it.unidade) + '</span>' +
         '</div>';
@@ -8119,6 +8122,7 @@ async function renderInventario() {
     html += '<div class="inv-cat-group"><div style="font-size:11px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:0.6px;padding:10px 0 4px">' + escapeHtml(cat) + '</div>' + linhas + '</div>';
   }
   el.innerHTML = html;
+  invRestaurarRascunho();
 }
 
 // Normaliza texto p/ busca: minúsculo + remove acento (combining marks U+0300–U+036F).
@@ -8146,32 +8150,91 @@ async function abrirInventario() {
   catch(e) { toast(e.message || 'Erro', 'err'); }
 }
 
-function coletarContagem() {
-  const itens = [];
-  document.querySelectorAll('.inv-input').forEach(inp => {
-    const v = inp.value.trim();
-    itens.push({ produto_id: Number(inp.dataset.pid), qtd_contada: v === '' ? null : numQtd(v) });
-  });
-  return itens;
+// ── Contagem que não se perde (11/11/2026) — ver public/inventario-rascunho.js ──
+// Cada número digitado vai para o rascunho do aparelho na hora e sobe sozinho para o servidor.
+// Só sobe o que mudou NESTE aparelho: reenviar a tela inteira apagava a contagem de outro aparelho.
+const invRascunho = InvRascunho.criarRascunho(localStorage);
+const INV_ESPERA_DIGITACAO_MS = 1200;
+const INV_NOVA_TENTATIVA_MS = 8000;
+let invTimerEnvio = null, invEnviando = false;
+
+function invMostrarEstado(falhou) {
+  const el = document.getElementById('inv-estado');
+  if (!el || !invAberto) return;
+  const mapa = invRascunho.ler(invAberto.id);
+  const n = Object.keys(mapa).length;
+  const invalidos = InvRascunho.prepararEnvio(mapa, numQtd).invalidos;
+  document.querySelectorAll('.inv-input').forEach(inp => { inp.style.borderColor = invalidos.includes(inp.dataset.pid) ? 'var(--red)' : 'var(--border)'; });
+  if (!n) { el.style.color = '#16a34a'; el.textContent = '✓ Tudo salvo'; return; }
+  if (invalidos.length === n) { el.style.color = 'var(--red)'; el.textContent = '⚠️ ' + n + ' número(s) que não entendi (em vermelho). Corrija para salvar.'; return; }
+  if (falhou) { el.style.color = '#e85d26'; el.textContent = '📱 ' + n + ' contagem(ns) guardada(s) neste aparelho. Envio sozinho quando a conexão voltar.'; return; }
+  el.style.color = 'var(--muted)'; el.textContent = '⏳ Salvando ' + n + '…';
+}
+
+function invDigitou(inp) {
+  if (!invAberto) return;
+  if (!invRascunho.guardar(invAberto.id, inp.dataset.pid, inp.value)) toast('Este aparelho não está guardando o rascunho. Clique em Salvar com frequência.', 'err');
+  invMostrarEstado(false);
+  clearTimeout(invTimerEnvio);
+  invTimerEnvio = setTimeout(invEnviarPendentes, INV_ESPERA_DIGITACAO_MS);
+}
+
+// Ao abrir a tela: o que ficou no aparelho sem confirmar volta para os campos e sobe.
+function invRestaurarRascunho() {
+  if (!invAberto) return;
+  const mapa = invRascunho.ler(invAberto.id);
+  for (const [pid, texto] of Object.entries(mapa)) {
+    const inp = document.querySelector('.inv-input[data-pid="' + CSS.escape(pid) + '"]');
+    if (inp) inp.value = texto;
+  }
+  invMostrarEstado(false);
+  if (Object.keys(mapa).length) invEnviarPendentes();
+}
+
+/** Envia o que está no rascunho. Devolve true quando não sobrou nada por enviar. */
+async function invEnviarPendentes() {
+  if (!invAberto) return true;
+  clearTimeout(invTimerEnvio);
+  if (invEnviando) { invTimerEnvio = setTimeout(invEnviarPendentes, 400); return false; }
+  const invId = invAberto.id;
+  const { itens, enviados, invalidos } = InvRascunho.prepararEnvio(invRascunho.ler(invId), numQtd);
+  if (!itens.length) { invMostrarEstado(false); return !invalidos.length; }
+  invEnviando = true;
+  try {
+    await apiPost('/api/inventario/contar', { inventario_id: invId, itens });
+    invRascunho.confirmar(invId, enviados);
+    const map = {}; itens.forEach(i => map[i.produto_id] = i.qtd_contada);
+    invItens.forEach(it => { if (it.produto_id in map) it.qtd_contada = map[it.produto_id]; });
+    invMostrarEstado(false);
+    const resto = Object.keys(invRascunho.ler(invId)).length;
+    if (resto > invalidos.length) invTimerEnvio = setTimeout(invEnviarPendentes, 300); // digitou durante o envio
+    return resto === 0;
+  } catch(e) {
+    invMostrarEstado(true);
+    if (String(e.message || '').includes('Sess')) toast('Sessão caiu. Entre de novo: sua contagem está guardada neste aparelho.', 'err');
+    else invTimerEnvio = setTimeout(invEnviarPendentes, INV_NOVA_TENTATIVA_MS);
+    return false;
+  } finally { invEnviando = false; }
+}
+window.addEventListener('online', () => { if (invAberto) invEnviarPendentes(); });
+
+async function invEnviarTudoAgora() {
+  for (let i = 0; i < 20 && invEnviando; i++) await new Promise(r => setTimeout(r, 150));
+  return invEnviarPendentes();
 }
 
 async function salvarContagem() {
   if (!invAberto) return;
-  try {
-    const itens = coletarContagem();
-    await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens });
-    const map = {}; itens.forEach(i => map[i.produto_id] = i.qtd_contada);
-    invItens.forEach(it => { if (it.produto_id in map) it.qtd_contada = map[it.produto_id]; });
-    toast('✓ Contagem salva','ok');
-    renderInventario();
-  } catch(e) { toast(e.message || 'Erro ao salvar', 'err'); }
+  if (await invEnviarTudoAgora()) { toast('✓ Contagem salva','ok'); return; }
+  toast('Ainda há contagem que não subiu. Ela está guardada neste aparelho.', 'err');
 }
 
 async function fecharInventario() {
   if (!invAberto) return;
   if (!await askConfirm('A contagem vira o estoque oficial (com ajustes rastreáveis). O que NÃO foi contado NÃO é zerado — fica pendente de verificação. Não dá pra desfazer.', { titulo: 'Fechar o inventário?' })) return;
   try {
-    await apiPost('/api/inventario/contar', { inventario_id: invAberto.id, itens: coletarContagem() });
+    // Antes de fechar, tudo que foi digitado aqui tem que estar no servidor. Não reenvia a tela inteira.
+    if (!await invEnviarTudoAgora()) { toast('Não fechei: ainda há contagem que não subiu ou número em vermelho. Confira a conexão e tente de novo.', 'err'); return; }
     let r = await apiPost('/api/inventario/fechar', { inventario_id: invAberto.id });
 
     // Sobra grande demais quase sempre e a virgula no lugar errado: esta tela nao tem
@@ -8200,6 +8263,7 @@ async function fecharInventario() {
       msg += '\n\nPeça verificação destes:\n' + r.suspeitos_lista.slice(0,10).map(s => '• ' + s.nome + ' (' + s.qtd_sistema + ' ' + s.unidade + (s.dias_parado!=null?', '+s.dias_parado+'d':'') + ')').join('\n');
     }
     avisar(msg, { titulo: 'Inventário fechado' });
+    invRascunho.limpar(invAberto.id);
     invAberto = null; invItens = [];
     loadInventario();
   } catch(e) { toast(e.message || 'Erro ao fechar', 'err'); }
